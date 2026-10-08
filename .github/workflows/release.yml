@@ -55,6 +55,8 @@ jobs:
         run: npm ci
       - name: 构建自带 Python AI 引擎（PyInstaller）
         run: npm run build:engine
+      - name: 构建前端与主进程（electron-vite，产出 out/）
+        run: npm run build
       - name: 打包 Windows 安装包
         run: npx electron-builder --win --x64 --publish never
       - uses: actions/upload-artifact@v4
@@ -81,6 +83,8 @@ jobs:
         run: npm ci
       - name: 构建自带 Python AI 引擎（PyInstaller, arm64）
         run: npm run build:engine
+      - name: 构建前端与主进程（electron-vite，产出 out/）
+        run: npm run build
       - name: 打包 macOS arm64 DMG
         run: npx electron-builder --mac --arm64 --publish never
       - uses: actions/upload-artifact@v4
@@ -107,6 +111,8 @@ jobs:
         run: npm ci
       - name: 构建自带 Python AI 引擎（PyInstaller, x64）
         run: npm run build:engine
+      - name: 构建前端与主进程（electron-vite，产出 out/）
+        run: npm run build
       - name: 打包 macOS x64 DMG
         run: npx electron-builder --mac --x64 --publish never
       - uses: actions/upload-artifact@v4
