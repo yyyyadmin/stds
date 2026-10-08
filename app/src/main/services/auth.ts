@@ -14,7 +14,8 @@ import type {
   MembershipInfo,
   MembershipLevel,
   PlanInfo,
-  SysConfig
+  SysConfig,
+  UpdateInfo
 } from '../../shared/ipc'
 
 const API_BASE = 'https://st.uxuuu.cn/api/client'
@@ -260,15 +261,20 @@ class AuthManager {
     return { ok: false, consumed: 0, remaining: null, insufficient: false, message: r.message || '积分扣费失败' }
   }
 
-  async checkUpdate(current: string): Promise<{ has_update: boolean; latest_version?: string; notes?: string; download_url?: string } | null> {
-    const platform = process.platform === 'darwin' ? 'mac' : 'windows'
+  async checkUpdate(): Promise<UpdateInfo | null> {
+    // 后台契约：platform=windows（Windows）/ mac（macOS Intel x64）/ arm（macOS Apple 芯片），自动判断
+    const platform = process.platform === 'darwin' ? (process.arch === 'arm64' ? 'arm' : 'mac') : 'windows'
+    const current = app.getVersion()
     const r = await request<Record<string, unknown>>(`check_update.php?platform=${platform}&current=${encodeURIComponent(current)}`, null)
     if (r.code === 200 && r.data) {
       return {
         has_update: !!r.data.has_update,
         latest_version: (r.data.latest_version as string) || undefined,
+        current_version: (r.data.current_version as string) || current,
         notes: (r.data.notes as string) || undefined,
-        download_url: (r.data.download_url as string) || undefined
+        download_url: (r.data.download_url as string) || undefined,
+        file_size_mb: Number(r.data.file_size_mb) || undefined,
+        platform
       }
     }
     return null

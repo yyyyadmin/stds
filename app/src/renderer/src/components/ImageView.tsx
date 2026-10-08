@@ -2,14 +2,94 @@
  * 多视图（9.2）：网格(160px 4-6列自适应) / 列表(80px) / 瀑布流(保留比例) / 大图(主区+底部缩略条)
  * 缩略图带 AI 标签 + 置信度分数；单击选中 / Shift 连选 / Ctrl 加选 / 双击放大预览
  */
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useStore, sortConf } from '../store'
+import JudgmentBar from './JudgmentBar'
 import type { ImageRecord } from '../../../shared/types'
 import { BAD_DIMENSIONS, CAT_REVIEW, CAT_TRASH, DIMENSION_LABELS, isBadDim } from '../../../shared/types'
 
 /** localfile 协议 URL（与 preload fileUrl 一致，渲染层直接同步构造） */
 export function toSrc(p: string): string {
   return 'localfile://x/' + encodeURIComponent(p)
+}
+
+/** 浏览器 <img> 无法直接渲染的格式（RAW/HEIC）：展示时回退到已生成的缩略图预览 */
+const UNDISPLAYABLE = new Set(['cr2', 'cr3', 'nef', 'arw', 'raf', 'orf', 'rw2', 'dng', 'heic', 'heif'])
+export function viewSrc(img: ImageRecord): string {
+  return UNDISPLAYABLE.has(img.format) && img.thumb ? toSrc(img.thumb) : toSrc(img.path)
+}
+
+/**
+ * 大图/预览用“原图”加载：普通格式直接加载原文件；RAW/HEIC 由主进程产出高清预览。
+ * 先用缩略图占位，原图就绪后无缝替换；仅当加载超过 300ms 才显示“加载原图中”提示（快则不打扰）。
+ */
+export function useBigSrc(img: ImageRecord | null): { src: string; loading: boolean } {
+  const [src, setSrc] = useState<string>(() => (img ? viewSrc(img) : ''))
+  const [loading, setLoading] = useState(false)
+  useEffect(() => {
+    if (!img) {
+      setSrc('')
+      setLoading(false)
+      return
+    }
+    let alive = true
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const fallback = viewSrc(img)
+    setSrc(fallback)
+    setLoading(false)
+    const target: Promise<string> = UNDISPLAYABLE.has(img.format)
+      ? window.api.bigPreview(img.id).then((p) => (p ? toSrc(p) : fallback)).catch(() => fallback)
+      : Promise.resolve(toSrc(img.path))
+    void target.then((t) => {
+      if (!alive) return
+      if (t === fallback) return
+      timer = setTimeout(() => alive && setLoading(true), 300)
+      const pre = new Image()
+      pre.onload = () => {
+        if (!alive) return
+        if (timer) clearTimeout(timer)
+        setSrc(t)
+        setLoading(false)
+      }
+      pre.onerror = () => {
+        if (!alive) return
+        if (timer) clearTimeout(timer)
+        setLoading(false)
+      }
+      pre.src = t
+    })
+    return () => {
+      alive = false
+      if (timer) clearTimeout(timer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [img?.id, img?.path, img?.thumb, img?.format])
+  return { src, loading }
+}
+
+/** 旋转加载指示器（大图原图加载提示） */
+export function Spinner(props: { label: string; dark?: boolean }): JSX.Element {
+  return (
+    <div className={'flex items-center gap-2 rounded-md px-3 py-1.5 text-xs shadow-lg ' + (props.dark ? 'bg-black/70 text-white' : 'bg-panel/95 border border-line text-fg2')}>
+      <span className="w-3.5 h-3.5 rounded-full border-2 border-current/30 border-t-current animate-spin inline-block shrink-0" />
+      {props.label}
+    </div>
+  )
+}
+
+/** 中部视图顶部的后台任务横幅：导入中 / 生成缩略图中 */
+function BusyBanner(): JSX.Element | null {
+  const imp = useStore((s) => s.importProgress)
+  const th = useStore((s) => s.thumbsProgress)
+  let label: string | null = null
+  if (imp) label = `导入中 ${imp.done}/${imp.total}，正在登记文件…`
+  else if (th) label = `生成缩略图中 ${th.done}/${th.total}…`
+  if (!label) return null
+  return (
+    <div className="sticky top-0 z-20 flex justify-center pb-2">
+      <Spinner label={label} />
+    </div>
+  )
 }
 
 function TagChips({ img }: { img: ImageRecord }): JSX.Element | null {
@@ -121,6 +201,7 @@ export default function ImageView(): JSX.Element {
   if (!sorted.length) {
     return (
       <div className="h-full flex flex-col items-center justify-center text-gray-600 gap-3">
+        <BusyBanner />
         <div className="text-5xl">📷</div>
         <div className="text-lg">拖入照片文件夹，或点击左上角「导入文件夹」</div>
         <div className="text-xs text-gray-700">
@@ -136,6 +217,7 @@ export default function ImageView(): JSX.Element {
   if (viewMode === 'grid') {
     return (
       <div className="h-full overflow-auto p-3 fade-in">
+        <BusyBanner />
         <div
           className="grid gap-3 justify-center"
           style={{ gridTemplateColumns: 'repeat(auto-fill, 160px)' }}
@@ -151,6 +233,7 @@ export default function ImageView(): JSX.Element {
   if (viewMode === 'list') {
     return (
       <div className="h-full overflow-auto p-2 fade-in">
+        <BusyBanner />
         <table className="w-full text-xs border-collapse">
           <thead>
             <tr className="text-gray-500 text-left sticky top-0 bg-base">
@@ -207,6 +290,7 @@ export default function ImageView(): JSX.Element {
   if (viewMode === 'masonry') {
     return (
       <div className="h-full overflow-auto p-3 fade-in">
+        <BusyBanner />
         <div style={{ columnGap: 12 }} className="columns-2 md:columns-3 xl:columns-4 2xl:columns-5">
           {sorted.map((img, i) => (
             <div key={img.id} className="mb-3 break-inside-avoid" style={{ breakInside: 'avoid' }}>
@@ -263,14 +347,23 @@ function LargeView({ sorted, click, dbl }: {
   const largeIndex = useStore((s) => s.largeIndex)
   const setLargeIndex = useStore((s) => s.setLargeIndex)
   const stepLarge = useStore((s) => s.stepLarge)
+  const selection = useStore((s) => s.selection)
+  const toggleSelect = useStore((s) => s.toggleSelect)
   const idx = Math.min(sorted.length - 1, Math.max(0, largeIndex))
   const cur = sorted[idx]
-  const stripRef = useRef<HTMLDivElement>(null)
+  const big = useBigSrc(cur ?? null)
   const activeThumbRef = useRef<HTMLDivElement>(null)
 
-  // 切换图片时把当前缩略图滚入可视区
+  // 进入大图视图即自动选中当前图（切回网格/关闭大图后选中态保留）
   useEffect(() => {
-    activeThumbRef.current?.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' })
+    const c = sorted[Math.min(sorted.length - 1, Math.max(0, useStore.getState().largeIndex))]
+    if (c) useStore.setState((s) => { const sel = new Set(s.selection); sel.add(c.id); return { selection: sel } })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // 切换图片时把当前缩略图滚入可视区（左侧竖排）
+  useEffect(() => {
+    activeThumbRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
   }, [idx])
 
   // 鼠标滚轮切换上/下一张（节流）
@@ -285,55 +378,90 @@ function LargeView({ sorted, click, dbl }: {
 
   return (
     <div className="h-full flex flex-col fade-in">
-      <div className="relative flex-1 min-h-0 flex items-center justify-center p-4" onWheel={onWheel} onDoubleClick={() => cur && dbl(cur)}>
-        {cur && (
-          <img src={toSrc(cur.path)} className="max-w-full max-h-full object-contain" alt={cur.filename} draggable={false} title={`${cur.filename}（双击放大）`} />
-        )}
-        {/* 左右切换按钮 */}
-        <button
-          className="absolute left-3 top-1/2 -translate-y-1/2 w-12 h-12 rounded-full bg-black/35 hover:bg-black/60 text-white text-3xl flex items-center justify-center transition-colors disabled:opacity-25 disabled:cursor-not-allowed"
-          onClick={() => stepLarge(-1)}
-          disabled={idx <= 0}
-          title="上一张（← / ↑ / 滚轮向上）"
+      <BusyBanner />
+      <div className="flex-1 min-h-0 flex">
+        {/* 左侧：竖排缩略图列表（加宽；滚轮只滚动列表，不切换图片/缩放） */}
+        <aside
+          className="w-36 shrink-0 overflow-y-auto flex flex-col gap-2 px-2 py-2 bg-panel/60 border-r border-line"
+          onWheel={(e) => e.stopPropagation()}
         >
-          ‹
-        </button>
-        <button
-          className="absolute right-3 top-1/2 -translate-y-1/2 w-12 h-12 rounded-full bg-black/35 hover:bg-black/60 text-white text-3xl flex items-center justify-center transition-colors disabled:opacity-25 disabled:cursor-not-allowed"
-          onClick={() => stepLarge(1)}
-          disabled={idx >= sorted.length - 1}
-          title="下一张（→ / ↓ / 滚轮向下）"
-        >
-          ›
-        </button>
-        <div className="absolute top-3 left-1/2 -translate-x-1/2 chip bg-black/55 text-white">
-          {idx + 1} / {sorted.length}
-        </div>
-        {cur && (
-          <div className="absolute bottom-3 left-1/2 -translate-x-1/2">
-            <TagChipsFixed img={cur} />
-          </div>
-        )}
-      </div>
-      <div ref={stripRef} className="shrink-0 h-24 overflow-x-auto flex gap-2 px-3 py-2 bg-panel/60 border-t border-line">
-        {sorted.map((img, i) => (
-          <div
-            key={img.id}
-            ref={i === idx ? activeThumbRef : undefined}
-            className={
-              'shrink-0 w-16 h-16 rounded overflow-hidden border cursor-pointer ' +
-              (i === idx ? 'border-brand ring-2 ring-brand/60' : 'border-line hover:border-fg3')
-            }
-            onClick={(e) => {
-              setLargeIndex(i)
-              click(i, e)
-            }}
-            onDoubleClick={() => dbl(img)}
+          {sorted.map((img, i) => (
+            <div
+              key={img.id}
+              ref={i === idx ? activeThumbRef : undefined}
+              className={
+                'shrink-0 aspect-square rounded overflow-hidden border cursor-pointer ' +
+                (i === idx ? 'border-brand ring-2 ring-brand/60' : 'border-line hover:border-fg3')
+              }
+              onClick={(e) => {
+                setLargeIndex(i)
+                click(i, e)
+              }}
+              onDoubleClick={() => dbl(img)}
+              title={img.filename}
+            >
+              <img src={img.thumb ? toSrc(img.thumb) : toSrc(img.path)} loading="lazy" className="w-full h-full object-cover" alt="" draggable={false} />
+            </div>
+          ))}
+        </aside>
+        {/* 主图区 */}
+        <div className="relative flex-1 min-h-0 flex items-center justify-center p-4" onWheel={onWheel} onDoubleClick={() => cur && dbl(cur)}>
+          {cur && (
+            <>
+              <img src={big.src} className="max-w-full max-h-full object-contain" alt={cur.filename} draggable={false} title={`${cur.filename}（双击放大）`} />
+              {big.loading && (
+                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                  <Spinner label="加载原图中…" dark />
+                </div>
+              )}
+            </>
+          )}
+          {/* 左右切换按钮（加大） */}
+          <button
+            className="absolute left-3 top-1/2 -translate-y-1/2 w-16 h-16 rounded-full bg-black/40 hover:bg-black/70 text-white text-5xl flex items-center justify-center transition-colors disabled:opacity-25 disabled:cursor-not-allowed"
+            onClick={() => stepLarge(-1)}
+            disabled={idx <= 0}
+            title="上一张（← / ↑ / 滚轮向上）"
           >
-            <img src={img.thumb ? toSrc(img.thumb) : toSrc(img.path)} loading="lazy" className="w-full h-full object-cover" alt="" draggable={false} />
+            ‹
+          </button>
+          <button
+            className="absolute right-3 top-1/2 -translate-y-1/2 w-16 h-16 rounded-full bg-black/40 hover:bg-black/70 text-white text-5xl flex items-center justify-center transition-colors disabled:opacity-25 disabled:cursor-not-allowed"
+            onClick={() => stepLarge(1)}
+            disabled={idx >= sorted.length - 1}
+            title="下一张（→ / ↓ / 滚轮向下）"
+          >
+            ›
+          </button>
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 chip bg-black/55 text-white">
+            {idx + 1} / {sorted.length}
           </div>
-        ))}
+          {/* 右上角：选中开关（与列表多选同步） */}
+          {cur && (
+            <button
+              className={
+                'absolute top-3 right-3 px-2.5 py-1.5 rounded-md text-xs border whitespace-nowrap transition-colors ' +
+                (selection.has(cur.id)
+                  ? 'bg-brand text-white border-brand'
+                  : 'bg-black/50 text-white/85 border-white/30 hover:border-white/80')
+              }
+              onClick={() => toggleSelect(cur.id)}
+              title="选中/取消选中（与列表多选同步）"
+            >
+              {selection.has(cur.id) ? '✓ 已选中' : '☐ 选中'}
+            </button>
+          )}
+        </div>
       </div>
+      {/* 底部工具栏：当前图标签 + 判定操作（与放大弹窗同一套） */}
+      {cur && (
+        <div className="shrink-0 border-t border-line bg-panel/90 px-3 py-2 flex items-center gap-3 flex-wrap">
+          <span className="text-xs text-fg3 truncate max-w-44" title={cur.filename}>{cur.filename}</span>
+          <TagChipsFixed img={cur} />
+          <div className="flex-1" />
+          <JudgmentBar img={cur} />
+        </div>
+      )}
     </div>
   )
 }

@@ -16,6 +16,23 @@ import {
 } from '../../../shared/types'
 import type { CategoryKey } from '../../../shared/types'
 
+/** 坏维度专用调色板：每个维度颜色固定且互不相同 */
+const BAD_DOT_COLORS: Record<string, string> = {
+  eyes_closed: '#ef4444', // 闭眼 · 红
+  eyes_side: '#f97316', // 斜眼 · 橙
+  face_ugly: '#ec4899', // 面部狰狞 · 粉
+  blur: '#8b55f6', // 画面模糊 · 紫罗兰
+  exposure: '#eab308', // 曝光异常 · 黄
+  half_head: '#14b8a6', // 半截头 · 青
+  duplicate: '#6366f1' // 重复/连拍 · 蓝紫
+}
+
+/** 状态点规则：库里没有图时一律置灰，有图才亮各自的颜色 */
+const DOT_OFF = '#4b5563'
+function lit(count: number | undefined, color: string): string {
+  return (count ?? 0) > 0 ? color : DOT_OFF
+}
+
 function Row(props: {
   label: string
   cat: CategoryKey | null
@@ -94,26 +111,25 @@ export default function Sidebar(): JSX.Element {
     setAdding(false)
   }
 
-  const badColor = 'var(--bad, #ef4444)'
   return (
     <aside className="w-56 shrink-0 bg-panel border-r border-line flex flex-col overflow-y-auto py-3 text-[13px]">
       <div className="px-4 pb-2 text-gray-500 text-xs">分类体系</div>
       <Row label="全部文件" cat={null} count={counts.all} />
-      <Row label="成品库（导出用）" cat={CAT_LIBRARY} count={counts[CAT_LIBRARY]} dot="#22c55e" tip="未被任何坏维度标记的图" />
-      <Row label="待确认" cat={CAT_REVIEW} count={counts[CAT_REVIEW]} dot="#eab308" tip="中置信度 0.7-0.9，需人工复核；默认不导出" />
+      <Row label="成品库（导出用）" cat={CAT_LIBRARY} count={counts[CAT_LIBRARY]} dot={lit(counts[CAT_LIBRARY], '#22c55e')} tip="未被任何坏维度标记的图" />
+      <Row label="待确认" cat={CAT_REVIEW} count={counts[CAT_REVIEW]} dot={lit(counts[CAT_REVIEW], '#eab308')} tip="中置信度 0.7-0.9，需人工复核；默认不导出" />
 
       <div className="px-4 pt-4 pb-1 text-gray-500 text-xs">坏维度（{PRECISION_TIERS.ref.label}参考）</div>
       {BAD_DIMENSIONS.map((d) => (
-        <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} dot={badColor} tip={`${DIMENSION_LABELS[d]} · 精度档位：${PRECISION_TIERS[dimTier(d)].tip}`} />
+        <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} dot={lit(counts[d], BAD_DOT_COLORS[d] ?? '#ef4444')} tip={`${DIMENSION_LABELS[d]} · 精度档位：${PRECISION_TIERS[dimTier(d)].tip}（灰 = 暂无图片）`} />
       ))}
 
       <div className="px-4 pt-4 pb-1 text-gray-500 text-xs">中性分类</div>
       {NEUTRAL_DIMENSIONS.map((d) => (
-        <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} dot="#3b82f6" tip={`${DIMENSION_LABELS[d]} · 仅作标签，不影响好坏判定`} />
+        <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} dot={lit(counts[d], '#3b82f6')} tip={`${DIMENSION_LABELS[d]} · 仅作标签，不影响好坏判定`} />
       ))}
 
       <div className="px-4 pt-4 pb-1 text-gray-500 text-xs">回收</div>
-      <Row label="垃圾桶" cat={CAT_TRASH} count={counts[CAT_TRASH]} dot="#6b7280" tip="用户手动标记的废片，永远不可能被导出" />
+      <Row label="垃圾桶" cat={CAT_TRASH} count={counts[CAT_TRASH]} dot={lit(counts[CAT_TRASH], '#e11d48')} tip="用户手动标记的废片，永远不可能被导出" />
 
       <div className="px-4 pt-4 pb-1 text-gray-500 text-xs flex items-center justify-between">
         <span>自定义分类</span>
@@ -143,7 +159,7 @@ export default function Sidebar(): JSX.Element {
           label={c.name}
           cat={`custom:${c.id}`}
           count={counts[`custom:${c.id}`]}
-          dot="#a855f7"
+          dot={lit(counts[`custom:${c.id}`], '#a855f7')}
           onDelete={() => void removeCustomCategory(c.id)}
         />
       ))}

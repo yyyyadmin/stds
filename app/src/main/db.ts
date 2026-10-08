@@ -240,10 +240,10 @@ export function setImageStatus(id: number, status: ImageRecord['status']): void 
   db.prepare('UPDATE images SET status = ? WHERE id = ?').run(status, id)
 }
 
-/** 后台回填：待处理（无缩略图且未判定不可解码）的图片 */
+/** 后台回填：待生成缩略图的记录（含 done 但缩略图丢失的；skip 项由 resetSkipped 转 pending 后一并重试） */
 export function listPendingThumbs(limit: number): Array<{ id: number; path: string }> {
   return db
-    .prepare(`SELECT id, path FROM images WHERE (thumb = '' OR thumb IS NULL) AND status = 'pending' ORDER BY id LIMIT ?`)
+    .prepare(`SELECT id, path FROM images WHERE (thumb = '' OR thumb IS NULL) AND status != 'skip' ORDER BY id LIMIT ?`)
     .all(limit) as Array<{ id: number; path: string }>
 }
 
@@ -254,6 +254,25 @@ export function setDimTag(id: number, dim: DimensionKey, tag: DimResult | null):
   if (tag) tags[dim] = tag
   else delete tags[dim]
   db.prepare('UPDATE images SET tags = ? WHERE id = ?').run(JSON.stringify(tags), id)
+}
+
+/** 清空图库：删除软件内全部图片记录与修正记录（磁盘上的原始照片文件不受影响），用于重新导入/重新开始 */
+export function clearLibrary(): number {
+  const n = (db.prepare('SELECT COUNT(*) c FROM images').get() as { c: number }).c
+  db.prepare('DELETE FROM corrections').run()
+  db.prepare('DELETE FROM images').run()
+  return n
+}
+
+/** 把“无法解码”的记录重置为待处理，供清除缓存时重试（新版 RAW 内嵌预览提取链对其生效） */
+export function resetSkipped(): number {
+  const info = db.prepare(`UPDATE images SET status = 'pending' WHERE status = 'skip'`).run()
+  return Number(info.changes) || 0
+}
+
+/** 待生成缩略图的总数（供回填进度条） */
+export function countPendingThumbs(): number {
+  return (db.prepare(`SELECT COUNT(*) c FROM images WHERE (thumb = '' OR thumb IS NULL) AND status != 'skip'`).get() as { c: number }).c
 }
 
 export function deleteImages(ids: number[]): void {
@@ -358,7 +377,15 @@ export function getSettings(): AppSettings {
       map[r.key] = r.value
     }
   }
-  return { ...DEFAULT_SETTINGS, ...(map as Partial<AppSettings>) }
+  const merged = { ...DEFAULT_SETTINGS, ...(map as Partial<AppSettings>) }
+  // 一次性迁移：旧版默认阈值 0.9/0.7 且从未主动选过检测程度 → 升级到新的默认“非常严格”档
+  if (map.highThreshold === 0.9 && map.midThreshold === 0.7 && map.strictness === undefined) {
+    merged.strictness = 'very'
+    merged.highThreshold = 0.8
+    merged.midThreshold = 0.55
+    saveSettings({ strictness: 'very', highThreshold: 0.8, midThreshold: 0.55 })
+  }
+  return merged
 }
 
 export function saveSettings(s: Partial<AppSettings>): void {

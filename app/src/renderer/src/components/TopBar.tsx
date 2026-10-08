@@ -46,6 +46,11 @@ export default function TopBar(): JSX.Element {
           停止
         </button>
       )}
+      {!running && (
+        <span className="chip bg-panel2 text-fg2 border border-line tabular-nums whitespace-nowrap" title="当前图库共导入多少张照片">
+          图库 {s.counts.all ?? 0} 张
+        </span>
+      )}
       {(running || (p && p.total > 0)) && (
         <div className="flex items-center gap-2 min-w-0 flex-1 max-w-md" title={p?.message || ''}>
           <div className="flex-1 h-2 bg-panel2 rounded-full overflow-hidden min-w-24">
@@ -66,9 +71,40 @@ export default function TopBar(): JSX.Element {
       {!running && p?.message && !p.total && <span className="text-xs text-gray-500 truncate flex-1">{p.message}</span>}
       <div className="flex-1" />
 
+      {/* 撤回移动：仅在有可撤回的移动操作时高亮可点 */}
+      <button
+        className={
+          'text-xs whitespace-nowrap ' +
+          (s.undoSnapshots.length === 0
+            ? 'btn border-line text-gray-500 opacity-50 cursor-not-allowed'
+            : 'btn')
+        }
+        title={
+          s.undoSnapshots.length === 0
+            ? '暂无可撤回的移动操作（移动过图片后这里会变亮）'
+            : `点击撤回最近一次移动（共 ${s.undoSnapshots.length} 步可依次撤回），会提示撤回几张、移回哪里`
+        }
+        onClick={() => void s.undoMove()}
+        disabled={s.undoSnapshots.length === 0}
+      >
+        ↩ 撤回{(() => {
+          const l = s.undoSnapshots[s.undoSnapshots.length - 1]
+          return l ? ` (${l.ids.length}张)` : ''
+        })()}
+      </button>
+
+      <button
+        className="btn-danger text-xs whitespace-nowrap"
+        title="删光软件里的导入记录与修正记录（不会删除磁盘上的原始照片），导入错了想重新来时用"
+        onClick={() => void s.clearLibraryAll()}
+        disabled={running || (s.counts.all ?? 0) === 0}
+      >
+        清空图库
+      </button>
+
       <select
         className="input text-xs w-24"
-        title="场景预设：导入时选择场景自动加载对应阈值"
+        title="场景预设：针对婚礼/棚拍/儿童摄影等场景，对部分维度的判定阈值做针对性微调（在设置→高级设置里可看具体覆盖项）"
         value={s.settings.scene}
         onChange={(e) => void s.saveSettings({ scene: e.target.value }, true)}
       >

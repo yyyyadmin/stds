@@ -4,13 +4,35 @@
  * 扫描进度事件流、一键修正、导出/设置对话框、视图模式快捷键 1-4
  */
 import { create } from 'zustand'
-import type { AppSettings, CategoryKey, ImageRecord } from '../../shared/types'
-import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, DIMENSION_LABELS, BAD_DIMENSIONS } from '../../shared/types'
+import type { AppSettings, CategoryKey, ImageRecord, DimensionKey } from '../../shared/types'
+import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, DIMENSION_LABELS, BAD_DIMENSIONS, isBadDim, guessMidDim } from '../../shared/types'
 import type { AuthState, BootstrapInfo, ConsumeResult, MoveRequest } from '../../shared/ipc'
 import type { ScanProgress } from '../../main/services/scanner'
 import type { ExportProgress } from '../../main/services/exporter'
 
 export type SortKey = 'default' | 'name' | 'name-desc' | 'conf-asc' | 'conf-desc' | 'time'
+
+/** 一次移动操作的撤回快照：保存移动前全部图片记录（分类/标签/categoryBy） */
+export interface UndoSnapshot {
+  ids: number[]
+  at: number
+  /** 本次移动的目标分类（提示用） */
+  toCat: CategoryKey
+  recs: ImageRecord[]
+}
+
+/** 分类键 → 中文名（撤回提示用） */
+function catLabel(cat: CategoryKey, customs: Array<{ id: number; name: string }>): string {
+  if (cat === CAT_LIBRARY) return '成品库'
+  if (cat === CAT_REVIEW) return '待确认'
+  if (cat === CAT_TRASH) return '垃圾桶'
+  const s = cat as string
+  if (s.startsWith('custom:')) {
+    const c = customs.find((x) => x.id === Number(s.slice(7)))
+    return c ? `自定义「${c.name}」` : '自定义分类'
+  }
+  return DIMENSION_LABELS[s as keyof typeof DIMENSION_LABELS] || s
+}
 
 interface StoreState {
   ready: boolean
@@ -27,6 +49,10 @@ interface StoreState {
   largeIndex: number
   scanProgress: ScanProgress | null
   importProgress: { done: number; total: number; current: string } | null
+  /** 后台缩略图回填进度（生成完毕后为 null） */
+  thumbsProgress: { done: number; total: number } | null
+  /** 移动撤回栈（栈顶 = 最近一次移动） */
+  undoSnapshots: UndoSnapshot[]
   exportProgress: ExportProgress | null
   showExport: boolean
   showSettings: boolean
@@ -35,6 +61,7 @@ interface StoreState {
   auth: AuthState
   toast: { msg: string; kind: 'info' | 'error' | 'success' } | null
   engineBusy: boolean
+  appVersion: string
 
   bootstrap(): Promise<void>
   setTheme(t: 'light' | 'dark'): Promise<void>
@@ -54,14 +81,18 @@ interface StoreState {
   setSort(k: SortKey): void
   setViewMode(m: 'grid' | 'list' | 'masonry' | 'large'): Promise<void>
   handleClickSelect(index: number, e: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }): void
+  toggleSelect(id: number): void
   selectAll(): void
   selectNone(): void
   invertSelection(): void
   selectByCurrentCategoryAll(): void
   moveTo(cat: CategoryKey, physical?: boolean): Promise<void>
+  moveIds(ids: number[], cat: CategoryKey): Promise<void>
+  undoMove(): Promise<void>
   moveToTrash(): Promise<void>
   restoreFromTrash(): Promise<void>
-  correct(req: { action: 'correct' | 'wrong'; origDim: string | null; origConfidence: number | null; targetCategory?: CategoryKey }): Promise<void>
+  correct(req: { imageId?: number; action: 'correct' | 'wrong'; origDim: string | null; origConfidence: number | null; targetCategory?: CategoryKey }): Promise<void>
+  correctBatch(ids: number[], action: 'correct' | 'wrong', targetCategory?: CategoryKey): Promise<void>
   openPreview(id: number): void
   closePreview(): void
   stepPreview(delta: number): void
@@ -70,9 +101,13 @@ interface StoreState {
   startScan(): Promise<void>
   stopScan(): Promise<void>
   rescanAll(): Promise<void>
+  clearLibraryAll(): Promise<void>
+  clearCacheAll(): Promise<void>
   saveSettings(patch: Partial<AppSettings>, reclassify?: boolean): Promise<void>
   addCustomCategory(name: string): Promise<void>
   removeCustomCategory(id: number): Promise<void>
+  pushUndo(ids: number[], toCat: CategoryKey): void
+  undoMove(): Promise<void>
   importPaths(paths: string[]): Promise<void>
   pickAndImport(): Promise<void>
   runExport(opts: Parameters<typeof window.api.exportRun>[0]): Promise<void>
@@ -99,8 +134,9 @@ function applyTheme(t: 'light' | 'dark'): void {
 export const useStore = create<StoreState>((set, get) => ({
   ready: false,
   settings: {
-    highThreshold: 0.9,
-    midThreshold: 0.7,
+    highThreshold: 0.8,
+    midThreshold: 0.55,
+    strictness: 'very',
     scene: 'default',
     enginePreference: 'auto',
     devicePreference: 'auto',
@@ -123,6 +159,8 @@ export const useStore = create<StoreState>((set, get) => ({
   largeIndex: 0,
   scanProgress: null,
   importProgress: null,
+  thumbsProgress: null,
+  undoSnapshots: [],
   exportProgress: null,
   showExport: false,
   showSettings: false,
@@ -131,12 +169,14 @@ export const useStore = create<StoreState>((set, get) => ({
   auth: { loggedIn: false, token: null, user: null },
   toast: null,
   engineBusy: false,
+  appVersion: '',
 
   async bootstrap() {
     const info: BootstrapInfo = await window.api.bootstrap()
     applyTheme(info.settings.theme)
     set({
       ready: true,
+      appVersion: info.version,
       settings: info.settings,
       counts: info.counts,
       customCategories: info.customCategories,
@@ -214,6 +254,7 @@ export const useStore = create<StoreState>((set, get) => ({
       void get().refreshCounts()
     })
     window.api.onImportProgress((p) => set({ importProgress: p }))
+    window.api.onThumbsProgress((p) => set({ thumbsProgress: p }))
     // 后台缩略图逐批就绪：节流刷新当前视图
     let thumbTimer: ReturnType<typeof setTimeout> | null = null
     window.api.onThumbsReady(() => {
@@ -288,10 +329,18 @@ export const useStore = create<StoreState>((set, get) => ({
       else sel.add(img.id)
       set({ anchorIndex: index })
     } else {
-      sel.clear()
-      sel.add(img.id)
+      // 单击即多选：每次点击都加入选中，再点一次取消（不清掉其他已选）
+      if (sel.has(img.id)) sel.delete(img.id)
+      else sel.add(img.id)
       set({ anchorIndex: index })
     }
+    set({ selection: sel })
+  },
+
+  toggleSelect(id) {
+    const sel = new Set(get().selection)
+    if (sel.has(id)) sel.delete(id)
+    else sel.add(id)
     set({ selection: sel })
   },
 
@@ -315,6 +364,7 @@ export const useStore = create<StoreState>((set, get) => ({
     const { selection } = get()
     if (!selection.size) return
     const ids = [...selection]
+    get().pushUndo(ids, cat)
     const req: MoveRequest = {
       ids,
       category: cat,
@@ -336,16 +386,57 @@ export const useStore = create<StoreState>((set, get) => ({
     // 从垃圾桶移出 = 判定错误修正，回成品库
     const { selection } = get()
     if (!selection.size) return
+    get().pushUndo([...selection], CAT_LIBRARY)
     await window.api.moveImages({ ids: [...selection], category: CAT_LIBRARY, clearBadTags: true })
     set({ selection: new Set() })
     await get().refreshImages()
     await get().refreshCounts()
   },
 
+  async moveIds(ids, cat) {
+    if (!ids.length) return
+    get().pushUndo(ids, cat)
+    await window.api.moveImages({
+      ids,
+      category: cat,
+      physical: false,
+      clearBadTags: cat === CAT_LIBRARY || !BAD_DIMENSIONS.includes(cat as never)
+    })
+    await get().refreshImages()
+    await get().refreshCounts()
+  },
+
+  /** 记录一次移动前的快照（撤回栈最多保留 50 步） */
+  pushUndo(ids: number[], toCat: CategoryKey) {
+    const { images } = get()
+    const recs = ids.map((id) => images.find((i) => i.id === id)).filter(Boolean) as ImageRecord[]
+    if (!recs.length) return
+    set((s) => ({ undoSnapshots: [...s.undoSnapshots, { ids, at: Date.now(), toCat, recs }].slice(-50) }))
+  },
+
+  /** 撤回最近一次移动：还原到移动前的分类 */
+  async undoMove() {
+    const { undoSnapshots } = get()
+    const last = undoSnapshots[undoSnapshots.length - 1]
+    if (!last) return
+    set({ undoSnapshots: undoSnapshots.slice(0, -1), selection: new Set() })
+    await window.api.restoreImages(last.recs)
+    await get().refreshImages()
+    await get().refreshCounts()
+    const fromCats = [...new Set(last.recs.map((r) => catLabel(r.category, get().customCategories)))]
+    set({
+      toast: {
+        msg: `已撤回：把 ${last.ids.length} 张从【${catLabel(last.toCat, get().customCategories)}】移回【${fromCats.join('、')}】`,
+        kind: 'success'
+      }
+    })
+  },
+
   async correct(req) {
     const { previewId, images } = get()
-    if (previewId == null) return
-    const rec = images.find((i) => i.id === previewId)
+    const targetId = req.imageId ?? previewId
+    if (targetId == null) return
+    const rec = images.find((i) => i.id === targetId)
     if (!rec) return
     const updated = await window.api.correctImage({
       imageId: rec.id,
@@ -366,6 +457,34 @@ export const useStore = create<StoreState>((set, get) => ({
       // 预览层不关闭，自动看下一张（5.2）
       get().stepPreview(1)
     }
+  },
+
+  /** 批量判定（多选工具条用）：对每张选中图按当前 AI 判定记录修正学习 */
+  async correctBatch(ids, action, targetCategory) {
+    const { images } = get()
+    let n = 0
+    for (const id of ids) {
+      const rec = images.find((i) => i.id === id)
+      if (!rec) continue
+      const prim = isBadDim(rec.category) ? (rec.category as DimensionKey) : null
+      const origDim = prim || (rec.category === CAT_REVIEW ? guessMidDim(rec.tags) : null)
+      const origConfidence = prim ? (rec.tags[prim]?.confidence ?? null) : null
+      try {
+        await window.api.correctImage({
+          imageId: rec.id,
+          action,
+          origDim,
+          origConfidence,
+          targetCategory
+        })
+        n++
+      } catch {
+        /* 单张失败不中断批量 */
+      }
+    }
+    await get().refreshImages()
+    await get().refreshCounts()
+    set({ toast: { msg: `已对 ${n} 张图记录判定${action === 'correct' ? '（正确）' : '（错误→修正）'}`, kind: 'success' } })
   },
 
   openPreview(id) {
@@ -422,6 +541,21 @@ export const useStore = create<StoreState>((set, get) => ({
     const r = await window.api.scanRescanAll()
     set({ engineBusy: false })
     if (!r.started) set({ toast: { msg: r.message, kind: 'info' } })
+  },
+
+  async clearLibraryAll() {
+    const n = get().counts.all ?? 0
+    if (!confirm(`确定清空图库？将删除软件内 ${n} 条图片记录与全部修正记录（磁盘上的原始照片文件不会被删除），之后可重新导入。`)) return
+    const r = await window.api.libraryClear()
+    set({ selection: new Set(), previewId: null, scanProgress: null, largeIndex: 0, undoSnapshots: [] })
+    await get().openCategory(get().activeCategory)
+    set({ toast: { msg: `已清空图库（原 ${r.cleared} 张），可重新导入照片了`, kind: 'success' } })
+  },
+
+  async clearCacheAll() {
+    const r = await window.api.cacheClear()
+    set({ toast: { msg: `缓存已清除：${r.retried} 张解码失败项自动重试，缩略图后台重建中`, kind: 'info' } })
+    setTimeout(() => void get().refreshImages(), 1500)
   },
 
   async saveSettings(patch, reclassify = false) {

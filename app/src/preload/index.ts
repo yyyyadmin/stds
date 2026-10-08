@@ -3,7 +3,7 @@
  */
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import { CH, type RendererApi, type CorrectRequest, type MoveRequest, type AuthState, type ConsumeResult } from '../shared/ipc'
-import type { AppSettings } from '../shared/types'
+import type { AppSettings, ImageRecord } from '../shared/types'
 import type { ExportOptions } from '../main/services/exporter'
 
 function sub<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -21,6 +21,7 @@ const api: RendererApi = {
   getImage: (id: number) => ipcRenderer.invoke(CH.imageGet, id),
   categoryCounts: () => ipcRenderer.invoke(CH.categoryCounts),
   moveImages: (req: MoveRequest) => ipcRenderer.invoke(CH.moveImages, req),
+  restoreImages: (snapshots: ImageRecord[]) => ipcRenderer.invoke(CH.restoreImages, snapshots),
   deleteImages: (ids: number[]) => ipcRenderer.invoke(CH.deleteImages, ids),
   correctImage: (req: CorrectRequest) => ipcRenderer.invoke(CH.correctImage, req),
   customList: () => ipcRenderer.invoke(CH.customList),
@@ -51,8 +52,13 @@ const api: RendererApi = {
   orderCreate: (t: string, id: string) => ipcRenderer.invoke(CH.orderCreate, t, id),
   sysConfig: () => ipcRenderer.invoke(CH.sysConfig),
   consumePoints: (count: number) => ipcRenderer.invoke(CH.consumePoints, count),
-  checkUpdate: (current: string) => ipcRenderer.invoke(CH.checkUpdate, current),
+  checkUpdate: () => ipcRenderer.invoke(CH.checkUpdate),
+  openExternal: (url: string) => ipcRenderer.invoke(CH.openExternal, url),
+  libraryClear: () => ipcRenderer.invoke(CH.libraryClear),
+  cacheClear: () => ipcRenderer.invoke(CH.cacheClear),
+  bigPreview: (id: number) => ipcRenderer.invoke(CH.bigPreview, id),
   onScanProgress: (cb) => sub(CH.E_scanProgress, cb),
+  onThumbsProgress: (cb) => sub<{ done: number; total: number } | null>(CH.E_thumbsProgress, cb),
   onScanImage: (cb) => sub(CH.E_scanImage, cb),
   onImportProgress: (cb) => sub(CH.E_importProgress, cb),
   onExportProgress: (cb) => sub(CH.E_exportProgress, cb),

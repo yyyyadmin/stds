@@ -13,23 +13,28 @@ import {
   CAT_REVIEW,
   CAT_TRASH,
   DIMENSION_LABELS,
-  NEUTRAL_DIMENSIONS
+  NEUTRAL_DIMENSIONS,
+  type CategoryKey
 } from '../../../shared/types'
 
 export default function SelectionBar(): JSX.Element | null {
   const selection = useStore((s) => s.selection)
   const activeCategory = useStore((s) => s.activeCategory)
   const viewMode = useStore((s) => s.viewMode)
+  const previewId = useStore((s) => s.previewId)
   const images = useStore((s) => s.images)
   const customCategories = useStore((s) => s.customCategories)
   const moveTo = useStore((s) => s.moveTo)
+  const correctBatch = useStore((s) => s.correctBatch)
   const selectNone = useStore((s) => s.selectNone)
   const invertSelection = useStore((s) => s.invertSelection)
   const selectAll = useStore((s) => s.selectAll)
   const [panel, setPanel] = useState(false)
+  const [wrongPanel, setWrongPanel] = useState(false)
   const [physical, setPhysical] = useState(false)
 
-  if (!selection.size) return null
+  // 大图模式／放大弹窗自带判定工具栏，不重复显示此浮动条
+  if (!selection.size || viewMode === 'large' || previewId != null) return null
   const n = selection.size
   const inTrash = activeCategory === CAT_TRASH
   const inReview = activeCategory === CAT_REVIEW
@@ -49,8 +54,8 @@ export default function SelectionBar(): JSX.Element | null {
   })()
 
   return (
-    <div className={'fixed bottom-0 left-0 right-0 z-30 flex justify-center pointer-events-none ' + (viewMode === 'large' ? 'pb-28' : 'pb-3')}>
-      <div className="pointer-events-auto bg-panel border border-line rounded-xl shadow-2xl px-3 py-2 flex items-center gap-2 text-sm fade-in max-w-[92vw]">
+    <div className={'fixed bottom-0 left-0 right-0 z-30 flex justify-center pointer-events-none pb-3'}>
+      <div className="relative pointer-events-auto bg-panel border border-line rounded-xl shadow-2xl px-3 py-2 flex items-center gap-2 text-sm fade-in max-w-[92vw] flex-wrap">
         <span className="text-fg whitespace-nowrap">
           已选中 <b className="text-brand tabular-nums">{n}</b> 张
         </span>
@@ -98,7 +103,7 @@ export default function SelectionBar(): JSX.Element | null {
             移动到 ▾
           </button>
           {panel && (
-            <div className="absolute bottom-full mb-2 right-0 w-80 max-h-80 overflow-y-auto bg-panel border border-line rounded-lg shadow-2xl p-2 grid grid-cols-3 gap-1 text-xs fade-in">
+            <div className="absolute bottom-full mb-2 right-0 w-80 max-h-[70vh] overflow-y-auto bg-panel border border-line rounded-lg shadow-2xl p-2 grid grid-cols-3 gap-1 text-xs fade-in z-40">
               <button className="btn col-span-3 bg-good/20 border-good/50 text-good" onClick={() => { void moveTo(CAT_LIBRARY, physical); setPanel(false) }}>
                 成品库（正常图片）
               </button>
@@ -132,6 +137,40 @@ export default function SelectionBar(): JSX.Element | null {
             </div>
           )}
         </div>
+
+        {/* 批量判定：对选中所有图记录修正学习（与大图/弹窗 JudgmentBar 同源） */}
+        <button
+          className="btn bg-emerald-700 hover:bg-emerald-600 text-white border-transparent text-xs whitespace-nowrap"
+          onClick={() => void correctBatch([...selection], 'correct')}
+          title="确认选中图的 AI 判定正确，记录用于阈值微调"
+        >
+          此判定正确
+        </button>
+        <button
+          className={'btn bg-orange-700 hover:bg-orange-600 text-white border-transparent text-xs whitespace-nowrap ' + (wrongPanel ? 'ring-2 ring-orange-400' : '')}
+          onClick={() => setWrongPanel((v) => !v)}
+          title="选中图的判定有误 → 选择正确归属，记入修正学习"
+        >
+          此判定错误 ▾
+        </button>
+        {wrongPanel && (
+          <div className="absolute bottom-full right-0 mb-2 bg-panel border border-line rounded-lg p-3 w-96 max-h-[70vh] overflow-y-auto text-xs fade-in shadow-xl z-40">
+            <div className="text-fg3 mb-2">选择正确归属（对全部 {n} 张记入修正学习并移动）：</div>
+            <div className="grid grid-cols-3 gap-1.5">
+              <button className="btn col-span-3 bg-good/20 border-good/50 text-good py-1 text-xs" onClick={() => { void correctBatch([...selection], 'wrong', CAT_LIBRARY); setWrongPanel(false) }}>成品库（正常图片）</button>
+              <button className="btn col-span-3 bg-warn/20 border-warn/50 text-warn py-1 text-xs" onClick={() => { void correctBatch([...selection], 'wrong', CAT_REVIEW); setWrongPanel(false) }}>移入待确认</button>
+              <div className="col-span-3 text-fg3 mt-1">坏维度 / 中性分类：</div>
+              {[...BAD_DIMENSIONS, ...NEUTRAL_DIMENSIONS].map((d) => (
+                <button key={d} className="btn py-1 text-xs" onClick={() => { void correctBatch([...selection], 'wrong', d as CategoryKey); setWrongPanel(false) }}>{DIMENSION_LABELS[d]}</button>
+              ))}
+              {customCategories.map((c) => (
+                <button key={c.id} className="btn py-1 text-xs" onClick={() => { void correctBatch([...selection], 'wrong', `custom:${c.id}`); setWrongPanel(false) }}>{c.name}</button>
+              ))}
+              <button className="btn py-1 text-xs col-span-3 bg-bad/20 border-bad/50 text-bad" onClick={() => { void correctBatch([...selection], 'wrong', CAT_TRASH); setWrongPanel(false) }}>移入垃圾桶（永不导出）</button>
+            </div>
+            <button className="btn-ghost text-fg3 text-xs mt-2" onClick={() => setWrongPanel(false)}>✕ 收起</button>
+          </div>
+        )}
 
         <span className="text-[10px] text-gray-600 hidden md:inline whitespace-nowrap">
           也可直接拖拽缩略图到左侧分类

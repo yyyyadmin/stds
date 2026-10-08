@@ -21,15 +21,18 @@ import {
   getSettings,
   saveSettings,
   setDimTag,
-  getDb
+  getDb,
+  clearLibrary,
+  resetSkipped
 } from './db'
 import { scanner, reclassifyAll, type ScanProgress } from './services/scanner'
 import { exporter, type ExportOptions } from './services/exporter'
-import { importPaths, backfillThumbnails } from './services/importer'
+import { importPaths, backfillThumbnails, clearThumbCache } from './services/importer'
+import { ensureBigPreview } from './services/big'
 import { authManager } from './services/auth'
 import { engineManager } from './engine'
 import { autoTune, resetTuned, TUNE_MIN_CORRECTIONS } from './services/tuner'
-import { CAT_LIBRARY, CAT_TRASH, isBadDim, BAD_DIMENSIONS, type DimensionKey } from '../shared/types'
+import { CAT_LIBRARY, CAT_TRASH, isBadDim, BAD_DIMENSIONS, type DimensionKey, type ImageRecord } from '../shared/types'
 
 export function registerIpc(win: BrowserWindow): void {
   const send = (ch: string, ...args: unknown[]) => {
@@ -81,8 +84,8 @@ export function registerIpc(win: BrowserWindow): void {
     importCancelRequested = false
     const r = await importPaths(paths, (p) => send(CH.E_importProgress, p), () => importCancelRequested)
     importCancelRequested = false
-    // 秒入库后，后台低优先级回填缩略图，逐批通知渲染层刷新
-    void backfillThumbnails((n) => send(CH.E_thumbsReady, n))
+    // 秒入库后，后台低优先级回填缩略图，逐批通知渲染层刷新 + 上报进度
+    runBackfill(send)
     return r
   })
   ipcMain.handle(CH.importCancel, () => {
@@ -137,6 +140,15 @@ export function registerIpc(win: BrowserWindow): void {
       })
     }
     send(CH.E_scanProgress, scanner.getProgress())
+  })
+
+  // 撤回移动：按移动前快照原样还原分类/标签/categoryBy（不做反向推断）
+  ipcMain.handle(CH.restoreImages, (_e, snapshots: ImageRecord[]) => {
+    for (const rec of snapshots) {
+      getDb()
+        .prepare('UPDATE images SET category = ?, category_by = ?, tags = ?, status = ? WHERE id = ?')
+        .run(rec.category, rec.categoryBy, JSON.stringify(rec.tags), rec.status, rec.id)
+    }
   })
 
   ipcMain.handle(CH.deleteImages, (_e, ids: number[]) => deleteImages(ids))
@@ -247,5 +259,38 @@ export function registerIpc(win: BrowserWindow): void {
     send(CH.E_authChanged, authManager.state(), r)
     return r
   })
-  ipcMain.handle(CH.checkUpdate, (_e, current: string) => authManager.checkUpdate(current))
+  ipcMain.handle(CH.checkUpdate, () => authManager.checkUpdate())
+  ipcMain.handle(CH.openExternal, (_e, url: string) => {
+    // 仅允许 http/https，防止任意协议注入
+    if (/^https?:\/\//i.test(url)) return shell.openExternal(url)
+    return undefined
+  })
+
+  // ---------- 数据管理（问题一/四） ----------
+  ipcMain.handle(CH.libraryClear, () => {
+    const cleared = clearLibrary()
+    clearThumbCache()
+    return { cleared }
+  })
+  ipcMain.handle(CH.cacheClear, () => {
+    const retried = resetSkipped() // “无法解码”项重置为待处理，重试新版 RAW 内嵌预览提取
+    const files = clearThumbCache()
+    getDb().prepare(`UPDATE images SET thumb = ''`).run() // 缓存文件已删，清空指向以触发全量重建
+    runBackfill(send)
+    return { retried, files }
+  })
+
+  // RAW/HEIC 大图原图高清预览（普通格式直接用原文件，不走这里）
+  ipcMain.handle(CH.bigPreview, (_e, id: number) => ensureBigPreview(id))
+
+  // 启动时补齐上次遗留的缩略图（幂等；无遗留则不产生 UI 进度）
+  runBackfill(send)
+}
+
+/** 启动后台缩略图回填：逐批通知刷新 + 进度事件（完成时发 null 清除 UI） */
+function runBackfill(send: (channel: string, ...args: unknown[]) => void): void {
+  void backfillThumbnails(
+    (n) => send(CH.E_thumbsReady, n),
+    (p) => send(CH.E_thumbsProgress, p.total > 0 && p.done < p.total ? p : null)
+  )
 }

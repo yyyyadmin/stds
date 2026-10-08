@@ -74,6 +74,7 @@ export const CH = {
   imageGet: 'images:get',
   categoryCounts: 'images:counts',
   moveImages: 'images:move',
+  restoreImages: 'images:restore', // 撤回移动：按快照还原分类与标签
   deleteImages: 'images:delete',
   correctImage: 'images:correct', // 一键修正（判定正确/错误）
   customList: 'custom:list',
@@ -107,14 +108,30 @@ export const CH = {
   sysConfig: 'member:config',
   consumePoints: 'member:consume',
   checkUpdate: 'app:check-update',
+  openExternal: 'app:open-external',
+  libraryClear: 'data:library-clear',
+  cacheClear: 'data:cache-clear',
+  bigPreview: 'img:big-preview',
   // 主 -> 渲染（send 事件）
   E_scanProgress: 'evt:scan-progress',
+  E_thumbsProgress: 'evt:thumbs-progress',
   E_scanImage: 'evt:scan-image',
   E_importProgress: 'evt:import-progress',
   E_exportProgress: 'evt:export-progress',
   E_thumbsReady: 'evt:thumbs-ready',
   E_authChanged: 'evt:auth-changed'
 } as const
+
+/** 软件更新（check_update.php，后台按 platform 返回对应平台安装包：windows=Windows，mac=macOS Intel，arm=macOS Apple 芯片） */
+export interface UpdateInfo {
+  has_update: boolean
+  latest_version?: string
+  current_version?: string
+  notes?: string
+  download_url?: string
+  file_size_mb?: number
+  platform: 'windows' | 'mac' | 'arm'
+}
 
 export interface BootstrapInfo {
   settings: AppSettings
@@ -152,6 +169,8 @@ export interface RendererApi {
   getImage(id: number): Promise<ImageRecord | null>
   categoryCounts(): Promise<Record<string, number>>
   moveImages(req: MoveRequest): Promise<void>
+  /** 撤回移动：把移动前的整批快照（分类/标签/categoryBy）原样还原 */
+  restoreImages(snapshots: ImageRecord[]): Promise<void>
   deleteImages(ids: number[]): Promise<void>
   correctImage(req: CorrectRequest): Promise<ImageRecord | null>
   customList(): Promise<Array<{ id: number; name: string }>>
@@ -183,9 +202,15 @@ export interface RendererApi {
   orderCreate(productType: string, productId: string): Promise<{ ok: boolean; message: string; order_no?: string; amount?: string }>
   sysConfig(): Promise<SysConfig>
   consumePoints(imageCount: number): Promise<ConsumeResult>
-  checkUpdate(current: string): Promise<{ has_update: boolean; latest_version?: string; notes?: string; download_url?: string } | null>
+  checkUpdate(): Promise<UpdateInfo | null>
+  openExternal(url: string): Promise<void>
+  libraryClear(): Promise<{ cleared: number }>
+  cacheClear(): Promise<{ retried: number; files: number }>
+  /** RAW/HEIC 等浏览器不可渲染格式的原图高清预览（主进程生成，返回磁盘路径；普通格式不需要调用） */
+  bigPreview(id: number): Promise<string | null>
   // 事件订阅
   onScanProgress(cb: (p: ScanProgress) => void): () => void
+  onThumbsProgress(cb: (p: { done: number; total: number } | null) => void): () => void
   onScanImage(cb: (img: ImageRecord) => void): () => void
   onImportProgress(cb: (p: ImportProgress) => void): () => void
   onExportProgress(cb: (p: ExportProgress) => void): () => void

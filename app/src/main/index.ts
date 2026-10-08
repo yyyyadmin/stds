@@ -81,6 +81,19 @@ if (!gotLock) {
       return { action: 'deny' }
     })
 
+    // 白屏防护一：禁止任何页面外导航（拖拽图片/文件落到窗口时 Chromium 会尝试导航到该文件 → 整页白屏）
+    const selfUrl = () => process.env.ELECTRON_RENDERER_URL ?? pathToFileURL(join(__dirname, '../renderer/index.html')).href
+    mainWindow.webContents.on('will-navigate', (e, url) => {
+      if (url !== selfUrl()) e.preventDefault()
+    })
+    // 白屏防护二：渲染进程崩溃（GPU 等）时自动恢复，不依赖用户重启
+    mainWindow.webContents.on('render-process-gone', (_e, details) => {
+      console.error('[renderer] process gone:', details.reason, details.exitCode, '- auto reloading')
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reload()
+      }, 300)
+    })
+
     if (process.env.ELECTRON_RENDERER_URL) {
       mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
     } else {

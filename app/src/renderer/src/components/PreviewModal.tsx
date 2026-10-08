@@ -7,14 +7,12 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
-import { toSrc } from './ImageView'
+import { toSrc, useBigSrc, Spinner } from './ImageView'
+import JudgmentBar from './JudgmentBar'
 import {
-  BAD_DIMENSIONS,
-  CAT_LIBRARY,
   CAT_REVIEW,
   CAT_TRASH,
   DIMENSION_LABELS,
-  NEUTRAL_DIMENSIONS,
   isBadDim,
   type DimensionKey
 } from '../../../shared/types'
@@ -30,22 +28,29 @@ export default function PreviewModal(): JSX.Element | null {
   const images = useStore((s) => s.images)
   const closePreview = useStore((s) => s.closePreview)
   const stepPreview = useStore((s) => s.stepPreview)
-  const correct = useStore((s) => s.correct)
-  const customCategories = useStore((s) => s.customCategories)
+  const openPreview = useStore((s) => s.openPreview)
   const settings = useStore((s) => s.settings)
+  const selection = useStore((s) => s.selection)
+  const toggleSelect = useStore((s) => s.toggleSelect)
 
   const img = useMemo(() => images.find((i) => i.id === previewId) || null, [images, previewId])
+  // 原图加载：缩略图占位 → 原图就绪无缝替换；超 300ms 才提示
+  const big = useBigSrc(img)
 
   const [t, setT] = useState<Transform>({ scale: 1, x: 0, y: 0 })
   const [showOverlay, setShowOverlay] = useState(true)
   const [compareOriginal, setCompareOriginal] = useState(true)
-  const [wrongPanel, setWrongPanel] = useState(false)
   const dragging = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const activeThumbRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     setT({ scale: 1, x: 0, y: 0 })
-    setWrongPanel(false)
+  }, [previewId])
+
+  // 切换图片时左侧缩略列表跟随滚动
+  useEffect(() => {
+    activeThumbRef.current?.scrollIntoView({ block: 'nearest' })
   }, [previewId])
 
   const reset = useCallback(() => setT({ scale: 1, x: 0, y: 0 }), [])
@@ -96,22 +101,12 @@ export default function PreviewModal(): JSX.Element | null {
   // 当前 AI 判定（预览层底部显示）
   const primaryDim = isBadDim(img.category) ? (img.category as DimensionKey) : null
   const primaryTag = primaryDim ? img.tags[primaryDim] : null
-  const src = compareOriginal ? toSrc(img.path) : img.thumb ? toSrc(img.thumb) : toSrc(img.path)
+  const src = compareOriginal ? big.src : img.thumb ? toSrc(img.thumb) : big.src
   const faces = (img.details?.faces || []).filter((f) => f && f.box)
 
   const tagEntries = Object.entries(img.tags || {})
     .filter(([, v]) => v && v.level !== 'low') // 低置信度不标记（4.1）
     .sort((a, b) => (b[1]?.confidence || 0) - (a[1]?.confidence || 0))
-
-  const doCorrect = (action: 'correct' | 'wrong', target?: string): void => {
-    void correct({
-      action,
-      origDim: primaryDim || (img.category === CAT_REVIEW ? guessMidDim(img.tags) : null),
-      origConfidence: primaryTag?.confidence ?? midConf(img.tags),
-      targetCategory: target
-    })
-    setWrongPanel(false)
-  }
 
   return (
     <div className="fixed inset-0 z-40 bg-black/85 flex flex-col fade-in" onClick={(e) => e.target === e.currentTarget && closePreview()}>
@@ -120,6 +115,21 @@ export default function PreviewModal(): JSX.Element | null {
         <span className="text-white/80 truncate max-w-[40vw]" title={img.path}>{img.filename}</span>
         <span className="text-xs text-white/50">{img.width}×{img.height} · {img.format?.toUpperCase()}</span>
         <div className="flex-1" />
+        {/* 选中开关：与列表选择完全同步（同一 selection 状态） */}
+        {img && (
+          <button
+            className={
+              'px-2.5 py-1 rounded-md text-xs border whitespace-nowrap transition-colors ' +
+              (selection.has(img.id)
+                ? 'bg-brand text-white border-brand'
+                : 'bg-white/10 text-white/80 border-white/25 hover:border-white/70')
+            }
+            onClick={() => toggleSelect(img.id)}
+            title="选中/取消选中（与列表多选同步）"
+          >
+            {selection.has(img.id) ? '✓ 已选中' : '☐ 选中'}
+          </button>
+        )}
         <button className="btn-ghost text-white/80" onClick={() => setCompareOriginal(!compareOriginal)} title="原图/缓存对比切换">
           {compareOriginal ? '原图' : '缓存图'}
         </button>
@@ -144,6 +154,11 @@ export default function PreviewModal(): JSX.Element | null {
         >
           <div className="relative">
             <img src={src} className="max-w-[90vw] max-h-[68vh] object-contain select-none pointer-events-none" alt={img.filename} draggable={false} />
+            {compareOriginal && big.loading && (
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                <Spinner label="加载原图中…" dark />
+              </div>
+            )}
             {showOverlay && faces.length > 0 && (
               <svg
                 className="absolute inset-0 w-full h-full pointer-events-none"
@@ -165,13 +180,33 @@ export default function PreviewModal(): JSX.Element | null {
             )}
           </div>
         </div>
+        {/* 左侧：竖排缩略图列表（加宽；滚轮只滚动列表，不触发右侧原图缩放） */}
+        <aside
+          className="absolute left-2 top-2 bottom-2 w-32 z-10 overflow-y-auto flex flex-col gap-1.5 bg-black/45 rounded-lg p-2"
+          onWheel={(e) => e.stopPropagation()}
+        >
+          {images.map((im) => (
+            <div
+              key={im.id}
+              ref={im.id === img.id ? activeThumbRef : undefined}
+              className={
+                'shrink-0 aspect-square rounded overflow-hidden border cursor-pointer ' +
+                (im.id === img.id ? 'border-brand ring-2 ring-brand/60' : 'border-white/20 hover:border-white/70')
+              }
+              onClick={() => openPreview(im.id)}
+              title={im.filename}
+            >
+              <img src={im.thumb ? toSrc(im.thumb) : toSrc(im.path)} loading="lazy" className="w-full h-full object-cover" alt="" draggable={false} />
+            </div>
+          ))}
+        </aside>
         {/* 缩放倍率 */}
         {Math.abs(t.scale - 1) > 0.01 && (
-          <span className="absolute top-2 left-2 chip bg-black/60 text-white/80">{(t.scale * 100).toFixed(0)}%</span>
+          <span className="absolute top-2 left-40 chip bg-black/60 text-white/80">{(t.scale * 100).toFixed(0)}%</span>
         )}
-        {/* 左右切换 */}
-        <button className="absolute left-2 top-1/2 -translate-y-1/2 text-3xl text-white/40 hover:text-white px-2" onClick={() => stepPreview(-1)} title="上一张（←）">‹</button>
-        <button className="absolute right-2 top-1/2 -translate-y-1/2 text-3xl text-white/40 hover:text-white px-2" onClick={() => stepPreview(1)} title="下一张（→）">›</button>
+        {/* 左右切换（加大，避开左侧列表） */}
+        <button className="absolute left-40 top-1/2 -translate-y-1/2 w-16 h-16 rounded-full bg-black/40 hover:bg-black/70 text-white text-5xl flex items-center justify-center transition-colors" onClick={() => stepPreview(-1)} title="上一张（←）">‹</button>
+        <button className="absolute right-3 top-1/2 -translate-y-1/2 w-16 h-16 rounded-full bg-black/40 hover:bg-black/70 text-white text-5xl flex items-center justify-center transition-colors" onClick={() => stepPreview(1)} title="下一张（→）">›</button>
       </div>
 
       {/* 底部：AI 判定依据 + 一键修正 */}
@@ -207,44 +242,9 @@ export default function PreviewModal(): JSX.Element | null {
             </div>
           </div>
 
-          {/* 一键修正区（5.1） */}
+          {/* 判定操作工具栏（5.1）：垃圾桶 / 移动到 / 判定正确 / 判定错误 */}
           <div className="shrink-0 flex flex-col gap-2 items-end">
-            {!wrongPanel ? (
-              <div className="flex gap-2">
-                <button className="btn bg-emerald-700 hover:bg-emerald-600 text-white border-transparent" onClick={() => doCorrect('correct')}>
-                  此判定正确
-                </button>
-                <button className="btn bg-orange-700 hover:bg-orange-600 text-white border-transparent" onClick={() => setWrongPanel(true)}>
-                  此判定错误
-                </button>
-              </div>
-            ) : (
-              <div className="bg-panel border border-line rounded-lg p-3 w-96 max-h-52 overflow-y-auto fade-in">
-                <div className="text-xs text-gray-400 mb-2">选择正确归属（5.3 判定错误处理）：</div>
-                <div className="grid grid-cols-3 gap-1.5 text-xs">
-                  <button className="btn col-span-3 bg-good/20 border-good/50 text-good" onClick={() => doCorrect('wrong', CAT_LIBRARY)}>
-                    移动到正常图片（进入成品库）
-                  </button>
-                  <button className="btn col-span-3 bg-warn/20 border-warn/50 text-warn" onClick={() => doCorrect('wrong', CAT_REVIEW)}>
-                    移入待确认
-                  </button>
-                  <div className="col-span-3 text-gray-500 mt-1">移到坏维度 / 中性分类：</div>
-                  {[...BAD_DIMENSIONS, ...NEUTRAL_DIMENSIONS].map((d) => (
-                    <button key={d} className="btn py-1 text-xs" onClick={() => doCorrect('wrong', d)}>
-                      {DIMENSION_LABELS[d]}
-                    </button>
-                  ))}
-                  {customCategories.map((c) => (
-                    <button key={c.id} className="btn py-1 text-xs" onClick={() => doCorrect('wrong', `custom:${c.id}`)}>
-                      {c.name}
-                    </button>
-                  ))}
-                  <button className="btn py-1 text-xs col-span-3 bg-bad/20 border-bad/50 text-bad" onClick={() => doCorrect('wrong', CAT_TRASH)}>
-                    移入垃圾桶（永不导出）
-                  </button>
-                </div>
-              </div>
-            )}
+            <JudgmentBar img={img} />
             <div className="text-[10px] text-white/40">
               高亮阈值：高 &gt;{settings.highThreshold} · 中 {settings.midThreshold}-{settings.highThreshold} · 低 &lt;{settings.midThreshold}
             </div>
@@ -255,18 +255,4 @@ export default function PreviewModal(): JSX.Element | null {
   )
 }
 
-/** 待确认图的中置信度标签猜测（用于修正记录原判定维度） */
-function guessMidDim(tags: Record<string, { level: string } | undefined>): string | null {
-  for (const [d, t] of Object.entries(tags)) {
-    if (t && t.level === 'mid' && isBadDim(d)) return d
-  }
-  for (const [d, t] of Object.entries(tags)) {
-    if (t && t.level === 'mid') return d
-  }
-  return null
-}
-
-function midConf(tags: Record<string, { level: string; confidence: number } | undefined>): number | null {
-  const dim = guessMidDim(tags)
-  return dim ? (tags[dim]?.confidence ?? null) : null
-}
+/** 待确认图的中置信度标签猜测已提到 shared/types（guessMidDim/midConf，JudgmentBar 共用） */

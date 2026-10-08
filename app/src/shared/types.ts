@@ -53,6 +53,23 @@ export const DIMENSION_LABELS: Record<DimensionKey, string> = {
   black_white: '黑白照'
 }
 
+/** 待确认图猜测存在中置信度的坏维度（修正记录用） */
+export function guessMidDim(tags: Record<string, { level: string } | undefined>): string | null {
+  for (const [d, t] of Object.entries(tags)) {
+    if (t && t.level === 'mid' && isBadDim(d)) return d
+  }
+  for (const [d, t] of Object.entries(tags)) {
+    if (t && t.level === 'mid') return d
+  }
+  return null
+}
+
+/** 中置信度维度的置信度（修正记录原判定置信度） */
+export function midConf(tags: Record<string, { level: string; confidence: number } | undefined>): number | null {
+  const dim = guessMidDim(tags)
+  return dim ? (tags[dim]?.confidence ?? null) : null
+}
+
 /**
  * 代价偏向（第二章表格）：
  * recall  = 偏向召回，阈值调低（宁可多标让用户复核）
@@ -84,11 +101,28 @@ export const CAT_TRASH = 'trash' // 垃圾桶（永不导出）
 /** 分类桶 key = 'library' | 'review' | 'trash' | DimensionKey | 'custom:<id>' */
 export type CategoryKey = string
 
-/** 置信度分级（第四章）默认阈值，用户可在设置中调整 */
-export const DEFAULT_HIGH_THRESHOLD = 0.9
-export const DEFAULT_MID_THRESHOLD = 0.7
+/** 置信度分级（第四章）默认阈值；缺省为“非常严格”档，用户可在设置中调整 */
+export const DEFAULT_HIGH_THRESHOLD = 0.8
+export const DEFAULT_MID_THRESHOLD = 0.55
 
 export type ConfidenceLevel = 'high' | 'mid' | 'low'
+
+/** 检测程度：阈值组合的快捷档位（custom = 用户手动拉过滑条） */
+export type Strictness = 'normal' | 'strict' | 'very' | 'custom'
+
+export const STRICTNESS_PRESETS: Array<{ key: Exclude<Strictness, 'custom'>; label: string; high: number; mid: number; tip: string }> = [
+  { key: 'normal', label: '一般', high: 0.93, mid: 0.8, tip: '只抓把握很大的问题，误报最少，绝大多数照片直接留在成品库' },
+  { key: 'strict', label: '严格', high: 0.9, mid: 0.7, tip: '平衡模式：中等把握的可疑照片进待确认' },
+  { key: 'very', label: '非常严格', high: 0.8, mid: 0.55, tip: '稍有可疑就被拉进待确认/坏维度，待确认数量最多，宁多勿漏' }
+]
+
+/** 从当前阈值反推档位（浮点容差 0.005） */
+export function deriveStrictness(high: number, mid: number): Strictness {
+  for (const p of STRICTNESS_PRESETS) {
+    if (Math.abs(p.high - high) < 0.005 && Math.abs(p.mid - mid) < 0.005) return p.key
+  }
+  return 'custom'
+}
 
 export function levelOf(confidence: number, high: number, mid: number): ConfidenceLevel {
   if (confidence > high) return 'high'
@@ -185,6 +219,8 @@ export const SCENE_PRESETS: ScenePreset[] = [
 export interface AppSettings {
   highThreshold: number
   midThreshold: number
+  /** 检测程度快捷档（一般/严格/非常严格，手动拉滑条后为 custom） */
+  strictness: Strictness
   scene: string
   enginePreference: 'auto' | 'python' | 'node' // AI 引擎偏好
   devicePreference: 'auto' | 'cpu' | 'cuda' // GPU/CPU 模式
@@ -202,6 +238,7 @@ export interface AppSettings {
 export const DEFAULT_SETTINGS: AppSettings = {
   highThreshold: DEFAULT_HIGH_THRESHOLD,
   midThreshold: DEFAULT_MID_THRESHOLD,
+  strictness: 'very',
   scene: 'default',
   enginePreference: 'auto',
   devicePreference: 'auto',
