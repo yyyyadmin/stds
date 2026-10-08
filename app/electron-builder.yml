@@ -1,0 +1,85 @@
+# electron-builder 双平台打包配置（第十三章：Windows NSIS + macOS DMG）
+appId: com.screener.master
+productName: 筛图大师
+copyright: Copyright © 2026 筛图大师团队
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - out/**
+  - package.json
+
+extraResources:
+  # 应用图标（运行时窗口图标 / 关于页）
+  - from: build
+    to: build
+    filter:
+      - 'icon.ico'
+      - 'icon.png'
+  # SQLite WASM（免原生编译，双平台通用）
+  - from: node_modules/sql.js/dist/sql-wasm.wasm
+    to: sql-wasm.wasm
+  # Python AI 引擎源码（用户自行 pip 安装依赖后可用；或配合 build-engine 脚本打成 exe 后替换此目录）
+  - from: ../ai-engine
+    to: ai-engine
+    filter:
+      - '**/*.py'
+      - 'requirements.txt'
+      - 'models/README*'
+
+asar: true
+npmRebuild: false
+
+# 原生模块（sharp / sql.js 均为预构建，无需编译工具链）
+# sharp 平台分包由 optionalDependencies 机制在目标平台安装时自动匹配
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: build/icon.ico
+  artifactName: ScreenerMaster-${version}-Setup.${ext}
+  extraResources:
+    # 自带 Python AI 引擎（PyInstaller 产物，需先 `npm run build:engine`）——免安装即完整 12 维
+    - from: engine-dist/win
+      to: engine
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 筛图大师
+  installerLanguages: [zh_CN, en_US]
+  deleteAppDataOnUninstall: false
+
+mac:
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+  icon: build/icon.png
+  category: public.app-category.photography
+  artifactName: ScreenerMaster-${version}-${arch}.${ext}
+  # 未签名分发时首次打开需右键"打开"；如购买 Apple 开发者证书，设置 CSC_IDENTITY_AUTO_DISCOVERY 或 notarize 即可
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  extraResources:
+    # 自带 Python AI 引擎（mac 需在 macOS 上 `npm run build:engine` 生成，含 arm64/x64）
+    - from: engine-dist/mac
+      to: engine
+
+dmg:
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+linux:
+  target: [AppImage, deb]
+  category: Graphics

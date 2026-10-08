@@ -1,0 +1,142 @@
+# 筛图大师 · 三平台自动打包（需求⑨：每台设备自带 Python，免安装即完整 12 维）
+#
+# 触发方式：
+#   1) 推送到 GitHub 后，在 Actions 页面点「Run workflow」手动触发（workflow_dispatch）
+#   2) 打 tag（如 v2.0.0）并推送，自动构建并发布到 GitHub Release
+#
+# 云端会用真实的 Windows / macOS(arm64) / macOS(x64) 三种 runner，各自：
+#   - 装 Python 3.11 → npm run build:engine（PyInstaller 产出自带引擎 engine-dist/<平台>）
+#   - npm run build（electron-vite）
+#   - electron-builder 出对应平台安装包（extraResources 已把 engine-dist 打进 resources/engine）
+# 产物：ScreenerMaster-*-Setup.exe（Win）、ScreenerMaster-*-arm64.dmg、ScreenerMaster-*-x64.dmg
+name: Build Release Installers
+
+on:
+  workflow_dispatch:
+    inputs:
+      buildWin:
+        description: '构建 Windows 安装包'
+        type: boolean
+        default: true
+      buildMacArm:
+        description: '构建 macOS arm64 (Apple Silicon)'
+        type: boolean
+        default: true
+      buildMacX64:
+        description: '构建 macOS x64 (Intel)'
+        type: boolean
+        default: true
+  push:
+    tags:
+      - 'v*'
+
+env:
+  # 未配置 Apple/Windows 代码签名证书：跳过签名（未签名分发时首次打开需右键“打开”）
+  CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+defaults:
+  run:
+    working-directory: app
+
+jobs:
+  # ---------------- Windows ----------------
+  windows:
+    if: ${{ github.event_name == 'push' || inputs.buildWin }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 安装 JS 依赖
+        run: npm ci
+      - name: 构建自带 Python AI 引擎（PyInstaller）
+        run: npm run build:engine
+      - name: 打包 Windows 安装包
+        run: npx electron-builder --win --x64 --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-x64
+          path: |
+            app/release/*.exe
+            app/release/*.exe.blockmap
+          if-no-files-found: error
+
+  # ---------------- macOS Apple Silicon (arm64) ----------------
+  macos-arm64:
+    if: ${{ github.event_name == 'push' || inputs.buildMacArm }}
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 安装 JS 依赖
+        run: npm ci
+      - name: 构建自带 Python AI 引擎（PyInstaller, arm64）
+        run: npm run build:engine
+      - name: 打包 macOS arm64 DMG
+        run: npx electron-builder --mac --arm64 --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-arm64
+          path: |
+            app/release/*arm64.dmg
+            app/release/*.dmg.blockmap
+          if-no-files-found: error
+
+  # ---------------- macOS Intel (x64) ----------------
+  macos-x64:
+    if: ${{ github.event_name == 'push' || inputs.buildMacX64 }}
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 安装 JS 依赖
+        run: npm ci
+      - name: 构建自带 Python AI 引擎（PyInstaller, x64）
+        run: npm run build:engine
+      - name: 打包 macOS x64 DMG
+        run: npx electron-builder --mac --x64 --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-x64
+          path: |
+            app/release/*-x64.dmg
+            app/release/*.dmg.blockmap
+          if-no-files-found: error
+
+  # ---------------- 汇总发布 GitHub Release（仅打 tag 时） ----------------
+  release:
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    needs: [windows, macos-arm64, macos-x64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: 发布到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          body: |
+            筛图大师安装包（三平台）。均已内置完整 12 维 Python AI 引擎，用户机无需安装 Python。
+            - Windows：ScreenerMaster-*-Setup.exe
+            - macOS Apple 芯片：ScreenerMaster-*-arm64.dmg
+            - macOS Intel：ScreenerMaster-*-x64.dmg
+            未做代码签名：首次打开请右键 →“打开”。

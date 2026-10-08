@@ -1,0 +1,34 @@
+# 依赖与构建产物（CI 会重新生成，不入库）
+node_modules/
+app/out/
+app/dist/
+app/release/
+
+# 自带引擎产物目录：由 CI 的 npm run build:engine 生成，不入库
+# （本地占位 .gitkeep 也一并忽略；electron-builder 打包前由 build:engine 重建该目录）
+app/engine-dist/win/*
+app/engine-dist/mac/*
+!app/engine-dist/README.md
+
+# Python 引擎构建中间产物
+ai-engine/build/
+ai-engine/dist/
+ai-engine/.venv-engine/
+__pycache__/
+*.py[cod]
+
+# ONNX 权重体积大，默认不入库（用户/CI 按 models/README.md 放入）
+ai-engine/models/*.onnx
+
+# 数据库/缓存/日志
+*.sqlite
+*.db
+*.log
+logs/
+
+# 系统/编辑器杂项
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.local

@@ -1,0 +1,153 @@
+/**
+ * 侧栏分类树（第三章 3.1）：全部文件 / 成品库 / 待确认 / 7 坏维度 / 5 中性 / 垃圾桶 / 自定义分类
+ * 支持把选中的图片拖拽到分类完成多选移动（9.3）
+ */
+import { useState } from 'react'
+import { useStore } from '../store'
+import {
+  BAD_DIMENSIONS,
+  CAT_LIBRARY,
+  CAT_REVIEW,
+  CAT_TRASH,
+  DIMENSION_LABELS,
+  NEUTRAL_DIMENSIONS,
+  PRECISION_TIERS,
+  dimTier
+} from '../../../shared/types'
+import type { CategoryKey } from '../../../shared/types'
+
+function Row(props: {
+  label: string
+  cat: CategoryKey | null
+  count?: number
+  dot?: string
+  tip?: string
+  onDelete?: () => void
+}): JSX.Element {
+  const active = useStore((s) => s.activeCategory === props.cat)
+  const openCategory = useStore((s) => s.openCategory)
+  const selection = useStore((s) => s.selection)
+  const moveTo = useStore((s) => s.moveTo)
+  const [hover, setHover] = useState(false)
+  return (
+    <div
+      className={
+        'group flex items-center gap-2 px-3 py-1.5 mx-2 rounded-md cursor-pointer text-sm transition-colors ' +
+        (active ? 'bg-brand/15 text-brand border border-brand/40 font-semibold' : 'text-fg2 hover:bg-panel2 border border-transparent') +
+        (hover ? ' ring-1 ring-brand' : '')
+      }
+      onClick={() => void openCategory(props.cat)}
+      onDragOver={(e) => {
+        if (props.cat && e.dataTransfer.types.includes('application/x-image-ids')) {
+          e.preventDefault()
+          setHover(true)
+        }
+      }}
+      onDragLeave={() => setHover(false)}
+      onDrop={(e) => {
+        e.preventDefault()
+        setHover(false)
+        if (!props.cat) return
+        const raw = e.dataTransfer.getData('application/x-image-ids')
+        if (raw) {
+          const ids = JSON.parse(raw) as number[]
+          if (ids.length) void moveTo(props.cat, false)
+        }
+      }}
+      title={
+        props.tip +
+        (props.cat && selection.size > 1 ? `（拖入将移动当前选中的 ${selection.size} 张）` : '')
+      }
+    >
+      {props.dot && <span className="w-2 h-2 rounded-full shrink-0" style={{ background: props.dot }} />}
+      <span className="flex-1 truncate">{props.label}</span>
+      {props.count != null && (
+        <span className={'text-xs tabular-nums ' + (active ? 'text-blue-200' : 'text-gray-500')}>{props.count}</span>
+      )}
+      {props.onDelete && (
+        <button
+          className="hidden group-hover:block text-gray-500 hover:text-red-400 px-1"
+          onClick={(e) => {
+            e.stopPropagation()
+            props.onDelete?.()
+          }}
+          title="删除分类（其中图片回归成品库）"
+        >
+          ×
+        </button>
+      )}
+    </div>
+  )
+}
+
+export default function Sidebar(): JSX.Element {
+  const counts = useStore((s) => s.counts)
+  const customCategories = useStore((s) => s.customCategories)
+  const addCustomCategory = useStore((s) => s.addCustomCategory)
+  const removeCustomCategory = useStore((s) => s.removeCustomCategory)
+  const [adding, setAdding] = useState(false)
+  const [name, setName] = useState('')
+
+  const submitAdd = (): void => {
+    if (name.trim()) void addCustomCategory(name.trim())
+    setName('')
+    setAdding(false)
+  }
+
+  const badColor = 'var(--bad, #ef4444)'
+  return (
+    <aside className="w-56 shrink-0 bg-panel border-r border-line flex flex-col overflow-y-auto py-3 text-[13px]">
+      <div className="px-4 pb-2 text-gray-500 text-xs">分类体系</div>
+      <Row label="全部文件" cat={null} count={counts.all} />
+      <Row label="成品库（导出用）" cat={CAT_LIBRARY} count={counts[CAT_LIBRARY]} dot="#22c55e" tip="未被任何坏维度标记的图" />
+      <Row label="待确认" cat={CAT_REVIEW} count={counts[CAT_REVIEW]} dot="#eab308" tip="中置信度 0.7-0.9，需人工复核；默认不导出" />
+
+      <div className="px-4 pt-4 pb-1 text-gray-500 text-xs">坏维度（{PRECISION_TIERS.ref.label}参考）</div>
+      {BAD_DIMENSIONS.map((d) => (
+        <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} dot={badColor} tip={`${DIMENSION_LABELS[d]} · 精度档位：${PRECISION_TIERS[dimTier(d)].tip}`} />
+      ))}
+
+      <div className="px-4 pt-4 pb-1 text-gray-500 text-xs">中性分类</div>
+      {NEUTRAL_DIMENSIONS.map((d) => (
+        <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} dot="#3b82f6" tip={`${DIMENSION_LABELS[d]} · 仅作标签，不影响好坏判定`} />
+      ))}
+
+      <div className="px-4 pt-4 pb-1 text-gray-500 text-xs">回收</div>
+      <Row label="垃圾桶" cat={CAT_TRASH} count={counts[CAT_TRASH]} dot="#6b7280" tip="用户手动标记的废片，永远不可能被导出" />
+
+      <div className="px-4 pt-4 pb-1 text-gray-500 text-xs flex items-center justify-between">
+        <span>自定义分类</span>
+        <button className="text-brand hover:text-blue-400" onClick={() => setAdding(true)} title="新建自定义分类">
+          ＋
+        </button>
+      </div>
+      {adding && (
+        <div className="mx-3 mb-1 flex gap-1">
+          <input
+            autoFocus
+            className="input flex-1 min-w-0 text-xs"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') submitAdd()
+              if (e.key === 'Escape') setAdding(false)
+            }}
+            onBlur={submitAdd}
+            placeholder="分类名称"
+          />
+        </div>
+      )}
+      {customCategories.map((c) => (
+        <Row
+          key={c.id}
+          label={c.name}
+          cat={`custom:${c.id}`}
+          count={counts[`custom:${c.id}`]}
+          dot="#a855f7"
+          onDelete={() => void removeCustomCategory(c.id)}
+        />
+      ))}
+      <div className="flex-1" />
+    </aside>
+  )
+}

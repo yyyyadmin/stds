@@ -1,0 +1,161 @@
+/**
+ * 顶栏：导入 / 开始筛选（进度条+百分比+已处理数量+停止）/ 视图切换 / 排序 / 导出 / 设置
+ * 引擎状态徽章（Python 完整引擎 / Node 基础引擎 / GPU-CPU）
+ */
+import { useStore } from '../store'
+import type { SortKey } from '../store'
+
+const VIEWS: Array<{ m: 'grid' | 'list' | 'masonry' | 'large'; label: string; key: string }> = [
+  { m: 'grid', label: '网格', key: '1' },
+  { m: 'list', label: '列表', key: '2' },
+  { m: 'masonry', label: '瀑布流', key: '3' },
+  { m: 'large', label: '大图', key: '4' }
+]
+
+export default function TopBar(): JSX.Element {
+  const s = useStore()
+  const p = s.scanProgress
+  const running = p?.running
+  const pct = p && p.total > 0 ? Math.round((p.done / p.total) * 100) : 0
+  const sceneLabels: Record<string, string> = { wedding: '婚礼跟拍', studio: '棚拍写真', kids: '儿童抓拍', default: '通用' }
+  const auth = s.auth
+  const user = auth.user
+  const isMember = auth.loggedIn && (user?.membership.level || 'free') !== 'free' && !user?.membership.is_expired
+  const balance = user?.points.balance ?? 0
+  const dark = s.settings.theme === 'dark'
+
+  return (
+    <header className="shrink-0 bg-panel border-b border-line px-3 py-2 flex items-center gap-2 text-sm">
+      <div className="font-bold text-fg mr-1 whitespace-nowrap">
+        筛图大师 <span className="text-[10px] font-normal text-fg3">v2.0</span>
+      </div>
+      <button className="btn" onClick={() => void s.pickAndImport()} disabled={!!s.importProgress}>
+        {s.importProgress ? `导入中 ${s.importProgress.done}/${s.importProgress.total}` : '导入文件夹'}
+      </button>
+      {s.importProgress && (
+        <button className="btn-danger" title="取消导入（已导入的记录保留）" onClick={() => void window.api.importCancel()}>
+          取消导入
+        </button>
+      )}
+      {!running ? (
+        <button className="btn-primary" onClick={() => void s.startScan()} disabled={s.engineBusy}>
+          {s.engineBusy ? '引擎启动中…' : '开始筛选'}
+        </button>
+      ) : (
+        <button className="btn-danger" onClick={() => void s.stopScan()}>
+          停止
+        </button>
+      )}
+      {(running || (p && p.total > 0)) && (
+        <div className="flex items-center gap-2 min-w-0 flex-1 max-w-md" title={p?.message || ''}>
+          <div className="flex-1 h-2 bg-panel2 rounded-full overflow-hidden min-w-24">
+            <div
+              className={
+                'h-full rounded-full transition-all duration-300 ' +
+                (p?.phase === 'done' ? 'bg-good' : p?.phase === 'stopped' || p?.phase === 'error' ? 'bg-bad' : 'bg-brand')
+              }
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+          <span className="text-xs text-gray-400 whitespace-nowrap tabular-nums">
+            {p?.phase === 'dup-cluster' ? '重复聚类中…' : `${pct}% · ${p?.done || 0}/${p?.total || 0}`}
+          </span>
+          <span className="text-xs text-gray-500 truncate hidden lg:inline">{p?.current}</span>
+        </div>
+      )}
+      {!running && p?.message && !p.total && <span className="text-xs text-gray-500 truncate flex-1">{p.message}</span>}
+      <div className="flex-1" />
+
+      <select
+        className="input text-xs w-24"
+        title="场景预设：导入时选择场景自动加载对应阈值"
+        value={s.settings.scene}
+        onChange={(e) => void s.saveSettings({ scene: e.target.value }, true)}
+      >
+        {Object.entries(sceneLabels).map(([k, v]) => (
+          <option key={k} value={k}>
+            {v}
+          </option>
+        ))}
+      </select>
+
+      <select
+        className="input text-xs w-28"
+        title="排序方式"
+        value={s.sortKey}
+        onChange={(e) => s.setSort(e.target.value as SortKey)}
+      >
+        <option value="default">默认顺序</option>
+        <option value="name">按文件名</option>
+        <option value="name-desc">文件名倒序</option>
+        <option value="conf-asc">置信度↑（优先抽查）</option>
+        <option value="conf-desc">置信度↓</option>
+        <option value="time">按导入时间</option>
+      </select>
+
+      <div className="flex items-center border border-line rounded-md overflow-hidden">
+        {VIEWS.map((v) => (
+          <button
+            key={v.m}
+            className={
+              'px-2 py-1 text-xs border-r border-line last:border-r-0 transition-colors ' +
+              (s.viewMode === v.m ? 'bg-brand text-white' : 'bg-panel2 hover:bg-line text-gray-400')
+            }
+            onClick={() => void s.setViewMode(v.m)}
+            title={`${v.label}视图（快捷键 ${v.key}）`}
+          >
+            {v.label}
+          </button>
+        ))}
+      </div>
+
+      <button className="btn" onClick={() => void useStore.setState({ showExport: true })} disabled={s.counts.all === 0}>
+        导出交付
+      </button>
+      <button className="btn-ghost" title="设置" onClick={() => void useStore.setState({ showSettings: true })}>
+        ⚙️
+      </button>
+      <span
+        className={
+          'chip ' +
+          (s.engineBusy
+            ? 'bg-yellow-900/60 text-yellow-200'
+            : 'bg-emerald-900/60 text-emerald-200')
+        }
+        title={s.toast?.msg || 'AI 引擎状态：' + (s.engineBusy ? '启动中' : '引擎已在后台就绪（见设置）')}
+      >
+        <span className={'w-1.5 h-1.5 rounded-full ' + (s.engineBusy ? 'bg-yellow-400' : 'bg-emerald-400')} />
+        AI引擎
+      </span>
+
+      {/* 主题切换 */}
+      <button
+        className="btn-ghost text-fg2"
+        title={dark ? '切换到简白主题' : '切换到暗夜主题'}
+        onClick={() => void s.toggleTheme()}
+      >
+        {dark ? '☀️' : '🌙'}
+      </button>
+
+      {/* 积分 / 会员 / 登录入口 */}
+      {auth.loggedIn ? (
+        <button
+          className={
+            'chip cursor-pointer border ' +
+            (isMember ? 'bg-warn/15 text-warn border-warn/40' : 'bg-panel2 text-fg2 border-line')
+          }
+          title="打开会员中心：查看积分、开通会员"
+          onClick={() => useStore.setState({ showMember: true })}
+        >
+          {isMember && <span>👑</span>}
+          <span className="tabular-nums">{balance}</span>
+          <span className="opacity-70">积分</span>
+        </button>
+      ) : (
+        <button className="btn-primary text-xs py-1" onClick={() => useStore.setState({ showLogin: true })}>
+          登录 / 注册
+        </button>
+      )}
+    </header>
+  )
+}

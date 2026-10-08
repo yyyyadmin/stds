@@ -1,0 +1,104 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 主题变量：默认简白（light），[data-theme="dark"] 切暗夜 */
+:root {
+  --c-base: 245 246 248;
+  --c-panel: 255 255 255;
+  --c-panel2: 241 243 246;
+  --c-line: 224 227 233;
+  --c-fg: 28 33 44;
+  --c-fg2: 88 97 114;
+  --c-fg3: 133 141 156;
+  --c-brand: 37 99 235;
+  --c-warn: 202 138 4;
+  --c-bad: 220 38 38;
+  --c-good: 22 163 74;
+  --c-scroll: 203 208 216;
+}
+[data-theme='dark'] {
+  --c-base: 17 19 24;
+  --c-panel: 24 27 34;
+  --c-panel2: 31 35 44;
+  --c-line: 43 48 59;
+  --c-fg: 213 218 227;
+  --c-fg2: 148 163 184;
+  --c-fg3: 100 116 139;
+  --c-brand: 59 130 246;
+  --c-warn: 234 179 8;
+  --c-bad: 239 68 68;
+  --c-good: 34 197 94;
+  --c-scroll: 52 58 70;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overscroll-behavior: none;
+}
+
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', Roboto, sans-serif;
+  color: rgb(var(--c-fg));
+  background: rgb(var(--c-base));
+  user-select: none;
+  -webkit-user-select: none;
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--c-scroll)) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgb(var(--c-scroll));
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@layer components {
+  .btn {
+    @apply px-3 py-1.5 rounded-md text-sm bg-panel2 hover:bg-line border border-line transition-colors cursor-pointer;
+  }
+  .btn-primary {
+    @apply px-3 py-1.5 rounded-md text-sm bg-brand hover:bg-blue-600 text-white transition-colors cursor-pointer border border-transparent;
+  }
+  .btn-danger {
+    @apply px-3 py-1.5 rounded-md text-sm bg-bad hover:bg-red-600 text-white transition-colors cursor-pointer border border-transparent;
+  }
+  .btn-ghost {
+    @apply px-2 py-1 rounded-md text-sm hover:bg-panel2 transition-colors cursor-pointer border border-transparent;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] leading-none font-medium;
+  }
+  .input {
+    @apply bg-panel2 border border-line rounded-md px-2 py-1 text-sm outline-none focus:border-brand;
+  }
+}
+
+.fade-in {
+  animation: fadeIn 0.18s ease-out;
+}
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
