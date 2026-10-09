@@ -106,3 +106,17 @@ body {
     transform: none;
   }
 }
+
+/* 不确定进度条（引擎启动/重复聚类等无确定百分比的阶段）：一段左右往复滑动 */
+@keyframes indeterminate {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(420%);
+  }
+}
+.bar-indeterminate {
+  animation:
+    indeterminate 1.15s ease-in-out infinite;
+}
