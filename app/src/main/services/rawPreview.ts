@@ -29,7 +29,7 @@ export function isRawPath(p: string): boolean {
 export function extractEmbeddedJpeg(file: string): Buffer | null {
   let buf: Buffer
   try {
-    buf = readFileSync(file)
+    buf = wholeFile(file)
   } catch {
     return null
   }
@@ -63,7 +63,37 @@ async function sharpCanDecode(src: string): Promise<boolean> {
 }
 
 // 单进程内同一张图会被模糊/曝光/哈希多次加载，缓存最近一次提取结果避免重复读大文件
-let cache: { path: string; buf: Buffer } | null = null
+let cache: { path: string; buf: Buffer; angle: number } | null = null
+let fileBufCache: { path: string; buf: Buffer } | null = null
+
+function wholeFile(path: string): Buffer {
+  if (fileBufCache && fileBufCache.path === path) return fileBufCache.buf
+  const b = readFileSync(path)
+  fileBufCache = { path, buf: b }
+  return b
+}
+
+/** EXIF Orientation(0x0112) -> 需顺时针旋转的角度。直接从文件字节扫 'Exif\0\0' 解析 TIFF IFD0，
+ *  不依赖 libvips（libvips 读不了 CR3 容器的 EXIF，这正是 RAW 缩略图/检测侧躺的根因）。 */
+const ORIENT_ANGLE: Record<number, number> = { 1: 0, 2: 0, 3: 180, 4: 0, 5: 90, 6: 90, 7: 270, 8: 270 }
+function orientAngleOfBytes(buf: Buffer): number {
+  const i = buf.indexOf(Buffer.from([0x45, 0x78, 0x69, 0x66, 0x00, 0x00])) // 'Exif\0\0'
+  if (i < 0) return 0
+  const t = i + 6
+  if (t + 8 > buf.length || buf[t + 2] !== 0x2a) return 0
+  const little = buf[t] === 0x49 && buf[t + 1] === 0x49
+  const r16 = (o: number): number => (little ? buf.readUInt16LE(o) : buf.readUInt16BE(o))
+  const r32 = (o: number): number => (little ? buf.readUInt32LE(o) : buf.readUInt32BE(o))
+  const ifd = t + r32(t + 4)
+  if (ifd + 2 > buf.length) return 0
+  const n = r16(ifd)
+  for (let k = 0; k < n; k++) {
+    const e = ifd + 2 + k * 12
+    if (e + 12 > buf.length) break
+    if (r16(e) === 0x0112) return ORIENT_ANGLE[r16(e + 8)] ?? 0
+  }
+  return 0
+}
 
 /**
  * 返回可交给 sharp() 的输入：普通格式原路返回；
@@ -75,8 +105,27 @@ export async function sharpInput(path: string): Promise<string | Buffer> {
   if (cache && cache.path === path) return cache.buf
   const jpeg = extractEmbeddedJpeg(path)
   if (!jpeg) return path
-  cache = { path, buf: jpeg }
+  let angle = 0
+  try {
+    angle = orientAngleOfBytes(wholeFile(path))
+  } catch {
+    angle = 0
+  }
+  cache = { path, buf: jpeg, angle }
   return jpeg
+}
+
+/** 已按 EXIF 方向摆正的 sharp 管线：buffer 输入（RAW 内嵌预览）用从容器字节解析出的角度显式旋转，
+ *  路径输入交给 sharp 自身 auto-orient。缩略图/大图/引擎归一化/Node 分析统一走这里。 */
+export async function orientedSharp(path: string): Promise<ReturnType<typeof sharp>> {
+  const input = await sharpInput(path)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const s = sharp(input as any, { failOn: 'none' }) as ReturnType<typeof sharp>
+  if (Buffer.isBuffer(input)) {
+    const angle = cache && cache.path === path ? cache.angle : 0
+    return (angle ? s.rotate(angle) : s) as ReturnType<typeof sharp>
+  }
+  return s.rotate() as ReturnType<typeof sharp>
 }
 
 /** 供导入器使用：生成缩略图数据源（含 RAW 兜底链） */
@@ -105,10 +154,8 @@ export async function ensureNormalizedJpeg(path: string, maxSide = 2000): Promis
     mkdirSync(dir, { recursive: true })
     const out = join(dir, createHash('sha1').update(path).digest('hex').slice(0, 16) + '.jpg')
     if (existsSync(out) && statSync(out).mtimeMs >= statSync(path).mtimeMs) return out
-    const input = await sharpInput(path)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await (sharp(input as any, { failOn: 'none' }) as ReturnType<typeof sharp>)
-      .rotate()
+    await (await orientedSharp(path))
       .resize({ width: maxSide, height: maxSide, fit: 'inside', withoutEnlargement: true })
       .jpeg({ quality: 92 })
       .toFile(out)

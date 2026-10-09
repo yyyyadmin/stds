@@ -7,7 +7,7 @@ import { join } from 'path'
 import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'fs'
 import sharp from 'sharp'
 import { getDb } from '../db'
-import { sharpInput } from './rawPreview'
+import { orientedSharp } from './rawPreview'
 
 /** 大预览长边上限（兼顾锐利与加载速度） */
 const BIG_MAX = 2560
@@ -54,10 +54,7 @@ export async function ensureBigPreview(id: number): Promise<string | null> {
     /* 源文件信息取不到则继续重新生成 */
   }
   try {
-    const input = await sharpInput(row.path)
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await (sharp(input as any, { failOn: 'none' }) as ReturnType<typeof sharp>)
-      .rotate()
+    await (await orientedSharp(row.path))
       .resize({ width: BIG_MAX, height: BIG_MAX, fit: 'inside', withoutEnlargement: true })
       .jpeg({ quality: 90 })
       .toFile(out)

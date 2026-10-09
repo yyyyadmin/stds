@@ -8,7 +8,7 @@ import { basename, extname, join } from 'path'
 import sharp from 'sharp'
 import { insertImage, imageExists, thumbDir, setImageMeta, setImageStatus, listPendingThumbs, countPendingThumbs, getDb } from '../db'
 import { SUPPORTED_EXTS } from '../../shared/types'
-import { sharpInput } from './rawPreview'
+import { orientedSharp } from './rawPreview'
 
 function walk(dir: string, out: string[], depth = 0): void {
   if (depth > 8) return
@@ -93,13 +93,9 @@ export async function importPaths(
 /** 单张图片：读尺寸 + 生成 256px 缩略图；RAW 解码失败时自动提取内嵌 JPEG 预览兜底；仍失败才标记 skip */
 async function makeThumb(id: number, path: string): Promise<void> {
   try {
-    const input = await sharpInput(path)
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const meta = await (sharp(input as any, { failOn: 'none' } as any).rotate()).metadata()
+    const meta = await (await orientedSharp(path)).metadata()
     const thumbPath = join(thumbDir(), `${Buffer.from(path).toString('base64url').replace(/[+/=]/g, '_')}.jpg`)
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await (sharp(input as any, { failOn: 'none' } as any) as ReturnType<typeof sharp>)
-      .rotate()
+    await (await orientedSharp(path))
       .resize({ width: 256, height: 256, fit: 'inside', withoutEnlargement: true })
       .jpeg({ quality: 76 })
       .toFile(thumbPath)
