@@ -17,6 +17,7 @@ import {
 } from '../db'
 import { gradeDims, computeCategory } from '../classify'
 import { engineManager } from '../engine'
+import { logError } from '../logger'
 import { ensureNormalizedJpeg } from './rawPreview'
 import type { DetectResult, DimensionKey, ImageRecord } from '../../shared/types'
 import { CAT_TRASH } from '../../shared/types'
@@ -172,6 +173,8 @@ class Scanner extends EventEmitter {
       } catch (e) {
         const errMsg = String((e as Error)?.message || e)
         this.lastError = errMsg
+        // 逐张落盘“文件名 + 具体错误”：否则单张失败只写 DB status，错误文本随风消散，无法定位真因
+        logError('detect-fail', `${basename(rec.path)} :: ${errMsg}`)
         updateDetectResult(rec.id, rec.tags, rec.details, rec.dupGroup, rec.category, rec.categoryBy, 'error')
         this.emit('image', { ...rec, status: 'error' })
         this.consecFail++

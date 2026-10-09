@@ -158,7 +158,9 @@ class FaceDetector:
             return out
         for f in faces:
             x, y, fw, fh = f[0:4]
-            pts = [(f[6 + i * 2] , f[7 + i * 2]) for i in range(5)]
+            # YuNet 每行 15 个值：[0:4]=框, [4:14]=5个关键点(x,y), [14]=置信度。
+            # 关键点必须从下标 4 起取（此前误写为 6 起，第5点读到 f[15] 越界，导致检到脸即崩）。
+            pts = [(f[4 + i * 2], f[5 + i * 2]) for i in range(5)]
             pts = [(px * sx, py * sy) for px, py in pts]
             out.append({
                 "box": [int(x * sx), int(y * sy), int(fw * sx), int(fh * sy)],
