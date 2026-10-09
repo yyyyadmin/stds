@@ -14,16 +14,18 @@ def _eye_stats(bgr, roi):
     """单个眼 ROI 的开启度统计：返回 (open_score 0~1, iris_offset -1~1 or None, detail)"""
     side, x, y, w, h, cx, cy = roi
     patch = bgr[y:y + h, x:x + w]
-    gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
-    gray = cv2.equalizeHist(gray)
+    raw = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+    # 均衡版仅用于边缘检测(Canny)与虹膜定位；对比度/纵向方差必须在【原始灰度】上测——
+    # equalizeHist 会把任意 patch 拉到满量程，使 dyn 恒≈255、vert_var 虚高，闭眼的低对比信号被抹掉。
+    gray = cv2.equalizeHist(raw)
     # 闭合眼睛特征：水平暗线 / 边缘集中在一条横线、纵向方差低
     edges = cv2.Canny(gray, 60, 160)
     row_energy = edges.sum(axis=1).astype(float)
     col_energy = edges.sum(axis=0).astype(float)
     row_peak = row_energy.max() / (row_energy.mean() + 1e-6)  # 单一横线 -> 峰值比高
-    vert_var = float(gray.var(axis=1).mean())  # 上下眼睑对比 -> 睁眼时更高
+    vert_var = float(raw.var(axis=1).mean())  # 原图纵向方差：闭眼(一条横线)低、睁眼(上下眼睑+瞳孔)高
     # 亮度带：睁眼有明显暗瞳孔 + 亮虹膜/白睛
-    dyn = float(gray.max() - gray.min())
+    dyn = float(raw.max() - raw.min())  # 原图动态范围：闭眼/低对比时小
     open_score = 1.0
     if vert_var < 12 or dyn < 40:
         open_score = 0.25
@@ -79,6 +81,7 @@ class EyesAnalyzer:
         if not faces:
             return 0.0, ""
         worst = 0.0
+        worst_detail = None
         parts = []
         for face in faces[:6]:
             for roi in eye_rois(face, bgr):
@@ -89,11 +92,16 @@ class EyesAnalyzer:
                     open_score, _, d = _eye_stats(bgr, roi)
                     prob = 1.0 - open_score
                     parts.append("%s:%.2f" % (side, prob))
+                    if prob >= worst:
+                        worst_detail = d
                 else:
                     parts.append("%s:ocec%.2f" % (side, prob))
                 worst = max(worst, prob)
         method = "ocec" if self.ocec.available else "heuristic"
         reason = "眼闭合度 %.2f (%s) [%s]" % (worst, ", ".join(parts), method)
+        if worst_detail:
+            reason += " vv=%.0f dyn=%.0f rp=%.1f" % (
+                worst_detail.get("vert_var", 0), worst_detail.get("dyn", 0), worst_detail.get("row_peak", 0))
         return float(worst), reason
 
     # ---------- 斜眼 ----------

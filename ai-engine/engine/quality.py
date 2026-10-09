@@ -103,45 +103,57 @@ def black_white_score(bgr):
 # ---------- 半截头 ----------
 
 def half_head_score(bgr_shape, faces, upper_bodies, scale):
-    """半截头多信号：
-    - 人脸框上缘贴近画面顶部（额头出框）
-    - 人脸框左/右/下贴边（侧向或下方裁切，阈值随脸尺寸自适应）
-    - 有躯干但无完整头部
+    """半截头：通俗定义 = 头部不完整（被画面边缘裁掉）。
+    关键：YuNet 脸框只覆盖 眉~下巴，不含额头/头顶/发饰与两侧耳发，
+    故不能只看脸框是否贴边，而要按“完整头部所需余量”反推头顶/侧是否被裁：
+    - 脸框上方应留 ~0.5 脸高（额头+头顶+发型）；不够→头顶出框
+    - 脸框左右应留 ~0.3 脸宽（耳与侧发）；不够→侧向出框
+    - 下巴以下贴底（保守，低权重）
+    - 有躯干无完整头部 / 躯干多于人脸
+    置信度按“缺多少余量”线性给分：轻微出框→待确认(0.55~0.8)，明显/贴边→高(>0.8)。
+    余量阈值与脸尺寸成比例，小脸/大脸一致；不依赖绝对像素，故不受工作图缩放影响。
     """
     H, W = bgr_shape[:2]
-    edge = int(20 / scale) if scale and scale < 1 else 20
     reasons = []
     conf = 0.0
+
+    def bump(c, msg):
+        nonlocal conf
+        if c > conf:
+            conf = c
+            reasons[:] = [msg]
+
     for f in faces:
         x, y, w, h = f["box"]
-        # 贴边阈值随人脸尺寸自适应：小脸需更贴边才判半截，大脸预留额头余量
-        mx = max(2, int(w * 0.12))
-        my = max(2, int(h * 0.12))
-        if y <= edge + my:
-            c = 0.95 if y <= 2 else 0.90
-            if c > conf:
-                conf = c
-                reasons.append("人脸框上缘距顶 %dpx(≤%d)→额头被裁" % (y, edge + my))
-        if x <= mx or x + w >= W - mx:
-            if 0.88 > conf:
-                conf = 0.88
-                reasons.append("人脸框左右贴边→头部横向被裁")
-        if y + h >= H - my:
-            if 0.80 > conf:
-                conf = 0.80
-                reasons.append("人脸框下缘贴边→下巴以下被裁")
+        head_top_need = h * 0.50   # 额头 + 头顶 + 常见发型/发饰
+        head_side_need = w * 0.30  # 耳与侧发
+        # 头顶：脸框上缘距画面顶不足一个“额头+头顶”高度 → 头顶被裁
+        if y < head_top_need:
+            deficit = (head_top_need - y) / head_top_need  # 0~1，越大越严重
+            bump(min(0.97, 0.55 + 0.42 * deficit),
+                 "头顶出框：脸框上缘距顶 %dpx，完整头部约需 %dpx（缺 %.0f%%）" % (int(y), int(head_top_need), deficit * 100))
+        # 左右：脸框距较近的一侧画面边不足侧发宽度 → 头部横向被裁
+        left_gap = x
+        right_gap = W - (x + w)
+        side_gap = min(left_gap, right_gap)
+        if side_gap < head_side_need:
+            deficit = (head_side_need - side_gap) / head_side_need
+            side = "左" if left_gap <= right_gap else "右"
+            bump(min(0.95, 0.55 + 0.40 * deficit),
+                 "头部%s侧出框：脸框距%s边 %dpx，约需 %dpx（缺 %.0f%%）" % (side, side, int(side_gap), int(head_side_need), deficit * 100))
+        # 下巴以下贴底（保守：只有几乎贴底才轻幅提示）
+        bottom_gap = H - (y + h)
+        if bottom_gap < h * 0.10:
+            bump(0.60, "下巴以下贴底：脸框下缘距底 %dpx" % int(bottom_gap))
     if not faces and upper_bodies:
         # 有身子没头：躯干框上缘必须在画面上部才说明是"人头出框"
         for ub in upper_bodies:
             if ub[1] < H * 0.5:
-                conf = max(conf, 0.88)
-                reasons.append("检出躯干但无完整头部")
+                bump(0.88, "检出躯干但无完整头部")
                 break
     # 躯干多于人脸：部分人头被裁/未入镜
     if faces and upper_bodies and len(upper_bodies) > len(faces):
-        if 0.72 > conf:
-            conf = 0.72
-            reasons.append("躯干 %d 但人脸 %d→疑有人头未完整入镜" % (len(upper_bodies), len(faces)))
+        bump(0.72, "躯干 %d 但人脸 %d→疑有人头未完整入镜" % (len(upper_bodies), len(faces)))
     return float(conf), "; ".join(reasons) if reasons else "头部完整"
 
 
