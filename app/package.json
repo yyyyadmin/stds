@@ -1,6 +1,6 @@
 {
   "name": "screener-master",
-  "version": "2.0.34",
+  "version": "2.0.35",
   "description": "筛图大师 - 面向摄影行业的本地AI筛图桌面软件",
   "main": "./out/main/index.js",
   "author": "筛图大师团队",
