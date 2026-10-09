@@ -4,6 +4,7 @@ from .imaging import load_work_image, to_original, LoadError
 from .face import FaceDetector
 from .eyes import EyesAnalyzer
 from .expression import ExpressionAnalyzer
+from .landmarks import FaceLandmarkEnhancer
 from . import quality as Q
 from .models import detect_device, _HAS_ORT
 
@@ -15,13 +16,15 @@ class DetectEngine:
         self.faces = FaceDetector()
         self.eyes = EyesAnalyzer()
         self.expr = ExpressionAnalyzer()
+        self.landmarker = FaceLandmarkEnhancer(log=self.log)
         self.embed = Q.EmbeddingModel()
-        self.log("engine ready: device=%s face_backend=%s eyes=%s embedding=%s ort=%s" % (
-            self.device, self.faces.backend, self.eyes.method, self.embed.available, _HAS_ORT))
+        self.log("engine ready: device=%s face_backend=%s eyes=%s embedding=%s ort=%s landmarker=%s" % (
+            self.device, self.faces.backend, self.eyes.method, self.embed.available, _HAS_ORT, self.landmarker.available))
 
     def capabilities(self):
         return {
-            "faceBackend": self.faces.backend,  # yunet/haar/none
+            "faceBackend": (self.faces.backend + "+mediapipe") if self.landmarker.available else self.faces.backend,  # yunet/haar/none
+            "landmarker": self.landmarker.available,
             "eyes": self.eyes.method,           # ocec+mobilegaze / heuristic
             "emotion": self.expr.emotion.available,
             "embedding": self.embed.available,
@@ -45,6 +48,13 @@ class DetectEngine:
         h, w = bgr.shape[:2]
         orig_size = None  # imaging 已映射回原图坐标时不需要
         faces = self.faces.detect(bgr)
+        # MediaPipe 增强：把 478 点/blendshape 挂到 YuNet 脸上供后续维度消费。
+        # 绝不改变 faces 数量/顺序（计数仍归 YuNet）；任何异常内部吞掉、回落启发式。
+        try:
+            if self.landmarker.available and faces:
+                self.landmarker.enhance(bgr, faces)
+        except Exception:  # noqa: BLE001
+            self.log("landmarker enhance skipped (guarded)", level="warn")
         face_count = len(faces)
         upper = self.faces.detect_upper_bodies(bgr) if face_count <= 2 else []
 

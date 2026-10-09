@@ -2,6 +2,7 @@
 """Spike 自检：验证 mediapipe 能否在（冻结）引擎内 import + 加载 .task + 跑一次 detect。
 不触碰检测业务逻辑；仅证明打包链路可用。输出单行 JSON 供 CI 解析。"""
 import json
+import os
 import sys
 
 import numpy as np
@@ -10,6 +11,20 @@ import numpy as np
 def _find_task():
     from .models import find_model
     return find_model("face_landmarker.task", "*.task")
+
+
+def _synthetic_png():
+    import cv2
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_selfcheck_synth.png")
+    img = np.full((240, 240, 3), 120, dtype=np.uint8)
+    cv2.imwrite(p, img)
+    return p
+
+
+def _fixture_or_synthetic():
+    """优先用仓库里的 tests/fixtures/face.jpg 做端到端真实脸验证；不存在则用合成图占位。"""
+    p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests", "fixtures", "face.jpg")
+    return p if os.path.exists(p) else _synthetic_png()
 
 
 def run():
@@ -25,6 +40,9 @@ def run():
         "landmarker_available": False,
         "enhance_smoke_ok": False,
         "enhanced_faces": 0,
+        "e2e_ok": False,
+        "e2e_dims": [],
+        "out_landmarker_cap": False,
         "error": None,
     }
     # --- yunet 共存冒烟（独立 try，先跑）：证明 cv2 与 mediapipe 在同一冻结引擎里都能用（Phase1 头号风险）---
@@ -85,6 +103,17 @@ def run():
     except Exception as _ee:  # noqa: BLE001
         out["enhance_smoke_ok"] = False
         out["error"] = (out["error"] or "") + " |enhance: %s: %s" % (type(_ee).__name__, _ee)
+    # --- 端到端：完整 DetectEngine.detect() 在冻结引擎里跑通、维度不缺失 ---
+    try:
+        from . import DetectEngine
+        eng = DetectEngine(log=lambda *a, **k: None)
+        r = eng.detect(_fixture_or_synthetic())
+        out["e2e_ok"] = bool(r) and "dims" in r and "faces" in r
+        out["e2e_dims"] = sorted((r.get("dims") or {}).keys())
+        out["out_landmarker_cap"] = bool(eng.capabilities().get("landmarker"))
+    except Exception as _de:  # noqa: BLE001
+        out["e2e_ok"] = False
+        out["error"] = (out["error"] or "") + " |e2e: %s: %s" % (type(_de).__name__, _de)
     return out
 
 
