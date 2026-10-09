@@ -38,6 +38,9 @@ class Scanner extends EventEmitter {
   private running = false
   private stopRequested = false
   private progress: ScanProgress = { running: false, done: 0, total: 0, current: '', phase: 'done' }
+  /** 连续检测失败计数：用于引擎健康熔断（连续过多失败自动停止，避免长时间假死） */
+  private consecFail = 0
+  private engineAborted = false
   /** 本会话哈希表：id -> phash，聚类用 */
   private hashes = new Map<number, string>()
 
@@ -49,7 +52,9 @@ class Scanner extends EventEmitter {
     return this.running
   }
 
-  /** 开始/继续筛选（断点续跑：只处理 pending/error 状态图片） */
+  /** 开始/继续筛选（断点续跑：只处理 pending/error 状态图片）
+   *  关键：本方法立即返回，引擎初始化与检测在 startAsync 异步进行，
+   *  避免引擎启动卡住时阻塞 scanStart IPC 导致停止/清空等全部无响应。 */
   async start(): Promise<{ started: boolean; message: string }> {
     if (this.running) return { started: false, message: '筛选已在进行中' }
     const pending = pendingImages()
@@ -58,25 +63,43 @@ class Scanner extends EventEmitter {
       if (!total) return { started: false, message: '请先导入照片' }
       return { started: false, message: '所有照片已完成筛选' }
     }
-    const settings = getSettings()
     this.progress = { running: true, done: 0, total: pending.length, current: '', phase: 'init', message: '正在启动 AI 引擎...' }
     this.emit('progress', this.progress)
     this.running = true
     this.stopRequested = false
+    this.consecFail = 0
+    this.engineAborted = false
+    void this.startAsync(pending)
+    return { started: true, message: '正在启动 AI 引擎...' }
+  }
+
+  /** 异步：启动引擎（失败/超时降级 Node）→ 跑队列。全程不阻塞 IPC。 */
+  private async startAsync(pending: ImageRecord[]): Promise<void> {
+    const settings = getSettings()
     try {
       await engineManager.init(settings.enginePreference, settings.devicePreference)
     } catch (e) {
+      // 自带/系统引擎启动异常：降级到内置 Node 基础引擎，保证筛选不卡死
+      console.error('engine init failed, fallback to node:', e)
+      try {
+        await engineManager.init('node', 'cpu')
+      } catch (e2) {
+        this.running = false
+        this.progress = { ...this.progress, running: false, phase: 'error', message: '引擎启动失败：' + String(e2) }
+        this.emit('progress', this.progress)
+        return
+      }
+    }
+    if (this.stopRequested) {
       this.running = false
-      this.progress = { ...this.progress, running: false, phase: 'error', message: '引擎启动失败：' + String(e) }
+      this.progress = { ...this.progress, running: false, phase: 'stopped', message: '已停止' }
       this.emit('progress', this.progress)
-      return { started: false, message: this.progress.message || '引擎启动失败' }
+      return
     }
     const status = engineManager.getStatus()
-    this.progress.message = status.message
+    this.progress = { ...this.progress, message: status.message }
     this.emit('progress', this.progress)
-    // 异步执行，不阻塞 IPC 返回
-    void this.run(pending)
-    return { started: true, message: status.message }
+    await this.run(pending)
   }
 
   stop(): void {
@@ -112,10 +135,12 @@ class Scanner extends EventEmitter {
     this.progress = {
       ...this.progress,
       running: false,
-      phase: this.stopRequested ? 'stopped' : 'done',
-      message: this.stopRequested
-        ? `已停止（${done}/${this.progress.total}），下次开始将自动续跑`
-        : `筛选完成：${done} 张`
+      phase: this.engineAborted ? 'error' : this.stopRequested ? 'stopped' : 'done',
+      message: this.engineAborted
+        ? `AI 引擎连续检测失败，已自动停止（${done}/${this.progress.total}）。请到设置里将引擎切换为“内置基础引擎”后重试`
+        : this.stopRequested
+          ? `已停止（${done}/${this.progress.total}），下次开始将自动续跑`
+          : `筛选完成：${done} 张`
     }
     this.emit('progress', this.progress)
   }
@@ -132,9 +157,17 @@ class Scanner extends EventEmitter {
       try {
         const raw = (await engineManager.detect(rec.path, rec.id)) as unknown as DetectResult & { phash?: string; nodeEngine?: boolean }
         this.handleResult(rec, raw)
+        this.consecFail = 0
       } catch (e) {
         updateDetectResult(rec.id, rec.tags, rec.details, rec.dupGroup, rec.category, rec.categoryBy, 'error')
         this.emit('image', { ...rec, status: 'error' })
+        this.consecFail++
+        // 熔断：连续 6 张检测失败（引擎卡死/崩溃），停止本轮并给出可操作提示，不再逐张空等
+        if (this.consecFail >= 6) {
+          this.engineAborted = true
+          this.stopRequested = true
+          console.error('engine circuit-break after consecutive failures:', e)
+        }
       }
       this.progress.done++
       if (this.progress.done % 5 === 0 || !this.queue.length) this.emit('progress', this.progress)

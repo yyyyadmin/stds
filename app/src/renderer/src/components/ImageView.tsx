@@ -2,11 +2,29 @@
  * 多视图（9.2）：网格(160px 4-6列自适应) / 列表(80px) / 瀑布流(保留比例) / 大图(主区+底部缩略条)
  * 缩略图带 AI 标签 + 置信度分数；单击选中 / Shift 连选 / Ctrl 加选 / 双击放大预览
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useStore, sortConf } from '../store'
 import JudgmentBar from './JudgmentBar'
 import type { ImageRecord } from '../../../shared/types'
-import { BAD_DIMENSIONS, CAT_REVIEW, CAT_TRASH, DIMENSION_LABELS, isBadDim } from '../../../shared/types'
+import { BAD_DIMENSIONS, CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, DIMENSION_LABELS } from '../../../shared/types'
+import { dimTagColor } from './Sidebar'
+
+/**
+ * 图片上的单个维度标签（坏/中性通用）：
+ * 背景色与左侧分类树对应类型的小圆点同色（dimTagColor 单一来源），
+ * 白字 + 圆角 5px + 整体阴影，避免图背景杂乱时看不清文字。尺寸保持紧凑。
+ */
+function DimTag(props: { dim: string; conf: number }): JSX.Element {
+  return (
+    <span
+      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[5px] text-[11px] leading-none font-medium text-white shadow-[0_1px_3px_rgba(0,0,0,0.65)]"
+      style={{ background: dimTagColor(props.dim) }}
+    >
+      {DIMENSION_LABELS[props.dim as keyof typeof DIMENSION_LABELS]}
+      <span className="opacity-80">{(props.conf * 100).toFixed(0)}</span>
+    </span>
+  )
+}
 
 /** localfile 协议 URL（与 preload fileUrl 一致，渲染层直接同步构造） */
 export function toSrc(p: string): string {
@@ -98,20 +116,9 @@ function TagChips({ img }: { img: ImageRecord }): JSX.Element | null {
   const sorted = entries.sort((a, b) => (b[1]?.confidence || 0) - (a[1]?.confidence || 0))
   return (
     <div className="absolute left-1 bottom-1 right-1 flex flex-wrap gap-1 pointer-events-none">
-      {sorted.slice(0, 3).map(([dim, t]) => {
-        const bad = isBadDim(dim)
-        const cls = bad
-          ? t!.level === 'high'
-            ? 'bg-bad/90 text-white'
-            : 'bg-warn/90 text-black'
-          : 'bg-brand/80 text-white'
-        return (
-          <span key={dim} className={'chip ' + cls}>
-            {DIMENSION_LABELS[dim as keyof typeof DIMENSION_LABELS]}
-            <span className="opacity-80">{(t!.confidence * 100).toFixed(0)}</span>
-          </span>
-        )
-      })}
+      {sorted.slice(0, 3).map(([dim, t]) => (
+        <DimTag key={dim} dim={dim} conf={t!.confidence} />
+      ))}
       {sorted.length > 3 && <span className="chip bg-panel2/90 text-gray-300">+{sorted.length - 3}</span>}
     </div>
   )
@@ -122,25 +129,33 @@ function StatusRibbon({ img }: { img: ImageRecord }): JSX.Element | null {
   if (img.status === 'error') return <span className="chip bg-bad/90 text-white absolute right-1 top-1">检测失败</span>
   if (img.status === 'skip') return <span className="chip bg-gray-700/90 text-gray-300 absolute right-1 top-1">无法解码</span>
   if (img.category === CAT_TRASH) return <span className="chip bg-black/70 text-white absolute right-1 top-1">🗑</span>
-  if (img.category === CAT_REVIEW) return <span className="chip bg-warn/90 text-black absolute right-1 top-1">待确认</span>
+  if (img.category === CAT_REVIEW) return <span className="chip bg-warn text-white absolute right-1 top-1">待确认</span>
+  if (img.category === CAT_LIBRARY) return <span className="absolute right-px top-px w-2 h-2 rounded-full bg-emerald-400 ring-1 ring-white shadow-[0_0_5px_1px_rgba(52,211,153,0.9)]" title="成品库" />
   return null
 }
 
-function Thumb({ img, size, index, onClick, onDoubleClick, dragIds }: {
+function Thumb({ img, size, index, onClick, onDoubleClick, dragIds, dragging, onDragStart, onDragEnter, onDragEnd, elRef }: {
   img: ImageRecord
   size: number
   index: number
   onClick: (index: number, e: React.MouseEvent) => void
   onDoubleClick: (img: ImageRecord) => void
   dragIds: number[]
+  dragging?: boolean
+  onDragStart?: (id: number) => void
+  onDragEnter?: (e: React.DragEvent, id: number) => void
+  onDragEnd?: () => void
+  elRef?: (el: HTMLDivElement | null) => void
 }): JSX.Element {
   const selected = useStore((s) => s.selection.has(img.id))
   const src = img.thumb ? toSrc(img.thumb) : toSrc(img.path)
   return (
     <div
+      ref={elRef}
       className={
-        'relative rounded-md overflow-hidden bg-panel2 border transition-all cursor-pointer group ' +
-        (selected ? 'border-brand ring-2 ring-brand/60' : 'border-line hover:border-gray-500')
+        'relative rounded-md overflow-hidden bg-panel2 border transition-all duration-150 cursor-pointer group ' +
+        (selected ? 'border-brand ring-2 ring-brand shadow-[0_0_0_2px_rgba(59,130,246,0.45)]' : 'border-line hover:border-gray-500') +
+        (dragging ? ' opacity-40 scale-90' : '')
       }
       style={{ width: size, height: size }}
       draggable
@@ -149,7 +164,11 @@ function Thumb({ img, size, index, onClick, onDoubleClick, dragIds }: {
         if (!selected) onClick(index, e)
         e.dataTransfer.setData('application/x-image-ids', JSON.stringify(ids))
         e.dataTransfer.effectAllowed = 'move'
+        onDragStart?.(img.id)
       }}
+      onDragEnter={(e) => onDragEnter?.(e, img.id)}
+      onDragOver={(e) => e.preventDefault()}
+      onDragEnd={() => onDragEnd?.()}
       onClick={(e) => onClick(index, e)}
       onDoubleClick={() => onDoubleClick(img)}
       title={`${img.filename}\n${Object.entries(img.tags || {}).filter(([, t]) => t && t.level !== 'low').map(([d, t]) => `${DIMENSION_LABELS[d as keyof typeof DIMENSION_LABELS]} ${(t?.confidence || 0) * 100}%(<${t?.level}>)`).join('\n') || '无坏维度标记'}`}
@@ -158,6 +177,128 @@ function Thumb({ img, size, index, onClick, onDoubleClick, dragIds }: {
       {selected && <span className="absolute left-1 top-1 w-4 h-4 rounded-full bg-brand text-white text-[10px] flex items-center justify-center">✓</span>}
       <StatusRibbon img={img} />
       <TagChips img={img} />
+    </div>
+  )
+}
+
+/**
+ * 网格视图（可拖拽自由排序）：
+ * - 本地维护 id 顺序，拖动时实时换位（拖哪就插到哪），松手回网格才落库
+ * - 拖到左侧分类的 move 仍由 Sidebar 处理（同一 dataTransfer），互不干扰
+ * - props.images 变化（刷新/换排序）时若非拖动中则重同步本地顺序
+ */
+function GridView(props: {
+  images: ImageRecord[]
+  size: number
+  click: (index: number, e: React.MouseEvent) => void
+  dbl: (img: ImageRecord) => void
+  dragIds: number[]
+  onReorder: (ids: number[]) => void
+}): JSX.Element {
+  const [order, setOrder] = useState<number[]>(() => props.images.map((i) => i.id))
+  const orderRef = useRef<number[]>(order)
+  const [draggingId, setDraggingId] = useState<number | null>(null)
+  const draggingRef = useRef<number | null>(null)
+  // FLIP 动画用：记录每个缩略图 DOM 与上一次静止位置
+  const itemRefs = useRef<Map<number, HTMLDivElement>>(new Map())
+  const prevRects = useRef<Map<number, DOMRect>>(new Map())
+
+  const applyOrder = (next: number[]): void => {
+    orderRef.current = next
+    setOrder(next)
+  }
+
+  // 非拖拽期间，外部图片集（内容/排序）变化时重同步
+  useEffect(() => {
+    if (draggingRef.current != null) return
+    applyOrder(props.images.map((i) => i.id))
+  }, [props.images])
+
+  // FLIP：order 变化时，让“让位”的相邻缩略图平滑滑到新位置（拖拽中的那张不参与，跟手交给浏览器拖影），
+  // 消除网格重排的“瞬间跳格”，换来“自然让位、丝滑插入”的手感
+  useLayoutEffect(() => {
+    const next = new Map<number, DOMRect>()
+    itemRefs.current.forEach((el, id) => {
+      if (el) next.set(id, el.getBoundingClientRect())
+    })
+    next.forEach((rect, id) => {
+      if (id === draggingRef.current) return
+      const prev = prevRects.current.get(id)
+      if (!prev) return
+      const dx = prev.left - rect.left
+      const dy = prev.top - rect.top
+      if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return
+      const el = itemRefs.current.get(id)
+      if (!el) return
+      el.style.transition = 'none'
+      el.style.transform = `translate(${dx}px, ${dy}px)`
+      requestAnimationFrame(() => {
+        el.style.transition = 'transform 180ms cubic-bezier(0.22, 1, 0.36, 1)'
+        el.style.transform = ''
+      })
+    })
+    prevRects.current = next
+  }, [order])
+
+  const byId = useMemo(() => {
+    const m = new Map<number, ImageRecord>()
+    for (const im of props.images) m.set(im.id, im)
+    return m
+  }, [props.images])
+
+  const onDragEnter = (e: React.DragEvent, id: number): void => {
+    const drag = draggingRef.current
+    if (drag == null || drag === id) return
+    e.preventDefault()
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    const after = e.clientX - rect.left > rect.width / 2
+    const base = orderRef.current.filter((x) => x !== drag)
+    const at = base.indexOf(id)
+    if (at < 0) return
+    base.splice(after ? at + 1 : at, 0, drag)
+    applyOrder(base)
+  }
+
+  const ordered = order.map((id) => byId.get(id)).filter(Boolean) as ImageRecord[]
+
+  return (
+    <div
+      className="grid gap-3 justify-center"
+      style={{ gridTemplateColumns: `repeat(auto-fill, ${props.size}px)` }}
+      onDragOver={(e) => {
+        if (draggingRef.current != null) e.preventDefault()
+      }}
+      onDrop={(e) => {
+        if (draggingRef.current == null) return
+        e.preventDefault()
+        props.onReorder(orderRef.current)
+      }}
+    >
+      {ordered.map((img, i) => (
+        <Thumb
+          key={img.id}
+          img={img}
+          index={i}
+          size={props.size}
+          dragging={draggingId === img.id}
+          onClick={props.click}
+          onDoubleClick={props.dbl}
+          dragIds={props.dragIds}
+          onDragStart={(id) => {
+            draggingRef.current = id
+            setDraggingId(id)
+          }}
+          onDragEnter={onDragEnter}
+          onDragEnd={() => {
+            draggingRef.current = null
+            setDraggingId(null)
+          }}
+          elRef={(el) => {
+            if (el) itemRefs.current.set(img.id, el)
+            else itemRefs.current.delete(img.id)
+          }}
+        />
+      ))}
     </div>
   )
 }
@@ -197,6 +338,30 @@ export default function ImageView(): JSX.Element {
   const dragIds = useMemo(() => [...selection], [selection])
   const click = (index: number, e: React.MouseEvent): void => handleClickSelect(index, e)
   const dbl = (img: ImageRecord): void => openPreview(img.id)
+  const reorder = useStore((s) => s.reorder)
+
+  // Ctrl + 滚轮缩放网格缩略图尺寸（100–360px），列数仍 auto-fill 自适应；记住上次缩放
+  const gridRef = useRef<HTMLDivElement | null>(null)
+  const [gridSize, setGridSize] = useState<number>(() => {
+    const v = Number(localStorage.getItem('gridSize'))
+    return Number.isFinite(v) && v >= 100 && v <= 360 ? v : 160
+  })
+  useEffect(() => {
+    if (viewMode !== 'grid') return
+    const el = gridRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent): void => {
+      if (!e.ctrlKey) return
+      e.preventDefault()
+      setGridSize((prev) => {
+        const next = Math.min(360, Math.max(100, prev + (e.deltaY < 0 ? 20 : -20)))
+        localStorage.setItem('gridSize', String(next))
+        return next
+      })
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [viewMode])
 
   if (!sorted.length) {
     return (
@@ -216,16 +381,9 @@ export default function ImageView(): JSX.Element {
 
   if (viewMode === 'grid') {
     return (
-      <div className="h-full overflow-auto p-3 fade-in">
+      <div ref={gridRef} className="h-full overflow-auto p-3 fade-in">
         <BusyBanner />
-        <div
-          className="grid gap-3 justify-center"
-          style={{ gridTemplateColumns: 'repeat(auto-fill, 160px)' }}
-        >
-          {sorted.map((img, i) => (
-            <Thumb key={img.id} img={img} index={i} size={160} onClick={click} onDoubleClick={dbl} dragIds={dragIds} />
-          ))}
-        </div>
+        <GridView images={sorted} size={gridSize} click={click} dbl={dbl} dragIds={dragIds} onReorder={(ids) => void reorder(ids)} />
       </div>
     )
   }
@@ -265,12 +423,7 @@ export default function ImageView(): JSX.Element {
                   <td className="p-2">
                     <div className="flex flex-wrap gap-1">
                       {tags.map(([d, t]) => (
-                        <span
-                          key={d}
-                          className={'chip ' + (isBadDim(d) ? (t!.level === 'high' ? 'bg-bad/80 text-white' : 'bg-warn/80 text-black') : 'bg-brand/70 text-white')}
-                        >
-                          {DIMENSION_LABELS[d as keyof typeof DIMENSION_LABELS]} {(t!.confidence * 100).toFixed(0)}
-                        </span>
+                        <DimTag key={d} dim={d} conf={t!.confidence} />
                       ))}
                       {!tags.length && <span className="text-gray-600">—</span>}
                     </div>
@@ -322,7 +475,7 @@ function MasonryThumb(props: { img: ImageRecord; index: number; onClick: (i: num
     <div
       className={
         'relative rounded-md overflow-hidden border cursor-pointer ' +
-        (selected ? 'border-brand ring-2 ring-brand/60' : 'border-line hover:border-gray-500')
+        (selected ? 'border-brand ring-2 ring-brand shadow-[0_0_0_2px_rgba(59,130,246,0.45)]' : 'border-line hover:border-gray-500')
       }
       draggable
       onDragStart={(e) => {
@@ -391,7 +544,7 @@ function LargeView({ sorted, click, dbl }: {
               ref={i === idx ? activeThumbRef : undefined}
               className={
                 'shrink-0 aspect-square rounded overflow-hidden border cursor-pointer ' +
-                (i === idx ? 'border-brand ring-2 ring-brand/60' : 'border-line hover:border-fg3')
+                (i === idx ? 'border-brand ring-2 ring-brand shadow-[0_0_0_2px_rgba(59,130,246,0.45)]' : 'border-line hover:border-fg3')
               }
               onClick={(e) => {
                 setLargeIndex(i)
@@ -472,9 +625,7 @@ function TagChipsFixed({ img }: { img: ImageRecord }): JSX.Element | null {
   return (
     <div className="flex gap-1 flex-wrap justify-center pointer-events-none">
       {entries.map(([d, t]) => (
-        <span key={d} className={'chip ' + (isBadDim(d) ? (t!.level === 'high' ? 'bg-bad/90 text-white' : 'bg-warn/90 text-black') : 'bg-brand/80 text-white')}>
-          {DIMENSION_LABELS[d as keyof typeof DIMENSION_LABELS]} {(t!.confidence * 100).toFixed(0)}
-        </span>
+        <DimTag key={d} dim={d} conf={t!.confidence} />
       ))}
     </div>
   )

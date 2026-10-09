@@ -12,7 +12,8 @@ import {
   DIMENSION_LABELS,
   NEUTRAL_DIMENSIONS,
   PRECISION_TIERS,
-  dimTier
+  dimTier,
+  isBadDim
 } from '../../../shared/types'
 import type { CategoryKey } from '../../../shared/types'
 
@@ -25,6 +26,17 @@ const BAD_DOT_COLORS: Record<string, string> = {
   exposure: '#eab308', // 曝光异常 · 黄
   half_head: '#14b8a6', // 半截头 · 青
   duplicate: '#6366f1' // 重复/连拍 · 蓝紫
+}
+
+/** 中性维度统一配色（蓝） */
+export const NEUTRAL_DOT_COLOR = '#3b82f6'
+
+/**
+ * 维度 → 配色单一来源：右侧图片上的坏/中性标签背景色，与此处左侧小圆点颜色完全同步。
+ * 供 Sidebar 画圆点、ImageView 画标签共用，改一处即可两端同步。
+ */
+export function dimTagColor(dim: string): string {
+  return isBadDim(dim) ? BAD_DOT_COLORS[dim] ?? '#ef4444' : NEUTRAL_DOT_COLOR
 }
 
 /** 状态点规则：库里没有图时一律置灰，有图才亮各自的颜色 */
@@ -49,7 +61,7 @@ function Row(props: {
   return (
     <div
       className={
-        'group flex items-center gap-2 px-3 py-1.5 mx-2 rounded-md cursor-pointer text-sm transition-colors ' +
+        'group flex items-center gap-2 px-3 py-2 mx-2 rounded-md cursor-pointer text-sm transition-colors ' +
         (active ? 'bg-brand/15 text-brand border border-brand/40 font-semibold' : 'text-fg2 hover:bg-panel2 border border-transparent') +
         (hover ? ' ring-1 ring-brand' : '')
       }
@@ -118,22 +130,26 @@ export default function Sidebar(): JSX.Element {
       <Row label="成品库（导出用）" cat={CAT_LIBRARY} count={counts[CAT_LIBRARY]} dot={lit(counts[CAT_LIBRARY], '#22c55e')} tip="未被任何坏维度标记的图" />
       <Row label="待确认" cat={CAT_REVIEW} count={counts[CAT_REVIEW]} dot={lit(counts[CAT_REVIEW], '#eab308')} tip="中置信度 0.7-0.9，需人工复核；默认不导出" />
 
-      <div className="px-4 pt-4 pb-1 text-gray-500 text-xs">坏维度（{PRECISION_TIERS.ref.label}参考）</div>
+      <div className="px-4 pt-6 pb-2 text-gray-500 text-xs">坏维度（{PRECISION_TIERS.ref.label}参考）</div>
       {BAD_DIMENSIONS.map((d) => (
         <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} dot={lit(counts[d], BAD_DOT_COLORS[d] ?? '#ef4444')} tip={`${DIMENSION_LABELS[d]} · 精度档位：${PRECISION_TIERS[dimTier(d)].tip}（灰 = 暂无图片）`} />
       ))}
 
-      <div className="px-4 pt-4 pb-1 text-gray-500 text-xs">中性分类</div>
+      <div className="px-4 pt-6 pb-2 text-gray-500 text-xs">中性分类</div>
       {NEUTRAL_DIMENSIONS.map((d) => (
-        <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} dot={lit(counts[d], '#3b82f6')} tip={`${DIMENSION_LABELS[d]} · 仅作标签，不影响好坏判定`} />
+        <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} dot={lit(counts[d], NEUTRAL_DOT_COLOR)} tip={`${DIMENSION_LABELS[d]} · 仅作标签，不影响好坏判定`} />
       ))}
 
-      <div className="px-4 pt-4 pb-1 text-gray-500 text-xs">回收</div>
+      <div className="px-4 pt-6 pb-2 text-gray-500 text-xs">回收</div>
       <Row label="垃圾桶" cat={CAT_TRASH} count={counts[CAT_TRASH]} dot={lit(counts[CAT_TRASH], '#e11d48')} tip="用户手动标记的废片，永远不可能被导出" />
 
-      <div className="px-4 pt-4 pb-1 text-gray-500 text-xs flex items-center justify-between">
+      <div className="px-4 pt-6 pb-2 text-gray-500 text-xs flex items-center justify-between">
         <span>自定义分类</span>
-        <button className="text-brand hover:text-blue-400" onClick={() => setAdding(true)} title="新建自定义分类">
+        <button
+          className="w-6 h-6 -mr-1 shrink-0 rounded-full bg-brand text-white text-lg leading-none font-bold flex items-center justify-center hover:bg-blue-500 active:scale-90 shadow-[0_1px_5px_rgba(59,130,246,0.55)] transition"
+          onClick={() => setAdding(true)}
+          title="新建自定义分类"
+        >
           ＋
         </button>
       </div>

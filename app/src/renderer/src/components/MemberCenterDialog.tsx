@@ -28,12 +28,14 @@ export default function MemberCenterDialog(): JSX.Element | null {
   const [loading, setLoading] = useState(false)
   const [selected, setSelected] = useState<PlanInfo | null>(null)
   const [orderNo, setOrderNo] = useState('')
+  const [qr, setQr] = useState('')
   const [err, setErr] = useState('')
 
   useEffect(() => {
     if (!showMember) return
     setErr('')
     setOrderNo('')
+    setQr('')
     setSelected(null)
     void (async () => {
       setLoading(true)
@@ -58,13 +60,14 @@ export default function MemberCenterDialog(): JSX.Element | null {
       openLogin()
       return
     }
-    const r = await window.api.orderCreate('membership', plan.code)
-    if (r.ok) {
-      setSelected(plan)
-      setOrderNo(r.order_no || '')
-    } else {
-      setErr(r.message || '下单失败')
-    }
+    // 下单接口的 product_type = 套餐 code 本身（monthly/quarterly/yearly）；product_id 同传 code（后端会员单以 type 为准）
+    const r = await window.api.orderCreate(plan.code, plan.code)
+    // 无论下单是否成功都进入扫码联系客服流程：
+    //  - 成功：用下单返回的 service_qrcode + 订单号
+    //  - 失败（如终身卡后端不支持下单）：回退用 config 的客服二维码，同样引导扫码开通
+    setSelected(plan)
+    setOrderNo(r.ok ? r.order_no || '' : '')
+    setQr(r.service_qrcode || '')
   }
 
   return (
@@ -171,22 +174,25 @@ export default function MemberCenterDialog(): JSX.Element | null {
               <div className="px-5 pb-5">
                 <div className="rounded-xl border border-line bg-panel2/40 p-4">
                   <div className="text-sm font-semibold text-fg">
-                    已创建订单：{selected.name}
+                    {orderNo ? `已创建订单：${selected.name}` : `${selected.name} · 扫码联系客服开通`}
                   </div>
                   {orderNo && <div className="text-xs text-fg2 mt-1">订单号 {orderNo}</div>}
                   <div className="text-xs text-fg2 mt-2">
                     请添加客服微信完成支付，支付成功后积分/会员将自动到账（点击下方「刷新状态」同步）。
                   </div>
                   <div className="flex items-center gap-4 mt-3">
-                    {(cfg?.customer_service_qrcode || cfg?.wechat_qrcode) ? (
-                      <img
-                        src={cfg.customer_service_qrcode || cfg.wechat_qrcode || ''}
-                        alt="客服二维码"
-                        className="w-32 h-32 rounded-lg border border-line object-contain bg-white p-1"
-                      />
-                    ) : (
-                      <div className="text-xs text-fg3">暂未配置客服二维码</div>
-                    )}
+                    {(() => {
+                      const img = qr || cfg?.customer_service_qrcode || cfg?.wechat_qrcode || ''
+                      return img ? (
+                        <img
+                          src={img}
+                          alt="客服二维码"
+                          className="w-40 h-40 rounded-lg border border-line object-contain bg-white p-1"
+                        />
+                      ) : (
+                        <div className="text-xs text-fg3">暂未获取到客服二维码，请稍后重试或联系管理员</div>
+                      )
+                    })()}
                     <div className="flex flex-col gap-2">
                       <button className="btn text-xs" onClick={() => void refreshAuth()}>刷新状态</button>
                       <button className="btn-ghost text-xs text-fg3" onClick={() => setSelected(null)}>收起</button>

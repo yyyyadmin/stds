@@ -216,10 +216,26 @@ class AuthManager {
     })
   }
 
-  async createOrder(productType: string, productId: string): Promise<{ ok: boolean; message: string; order_no?: string; amount?: string }> {
+  async createOrder(
+    productType: string,
+    productId: string
+  ): Promise<{ ok: boolean; message: string; order_no?: string; amount?: string; product_name?: string; service_qrcode?: string }> {
     if (!this.token) return { ok: false, message: '请先登录' }
-    const r = await request<{ order_no?: string; amount?: string }>('create_order.php', { product_type: productType, product_id: productId }, this.token)
-    return { ok: r.code === 200, message: r.message, order_no: r.data.order_no, amount: r.data.amount }
+    const r = await request<{
+      order_no?: string
+      amount?: string
+      product_name?: string
+      service_qrcode?: string
+    }>('create_order.php', { product_type: productType, product_id: productId }, this.token)
+    const d = r.data || {}
+    return {
+      ok: r.code === 200,
+      message: r.message,
+      order_no: d.order_no,
+      amount: d.amount,
+      product_name: d.product_name,
+      service_qrcode: d.service_qrcode
+    }
   }
 
   async config(): Promise<SysConfig> {

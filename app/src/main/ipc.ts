@@ -21,6 +21,7 @@ import {
   getSettings,
   saveSettings,
   setDimTag,
+  setSortOrder,
   getDb,
   clearLibrary,
   resetSkipped
@@ -152,6 +153,9 @@ export function registerIpc(win: BrowserWindow): void {
   })
 
   ipcMain.handle(CH.deleteImages, (_e, ids: number[]) => deleteImages(ids))
+
+  // 手动拖拽排序：按传入 id 顺序持久化 sort_order
+  ipcMain.handle(CH.reorderImages, (_e, ids: number[]) => setSortOrder(ids))
 
   // 一键修正（第五章）
   ipcMain.handle(CH.correctImage, (_e, req: CorrectRequest) => {

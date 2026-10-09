@@ -74,6 +74,13 @@ export async function initDbAsync(): Promise<void> {
       value TEXT
     );
   `)
+  // 手动拖拽排序字段（一次性迁移）：老库无此列则新增，并把已有行按 id 初始化
+  try {
+    db.exec(`ALTER TABLE images ADD COLUMN sort_order INTEGER`)
+  } catch {
+    /* 列已存在，忽略 */
+  }
+  db.exec(`UPDATE images SET sort_order = id WHERE sort_order IS NULL`)
 }
 
 export function getDb(): SqlDb {
@@ -186,7 +193,6 @@ export function categoryParams(cat: CategoryKey, params: Record<string, unknown>
   return params
 }
 
-/** 包装 listImages 使其支持自定义分类参数 */
 export function listByCategory(cat: CategoryKey): ImageRecord[] {
   const where = virtualCategorySql(cat)
   const params: Record<string, unknown> = {}
@@ -194,7 +200,7 @@ export function listByCategory(cat: CategoryKey): ImageRecord[] {
     params[`cat_${cat.replace(/[^a-z0-9]/gi, '')}`] = cat
   }
   const tagLike = '%"' + cat + '":{%'
-  const rows = db.prepare(`SELECT * FROM images WHERE (${where}) OR (status = 'done' AND tags LIKE @tagLike) ORDER BY id`).all({ ...params, tagLike }) as Array<Record<string, unknown>>
+  const rows = db.prepare(`SELECT * FROM images WHERE (${where}) OR (status = 'done' AND tags LIKE @tagLike) ORDER BY COALESCE(sort_order, id), id`).all({ ...params, tagLike }) as Array<Record<string, unknown>>
   const out = rows.map(rowToImage)
   // 坏/中性维度分类是"标签并集视图"：一张图同时模糊+斜眼时两个分类都该看到它，
   // 但仅当该标签达到高/中置信度（未被过滤）才展示，且垃圾桶内的图不在其它视图出现
@@ -225,6 +231,17 @@ export function updateDetectResult(
 
 export function setCategory(id: number, category: CategoryKey, categoryBy: 'ai' | 'user' | null): void {
   db.prepare('UPDATE images SET category = ?, category_by = ? WHERE id = ?').run(category, categoryBy, id)
+}
+
+/**
+ * 持久化手动拖拽排序：按传入 id 的先后顺序写入递增 sort_order（1..n）。
+ * 列表读取用 ORDER BY COALESCE(sort_order,id)，故本次涉及到的图严格按此顺序展示，
+ * 未参与本次排序的图（不在当前视图）不受影响。
+ */
+export function setSortOrder(ids: number[]): void {
+  const stmt = db.prepare('UPDATE images SET sort_order = ? WHERE id = ?')
+  const tx = db.transaction((list: number[]) => list.forEach((id, i) => stmt.run(i + 1, id)))
+  tx(ids)
 }
 
 export function setThumb(id: number, thumb: string): void {

@@ -78,12 +78,13 @@ export default function PreviewModal(): JSX.Element | null {
   )
   useEffect(() => {
     const move = (e: MouseEvent): void => {
-      if (!dragging.current) return
-      setT((prev) => ({
-        ...prev,
-        x: dragging.current!.ox + (e.clientX - dragging.current!.sx),
-        y: dragging.current!.oy + (e.clientY - dragging.current!.sy)
-      }))
+      const d = dragging.current
+      if (!d) return
+      // 关键：同步把 dragging.current 捕获到局部变量 d，setT 的更新函数被 React 延迟执行时
+      // 可能 mouseup 已把 dragging.current 置 null，若仍读 dragging.current!.ox 会抛错→白屏
+      const dx = e.clientX - d.sx
+      const dy = e.clientY - d.sy
+      setT((prev) => ({ ...prev, x: d.ox + dx, y: d.oy + dy }))
     }
     const up = (): void => {
       dragging.current = null
@@ -111,15 +112,18 @@ export default function PreviewModal(): JSX.Element | null {
   return (
     <div className="fixed inset-0 z-40 bg-black/85 flex flex-col fade-in" onClick={(e) => e.target === e.currentTarget && closePreview()}>
       {/* 顶部工具条 */}
-      <div className="shrink-0 flex items-center gap-2 px-4 py-2 text-sm bg-black/40 border-b border-white/10">
-        <span className="text-white/80 truncate max-w-[40vw]" title={img.path}>{img.filename}</span>
-        <span className="text-xs text-white/50">{img.width}×{img.height} · {img.format?.toUpperCase()}</span>
+      <div className="shrink-0 relative flex items-center gap-2 px-4 py-2.5 text-[15px] bg-black/40 border-b border-white/10">
+        {/* 居中（顶部中间）：文件名 + 尺寸 + 格式 + 文件大小 */}
+        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-baseline gap-2.5 max-w-[50%]">
+          <span className="text-[15px] text-white/90 truncate" title={img.path}>{img.filename}</span>
+          <span className="text-[13px] text-white/60 whitespace-nowrap">{img.width}×{img.height} · {img.format?.toUpperCase()}{img.fileSize ? ` · ${(img.fileSize / 1048576).toFixed(1)} MB` : ''}</span>
+        </div>
         <div className="flex-1" />
         {/* 选中开关：与列表选择完全同步（同一 selection 状态） */}
         {img && (
           <button
             className={
-              'px-2.5 py-1 rounded-md text-xs border whitespace-nowrap transition-colors ' +
+              'px-3 py-1.5 rounded-md text-sm border whitespace-nowrap transition-colors ' +
               (selection.has(img.id)
                 ? 'bg-brand text-white border-brand'
                 : 'bg-white/10 text-white/80 border-white/25 hover:border-white/70')
@@ -130,14 +134,14 @@ export default function PreviewModal(): JSX.Element | null {
             {selection.has(img.id) ? '✓ 已选中' : '☐ 选中'}
           </button>
         )}
-        <button className="btn-ghost text-white/80" onClick={() => setCompareOriginal(!compareOriginal)} title="原图/缓存对比切换">
+        <button className="btn-ghost text-sm text-white/85" onClick={() => setCompareOriginal(!compareOriginal)} title="原图/缓存对比切换">
           {compareOriginal ? '原图' : '缓存图'}
         </button>
-        <button className={'btn-ghost ' + (showOverlay ? 'text-brand' : 'text-white/60')} onClick={() => setShowOverlay(!showOverlay)}>
+        <button className={'btn-ghost text-sm ' + (showOverlay ? 'text-brand' : 'text-white/60')} onClick={() => setShowOverlay(!showOverlay)}>
           标记叠加 {showOverlay ? '开' : '关'}
         </button>
-        <button className="btn-ghost text-white/80" onClick={reset} title="双击画面也可复位">复位缩放</button>
-        <button className="btn-ghost text-white/80" onClick={closePreview}>ESC 关闭</button>
+        <button className="btn-ghost text-sm text-white/85" onClick={reset} title="双击画面也可复位">复位缩放</button>
+        <button className="btn-ghost text-sm text-white/85" onClick={closePreview}>ESC 关闭</button>
       </div>
 
       {/* 主画布 */}

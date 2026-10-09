@@ -75,6 +75,7 @@ export const CH = {
   categoryCounts: 'images:counts',
   moveImages: 'images:move',
   restoreImages: 'images:restore', // 撤回移动：按快照还原分类与标签
+  reorderImages: 'images:reorder', // 手动拖拽排序：按传入 id 顺序写入 sort_order
   deleteImages: 'images:delete',
   correctImage: 'images:correct', // 一键修正（判定正确/错误）
   customList: 'custom:list',
@@ -171,6 +172,8 @@ export interface RendererApi {
   moveImages(req: MoveRequest): Promise<void>
   /** 撤回移动：把移动前的整批快照（分类/标签/categoryBy）原样还原 */
   restoreImages(snapshots: ImageRecord[]): Promise<void>
+  /** 手动拖拽排序：按传入 id 的先后顺序持久化展示序 */
+  reorderImages(ids: number[]): Promise<void>
   deleteImages(ids: number[]): Promise<void>
   correctImage(req: CorrectRequest): Promise<ImageRecord | null>
   customList(): Promise<Array<{ id: number; name: string }>>
@@ -199,7 +202,7 @@ export interface RendererApi {
   authLogout(): Promise<AuthState>
   authMe(): Promise<AuthState>
   plansList(): Promise<PlanInfo[]>
-  orderCreate(productType: string, productId: string): Promise<{ ok: boolean; message: string; order_no?: string; amount?: string }>
+  orderCreate(productType: string, productId: string): Promise<{ ok: boolean; message: string; order_no?: string; amount?: string; product_name?: string; service_qrcode?: string }>
   sysConfig(): Promise<SysConfig>
   consumePoints(imageCount: number): Promise<ConsumeResult>
   checkUpdate(): Promise<UpdateInfo | null>

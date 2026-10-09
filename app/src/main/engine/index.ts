@@ -53,7 +53,7 @@ export class EngineManager {
         }
       }
       // 优先级 2：系统 Python + 仓库 ai-engine 源码
-      const pythonPath = PythonEnginePool.findPython()
+      const pythonPath = await PythonEnginePool.findPython()
       const engineDir = PythonEnginePool.findEngineDir()
       if (pythonPath && engineDir) {
         try {

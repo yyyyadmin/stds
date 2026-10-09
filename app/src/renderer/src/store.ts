@@ -88,6 +88,7 @@ interface StoreState {
   selectByCurrentCategoryAll(): void
   moveTo(cat: CategoryKey, physical?: boolean): Promise<void>
   moveIds(ids: number[], cat: CategoryKey): Promise<void>
+  reorder(ids: number[]): Promise<void>
   undoMove(): Promise<void>
   moveToTrash(): Promise<void>
   restoreFromTrash(): Promise<void>
@@ -375,7 +376,7 @@ export const useStore = create<StoreState>((set, get) => ({
     set({ selection: new Set() })
     await get().refreshImages()
     await get().refreshCounts()
-    set({ toast: { msg: `已移动 ${ids.length} 张`, kind: 'success' } })
+    set({ toast: { msg: `已移动 ${ids.length} 张 → ${catLabel(cat, get().customCategories)}`, kind: 'success' } })
   },
 
   async moveToTrash() {
@@ -404,6 +405,14 @@ export const useStore = create<StoreState>((set, get) => ({
     })
     await get().refreshImages()
     await get().refreshCounts()
+  },
+
+  /** 手动拖拽排序：按新顺序持久化 sort_order，并切回默认（自定义）序展示 */
+  async reorder(ids) {
+    if (!ids.length) return
+    set({ sortKey: 'default' })
+    await window.api.reorderImages(ids)
+    await get().refreshImages()
   },
 
   /** 记录一次移动前的快照（撤回栈最多保留 50 步） */

@@ -22,6 +22,7 @@ const api: RendererApi = {
   categoryCounts: () => ipcRenderer.invoke(CH.categoryCounts),
   moveImages: (req: MoveRequest) => ipcRenderer.invoke(CH.moveImages, req),
   restoreImages: (snapshots: ImageRecord[]) => ipcRenderer.invoke(CH.restoreImages, snapshots),
+  reorderImages: (ids: number[]) => ipcRenderer.invoke(CH.reorderImages, ids),
   deleteImages: (ids: number[]) => ipcRenderer.invoke(CH.deleteImages, ids),
   correctImage: (req: CorrectRequest) => ipcRenderer.invoke(CH.correctImage, req),
   customList: () => ipcRenderer.invoke(CH.customList),

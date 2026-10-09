@@ -3,11 +3,14 @@
  * - 支持进程池（CPU 模式多进程加速，第十章 10.1）
  * - 引擎崩溃自动重启；Python 不可用时由 EngineManager 降级到 Node 内置引擎
  */
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'child_process'
+import { spawn, execFile, type ChildProcessWithoutNullStreams } from 'child_process'
+import { promisify } from 'util'
 import { existsSync } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
 import { EventEmitter } from 'events'
+
+const execFileAsync = promisify(execFile)
 
 export interface EngineCapabilities {
   faceBackend?: string
@@ -124,7 +127,7 @@ class RpcWorker {
     }
   }
 
-  call<T = unknown>(method: string, params: Record<string, unknown>, timeoutMs = 120000): Promise<T> {
+  call<T = unknown>(method: string, params: Record<string, unknown>, timeoutMs = 60000): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       if (!this.proc) return reject(new Error('engine not started'))
       const id = ++this.seq
@@ -208,20 +211,20 @@ export class PythonEnginePool {
     return null
   }
 
-  /** 查找可用 Python：环境变量 > python/python3/py > 常见安装位置 */
-  static findPython(): string | null {
+  /** 查找可用 Python（异步非阻塞，避免 spawnSync 卡死主进程事件循环）：环境变量 > python/python3/py */
+  static async findPython(): Promise<string | null> {
     if (process.env.AI_ENGINE_PYTHON && existsSync(process.env.AI_ENGINE_PYTHON)) {
       return process.env.AI_ENGINE_PYTHON
     }
     const names = process.platform === 'win32' ? ['python', 'python3', 'py'] : ['python3', 'python']
     for (const name of names) {
       try {
-        const r = spawnSync(name, ['--version'], { windowsHide: true, timeout: 8000 })
-        // Windows Store 别名占位程序会返回 exit 9009/9009 之类
-        if (r.status === 0 && /Python 3\./.test((r.stdout || '').toString() + (r.stderr || '').toString())) {
-          // 校验能 import cv2（缺库也允许运行：引擎会自报降级）；至少能执行
-          const check = spawnSync(name, ['-c', 'import sys;print(sys.version_info[0])'], { windowsHide: true, timeout: 8000 })
-          if (check.status === 0 && check.stdout.toString().trim() === '3') return name
+        const r = await execFileAsync(name, ['--version'], { timeout: 6000, windowsHide: true })
+        const out = String(r.stdout || '') + String(r.stderr || '')
+        if (/Python 3\./.test(out)) {
+          // 校验能拿到主版本号（Windows Store 别名占位程序不会返回 3）
+          const check = await execFileAsync(name, ['-c', 'import sys;print(sys.version_info[0])'], { timeout: 6000, windowsHide: true })
+          if (String(check.stdout || '').trim() === '3') return name
         }
       } catch {
         /* continue */
@@ -280,7 +283,8 @@ export class PythonEnginePool {
     try {
       return await w.call('detect', { path, imageId })
     } catch (e) {
-      // 崩溃自动重启一次
+      // 超时不重试（避免单张卡死时长翻倍，使“停止”长时间无效）；仅引擎进程崩溃才重启重试一次
+      if (String((e as Error)?.message || e).includes('timeout')) throw e
       await w.start().catch(() => undefined)
       return await w.call('detect', { path, imageId })
     }
