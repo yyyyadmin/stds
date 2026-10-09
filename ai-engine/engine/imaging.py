@@ -13,11 +13,23 @@ class LoadError(Exception):
 
 
 def imread_any(path):
-    """读取任意受支持图像为 BGR ndarray；RAW/HEIC 尽力解码"""
+    """读取任意受支持图像为 BGR ndarray；RAW/HEIC 尽力解码
+
+    关键：cv2.imread 在 Windows 上无法处理含中文/非 ASCII 的路径，会直接抛
+    "OpenCV(-5:Bad argument) in function 'imread' ... Conversion error: filename"，
+    导致每张图检测失败并触发引擎熔断。统一改用 np.fromfile + cv2.imdecode
+    （numpy 走宽字符文件 API，支持中文路径），RAW/HEIC 则用二进制文件对象喂入。
+    """
     ext = os.path.splitext(path)[1].lower()
-    img = cv2.imread(path, cv2.IMREAD_COLOR)
-    if img is not None:
-        return img
+    # 常规格式（JPEG/PNG/BMP/WebP...）：Unicode 安全读取
+    try:
+        buf = np.fromfile(path, dtype=np.uint8)
+        if buf.size:
+            img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            if img is not None:
+                return img
+    except Exception:  # noqa: BLE001
+        pass
     # HEIC
     if ext in (".heic", ".heif"):
         try:
@@ -25,17 +37,19 @@ def imread_any(path):
             from PIL import Image
 
             pillow_heif.register_heif_opener()
-            pil = Image.open(path).convert("RGB")
+            with open(path, "rb") as f:
+                pil = Image.open(f).convert("RGB")
             return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
         except Exception:  # noqa: BLE001
             pass
-    # RAW：尝试 rawpy -> 内嵌 JPEG
+    # RAW：尝试 rawpy -> 内嵌 JPEG（用二进制文件对象喂入，绕开中文路径）
     if ext in (".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf", ".rw2", ".dng"):
         try:
             import rawpy  # type: ignore
 
-            with rawpy.imread(path) as raw:
-                rgb = raw.postprocess(use_camera_wb=True)
+            with open(path, "rb") as f:
+                with rawpy.imread(f) as raw:
+                    rgb = raw.postprocess(use_camera_wb=True)
             return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         except Exception:  # noqa: BLE001
             pass
@@ -43,7 +57,8 @@ def imread_any(path):
         try:
             import imageio  # type: ignore
 
-            rgb = imageio.imread(path)
+            with open(path, "rb") as f:
+                rgb = imageio.imread(f)
             if rgb.ndim == 3 and rgb.shape[2] >= 3:
                 return cv2.cvtColor(rgb[:, :, :3], cv2.COLOR_RGB2BGR)
         except Exception:  # noqa: BLE001
