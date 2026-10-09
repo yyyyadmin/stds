@@ -1,0 +1,3 @@
+# 可选增强：MediaPipe FaceLandmarker（478 点 + eyeBlink blendshape）
+# 装不上（如某平台无 wheel）时引擎自动回落 YuNet，构建不失败。
+mediapipe>=0.10.14

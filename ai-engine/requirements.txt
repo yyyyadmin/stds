@@ -6,6 +6,7 @@ Pillow>=10.2.0
 
 # 可选增强：ONNX 深度学习模型（闭眼 OCEC / 视线 MobileGaze / 表情 / 人脸检测 / 嵌入）
 # 未安装或未放置 models/ 权重时，引擎自动降级为规则算法，功能不中断
+# MediaPipe FaceLandmarker 见 requirements-optional.txt（best-effort，构建脚本单独非致命安装）
 onnxruntime>=1.17.0 ; platform_machine != "loongarch64"
 # NVIDIA GPU 用户改装 onnxruntime-gpu 获得加速（Windows）
 # onnxruntime-gpu>=1.17.0

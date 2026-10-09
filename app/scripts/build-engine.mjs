@@ -87,6 +87,12 @@ const P = venvPy
 console.log('安装引擎依赖与 PyInstaller…')
 run(P, ['-m', 'pip', 'install', '--upgrade', 'pip'])
 run(P, ['-m', 'pip', 'install', '-r', join(ENGINE_SRC, 'requirements.txt')])
+// 可选：尽力安装 mediapipe（失败仅告警，不阻断构建——引擎回落 YuNet）
+console.log('尝试安装可选依赖 mediapipe（失败可忽略，将回落 YuNet）…')
+const mp = spawnSync(P, ['-m', 'pip', 'install', '-r', join(ENGINE_SRC, 'requirements-optional.txt')], { stdio: 'inherit', env: process.env })
+if (mp.status !== 0) {
+  console.warn('⚠️ mediapipe 安装失败：本平台将回落 YuNet（不影响构建成功）。')
+}
 run(P, ['-m', 'pip', 'install', 'pyinstaller>=6.0'])
 
 // 3) PyInstaller 打包（onedir）
