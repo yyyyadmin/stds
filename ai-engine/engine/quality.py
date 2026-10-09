@@ -103,17 +103,22 @@ def black_white_score(bgr):
 # ---------- 半截头 ----------
 
 def half_head_score(bgr_shape, faces, upper_bodies, scale):
-    """半截头：通俗定义 = 头部不完整（被画面边缘裁掉）。
-    关键：YuNet 脸框只覆盖 眉~下巴，不含额头/头顶/发饰与两侧耳发，
-    故不能只看脸框是否贴边，而要按“完整头部所需余量”反推头顶/侧是否被裁：
-    - 脸框上方应留 ~0.5 脸高（额头+头顶+发型）；不够→头顶出框
-    - 脸框左右应留 ~0.3 脸宽（耳与侧发）；不够→侧向出框
-    - 下巴以下贴底（保守，低权重）
-    - 有躯干无完整头部 / 躯干多于人脸
-    置信度按“缺多少余量”线性给分：轻微出框→待确认(0.55~0.8)，明显/贴边→高(>0.8)。
-    余量阈值与脸尺寸成比例，小脸/大脸一致；不依赖绝对像素，故不受工作图缩放影响。
+    """半截头：头部被画面边缘裁掉。
+    模型（按用户提供的"贴边检测"实现，替换掉原"头部余量反推"）：以 478 landmark 外接框
+    （归一化 0~1）判是否触碰画面边缘，并用脸高/脸宽占比过滤背景小脸，避免远景路人误报。
+    - FACE_MIN_SIZE：脸高归一化低于此值视为背景人物，完全跳过（不参与任何判定）
+    - CROP_MIN_FACE：脸高/脸宽占比低于此值即使贴边也不算半截头（单人特写里小脸贴边是正常构图）
+    - EDGE_MARGIN：贴边阈值（归一化，约占图 1.2%）
+    置信度按"越贴边越高"：crop_conf = 1 - edge_dist/(EDGE_MARGIN*3)，clamp 到 [0,0.98]。
+    输入优先用 face["mp"]["bbox"]（478 外接框，像素）；mediapipe 关闭/未挂载时回落 YuNet 脸框作代理。
+    另保留两条与"贴边"正交的躯干安全网（有身子无头 / 躯干多于人脸）——它们不属于被替换的余量反推，
+    且覆盖"头完全出框只剩躯干"的真实半截场景；如需 100% 字面移植可去掉。
+    本函数只读 faces/upper，不改任何人脸维度输入；调用签名不变，其余检测逻辑零影响。
     """
     H, W = bgr_shape[:2]
+    EDGE_MARGIN = 0.012    # 贴边阈值（归一化，约占图宽 1.2%）
+    CROP_MIN_FACE = 0.12   # 脸高/脸宽占图低于此值不算半截头（防小脸误报）
+    FACE_MIN_SIZE = 0.06   # 脸高低于此值视为背景人物，完全跳过
     reasons = []
     conf = 0.0
 
@@ -123,28 +128,40 @@ def half_head_score(bgr_shape, faces, upper_bodies, scale):
             conf = c
             reasons[:] = [msg]
 
+    if W <= 0 or H <= 0:
+        return 0.0, "头部完整"
     for f in faces:
-        x, y, w, h = f["box"]
-        head_top_need = h * 0.50   # 额头 + 头顶 + 常见发型/发饰
-        head_side_need = w * 0.30  # 耳与侧发
-        # 头顶：脸框上缘距画面顶不足一个“额头+头顶”高度 → 头顶被裁
-        if y < head_top_need:
-            deficit = (head_top_need - y) / head_top_need  # 0~1，越大越严重
-            bump(min(0.97, 0.55 + 0.42 * deficit),
-                 "头顶出框：脸框上缘距顶 %dpx，完整头部约需 %dpx（缺 %.0f%%）" % (int(y), int(head_top_need), deficit * 100))
-        # 左右：脸框距较近的一侧画面边不足侧发宽度 → 头部横向被裁
-        left_gap = x
-        right_gap = W - (x + w)
-        side_gap = min(left_gap, right_gap)
-        if side_gap < head_side_need:
-            deficit = (head_side_need - side_gap) / head_side_need
-            side = "左" if left_gap <= right_gap else "右"
-            bump(min(0.95, 0.55 + 0.40 * deficit),
-                 "头部%s侧出框：脸框距%s边 %dpx，约需 %dpx（缺 %.0f%%）" % (side, side, int(side_gap), int(head_side_need), deficit * 100))
-        # 下巴以下贴底（保守：只有几乎贴底才轻幅提示）
-        bottom_gap = H - (y + h)
-        if bottom_gap < h * 0.10:
-            bump(0.60, "下巴以下贴底：脸框下缘距底 %dpx" % int(bottom_gap))
+        mp = f.get("mp") or {}
+        bbox = mp.get("bbox") or f.get("box")  # 优先 478 外接框(像素)，回落 YuNet 脸框
+        if not bbox:
+            continue
+        x = bbox[0] / W
+        y = bbox[1] / H
+        bw = bbox[2] / W
+        bh = bbox[3] / H
+        if bh < FACE_MIN_SIZE:
+            continue  # 背景路人：完全跳过，不参与任何判定
+        is_large = (bh > CROP_MIN_FACE or bw > CROP_MIN_FACE)
+        touch = (
+            x < EDGE_MARGIN or
+            y < EDGE_MARGIN or
+            x + bw > 1 - EDGE_MARGIN or
+            y + bh > 1 - EDGE_MARGIN
+        )
+        if not (is_large and touch):
+            continue
+        edge_dist = min(x, y, 1 - x - bw, 1 - y - bh)  # 到最近边缘距离（贴边时 < EDGE_MARGIN）
+        crop_conf = max(0.0, min(0.98, 1.0 - edge_dist / (EDGE_MARGIN * 3)))
+        sides = []
+        if y < EDGE_MARGIN:
+            sides.append("上/头顶")
+        if x < EDGE_MARGIN:
+            sides.append("左")
+        if x + bw > 1 - EDGE_MARGIN:
+            sides.append("右")
+        if y + bh > 1 - EDGE_MARGIN:
+            sides.append("下/下巴")
+        bump(crop_conf, "头部贴边出框（%s），脸框占图高%.0f%%" % ("/".join(sides) or "边缘", bh * 100))
     if not faces and upper_bodies:
         # 有身子没头：躯干框上缘必须在画面上部才说明是"人头出框"
         for ub in upper_bodies:
