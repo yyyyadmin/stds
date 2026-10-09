@@ -19,6 +19,13 @@ def _iou(a, b):
     return inter / union if union > 0 else 0.0
 
 
+# YuNet 脸框与 FaceLandmarker 478 点外接框的最小匹配 IoU。闭眼时 landmark 点集纵向内缩、
+# 外接框变紧，IoU 会系统性掉到 ~0.27（CI 实测：闭眼 0.269 vs 睁眼 0.489），0.30 会恰好漏掉
+# 最该检测的闭眼脸并回落到弱启发式。不同人之间脸框几乎不重叠（IoU≈0），0.20 既跨过 0.269
+# 又远高于任何邻脸误配，安全区分"同一张脸"与"串到邻脸"。待真实合照数据再校。
+_IOU_MATCH_MIN = 0.20
+
+
 class FaceLandmarkEnhancer:
     def __init__(self, log=None):
         self.log = log or (lambda *a, **k: None)
@@ -97,7 +104,7 @@ class FaceLandmarkEnhancer:
                 if v > best_iou:
                     best_iou, best_j = v, j
             ious.append(round(best_iou, 3))
-            if best_j >= 0 and best_iou >= 0.30:
+            if best_j >= 0 and best_iou >= _IOU_MATCH_MIN:
                 _bbox, pts, blend, matrix = cands[best_j]
                 used.add(best_j)
                 face["mp"] = {
