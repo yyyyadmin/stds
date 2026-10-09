@@ -114,6 +114,11 @@ def haar_path(name):
     return p if os.path.exists(p) else None
 
 
+def mediapipe_task_path():
+    """MediaPipe FaceLandmarker 权重（face_landmarker.task，已随仓库入库）。"""
+    return find_model("face_landmarker.task", "*.task")
+
+
 def yunet_path():
     """YuNet 人脸检测权重（可选放置于 models/）"""
     return find_model("face_detection_yunet*.onnx", "scrfd*.onnx", "retinaface*.onnx", "ufadd*.onnx")

@@ -22,6 +22,9 @@ def run():
         "blend_keys": 0,
         "yunet_backend": "none",
         "yunet_ok": False,
+        "landmarker_available": False,
+        "enhance_smoke_ok": False,
+        "enhanced_faces": 0,
         "error": None,
     }
     # --- yunet 共存冒烟（独立 try，先跑）：证明 cv2 与 mediapipe 在同一冻结引擎里都能用（Phase1 头号风险）---
@@ -70,6 +73,18 @@ def run():
             out["blend_keys"] = len(res.face_blendshapes[0])
     except Exception as e:  # noqa: BLE001
         out["error"] = "%s: %s" % (type(e).__name__, e)
+    # --- 增强层冒烟：能实例化 + 对合成图跑 enhance() 不崩（无脸应返回 0）---
+    try:
+        from .landmarks import FaceLandmarkEnhancer
+        enr = FaceLandmarkEnhancer()
+        out["landmarker_available"] = bool(enr.available)
+        fake = [{"box": [10, 10, 100, 100], "score": 0.9, "landmarks5": [(0, 0)] * 5}]
+        n = enr.enhance(np.full((200, 200, 3), 128, dtype=np.uint8), fake)
+        out["enhance_smoke_ok"] = True
+        out["enhanced_faces"] = int(n)
+    except Exception as _ee:  # noqa: BLE001
+        out["enhance_smoke_ok"] = False
+        out["error"] = (out["error"] or "") + " |enhance: %s: %s" % (type(_ee).__name__, _ee)
     return out
 
 
