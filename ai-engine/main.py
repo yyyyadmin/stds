@@ -99,4 +99,7 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--selfcheck" in sys.argv:
+        from engine.selfcheck import main as _selfcheck_main
+        sys.exit(_selfcheck_main())
     main()
