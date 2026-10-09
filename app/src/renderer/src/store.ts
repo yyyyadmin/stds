@@ -6,7 +6,7 @@
 import { create } from 'zustand'
 import type { AppSettings, CategoryKey, ImageRecord, DimensionKey } from '../../shared/types'
 import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, DIMENSION_LABELS, BAD_DIMENSIONS, isBadDim, guessMidDim } from '../../shared/types'
-import type { AuthState, BootstrapInfo, ConsumeResult, MoveRequest } from '../../shared/ipc'
+import type { AuthState, BootstrapInfo, ConsumeResult, MoveRequest, UpdateInfo } from '../../shared/ipc'
 import type { ScanProgress } from '../../main/services/scanner'
 import type { ExportProgress } from '../../main/services/exporter'
 
@@ -58,6 +58,9 @@ interface StoreState {
   showSettings: boolean
   showLogin: boolean
   showMember: boolean
+  /** 启动自动检查到新版时的更新弹窗 */
+  showUpdate: boolean
+  updateInfo: UpdateInfo | null
   auth: AuthState
   toast: { msg: string; kind: 'info' | 'error' | 'success' } | null
   engineBusy: boolean
@@ -111,6 +114,9 @@ interface StoreState {
   undoMove(): Promise<void>
   importPaths(paths: string[]): Promise<void>
   pickAndImport(): Promise<void>
+  pickAndImportImages(): Promise<void>
+  /** 启动静默检查更新：有新版且未跳过该版本时弹 UpdateDialog */
+  checkUpdateSilent(): Promise<void>
   runExport(opts: Parameters<typeof window.api.exportRun>[0]): Promise<void>
   cancelExport(): Promise<void>
   dismissToast(): void
@@ -131,6 +137,9 @@ function applyTheme(t: 'light' | 'dark'): void {
     document.documentElement.style.colorScheme = t
   }
 }
+
+/** 启动更新检查只跑一次（bootstrap 可能因 HMR/重渲染重入） */
+let updateChecked = false
 
 export const useStore = create<StoreState>((set, get) => ({
   ready: false,
@@ -171,6 +180,8 @@ export const useStore = create<StoreState>((set, get) => ({
   toast: null,
   engineBusy: false,
   appVersion: '',
+  showUpdate: false,
+  updateInfo: null,
 
   async bootstrap() {
     const info: BootstrapInfo = await window.api.bootstrap()
@@ -189,6 +200,21 @@ export const useStore = create<StoreState>((set, get) => ({
     void window.api.authBootstrap().then((a) => set({ auth: a }))
     await get().openCategory(null)
     get().bindEvents()
+    // 启动后静默检查更新（错开 2.5s 不拖慢首屏），有新版自动弹窗
+    setTimeout(() => void get().checkUpdateSilent(), 2500)
+  },
+
+  async checkUpdateSilent() {
+    if (updateChecked) return
+    updateChecked = true
+    try {
+      const r = await window.api.checkUpdate()
+      if (!r || !r.has_update || !r.latest_version) return
+      if (get().settings.skipUpdateVersion === r.latest_version) return
+      set({ updateInfo: r, showUpdate: true })
+    } catch {
+      /* 无网/后台异常：启动静默检查不打扰 */
+    }
   },
 
   async setTheme(t) {
@@ -607,6 +633,11 @@ export const useStore = create<StoreState>((set, get) => ({
   async pickAndImport() {
     const dir = await window.api.pickFolder()
     if (dir) await get().importPaths([dir])
+  },
+
+  async pickAndImportImages() {
+    const files = await window.api.pickImages()
+    if (files && files.length) await get().importPaths(files)
   },
 
   async runExport(opts) {

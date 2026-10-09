@@ -233,6 +233,8 @@ export interface AppSettings {
   theme: 'light' | 'dark'
   lastExportDir: string | null
   lastImportDir: string | null
+  /** 启动自动更新弹窗：对此版本点过“跳过”后不再弹，新版本再弹 */
+  skipUpdateVersion?: string | null
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -247,7 +249,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   viewMode: 'grid',
   theme: 'light',
   lastExportDir: null,
-  lastImportDir: null
+  lastImportDir: null,
+  skipUpdateVersion: null
 }
 
 /** 支持的导入格式（第九章） */

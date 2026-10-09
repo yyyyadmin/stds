@@ -33,7 +33,7 @@ import { ensureBigPreview } from './services/big'
 import { authManager } from './services/auth'
 import { engineManager } from './engine'
 import { autoTune, resetTuned, TUNE_MIN_CORRECTIONS } from './services/tuner'
-import { CAT_LIBRARY, CAT_TRASH, isBadDim, BAD_DIMENSIONS, type DimensionKey, type ImageRecord } from '../shared/types'
+import { CAT_LIBRARY, CAT_TRASH, isBadDim, BAD_DIMENSIONS, SUPPORTED_EXTS, type DimensionKey, type ImageRecord } from '../shared/types'
 
 export function registerIpc(win: BrowserWindow): void {
   const send = (ch: string, ...args: unknown[]) => {
@@ -79,6 +79,19 @@ export function registerIpc(win: BrowserWindow): void {
   ipcMain.handle(CH.pickFolder, async () => {
     const r = await dialog.showOpenDialog(win, { title: '选择照片文件夹', properties: ['openDirectory'] })
     return r.canceled ? null : r.filePaths[0]
+  })
+
+  // 多选图片：单张、Ctrl/Shift 多张均可；后端 importPaths 同时兼容文件与目录
+  ipcMain.handle(CH.pickImages, async () => {
+    const r = await dialog.showOpenDialog(win, {
+      title: '选择照片（可多选，支持 RAW/HEIC）',
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        { name: '图片', extensions: SUPPORTED_EXTS.map((x) => x.slice(1)) },
+        { name: '所有文件', extensions: ['*'] }
+      ]
+    })
+    return r.canceled ? null : r.filePaths
   })
 
   ipcMain.handle(CH.importPaths, async (_e, paths: string[]) => {

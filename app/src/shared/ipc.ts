@@ -70,6 +70,7 @@ export const CH = {
   importCancel: 'import:cancel',
   importPickFolder: 'import:pick-folder',
   pickFolder: 'dialog:pick-folder',
+  pickImages: 'dialog:pick-images',
   listImages: 'images:list',
   imageGet: 'images:get',
   categoryCounts: 'images:counts',
@@ -164,6 +165,7 @@ export interface CorrectRequest {
 export interface RendererApi {
   bootstrap(): Promise<BootstrapInfo>
   pickFolder(): Promise<string | null>
+  pickImages(): Promise<string[] | null>
   importPaths(paths: string[]): Promise<{ added: number; skipped: number; existed: number }>
   importCancel(): Promise<void>
   listImages(filter: { category?: CategoryKey; status?: string }): Promise<ImageRecord[]>

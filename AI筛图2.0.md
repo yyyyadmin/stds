@@ -402,6 +402,25 @@ CPU模式用ProcessPoolExecutor开进程池，进程数=CPU核心数-1，8进程
 
 预计300-500MB（安装包大小无所谓，检测准确性优先）。Electron框架约150MB，AI模型权重约150-250MB，Python运行时约50MB。
 
+### 11.4 启动自动更新
+
+**已实现（浏览器下载安装包方式）**：软件启动约 2.5 秒后静默调用云端后台 `check_update.php`，按当前系统自动携带 `platform`（windows / mac=Intel / arm=Apple 芯片）与本地版本号。后台返回 `has_update` 时自动弹出更新对话框，展示「当前版本 → 新版本」、更新说明与包大小：
+
+- **立即下载**：用系统浏览器打开后台返回的对应平台安装包地址，运行安装包覆盖安装即升级，图库与修正记录自动保留。
+- **跳过此版本**：记住 `latest_version`（持久化到设置 `skipUpdateVersion`），同一版本不再自动弹，下次发布新版才会再弹。
+- **稍后再说**：仅关闭弹窗，不记跳过。
+
+无网络或后台异常时**静默不打扰**（不弹错误框）。设置页仍保留手动「检查更新」，与启动自动检查共用同一后台接口。
+
+> 依赖：能否弹窗取决于后台 `check_update.php` 是否配好新版的 `latest_version + download_url`（可选 `notes / file_size_mb`）。软件端已就绪。
+
+**可选升级：软件内一键静默下载 + 自动安装（electron-updater）**。体验更好（关掉就自动装好），但工程量与前置条件更大：
+
+- 需额外托管一个静态 `latest.yml`（自动更新描述文件），与安装包同目录、版本随发布同步。
+- **Windows** 需代码签名证书（否则 SmartScreen 拦截且自动更新不可靠）。
+- **macOS** 需 Apple Developer ID 签名 + 公证（notarize），electron-updater 的标准更新流程强制要求。
+- 未签名的双平台分发场景下，当前的浏览器下载安装方式反而最稳。是否切换到 electron-updater 视商用签名进度再定。
+
 
 ## 第十二章 开发计划
 

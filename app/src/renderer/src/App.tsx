@@ -14,6 +14,7 @@ import SettingsDialog from './components/SettingsDialog'
 import DropZone from './components/DropZone'
 import LoginDialog from './components/LoginDialog'
 import MemberCenterDialog from './components/MemberCenterDialog'
+import UpdateDialog from './components/UpdateDialog'
 
 export default function App(): JSX.Element {
   const ready = useStore((s) => s.ready)
@@ -23,6 +24,7 @@ export default function App(): JSX.Element {
   const showSettings = useStore((s) => s.showSettings)
   const showLogin = useStore((s) => s.showLogin)
   const showMember = useStore((s) => s.showMember)
+  const showUpdate = useStore((s) => s.showUpdate)
   const viewMode = useStore((s) => s.viewMode)
   const toast = useStore((s) => s.toast)
   const dismissToast = useStore((s) => s.dismissToast)
@@ -41,7 +43,7 @@ export default function App(): JSX.Element {
     const onKey = (e: KeyboardEvent): void => {
       const target = e.target as HTMLElement
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return
-      const dialogOpen = showExport || showSettings || showLogin || showMember
+      const dialogOpen = showExport || showSettings || showLogin || showMember || showUpdate
       if (!previewId && !dialogOpen) {
         if (e.key === '1') void setViewMode('grid')
         if (e.key === '2') void setViewMode('list')
@@ -79,7 +81,7 @@ export default function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [previewId, showExport, showSettings, showLogin, showMember, viewMode, setViewMode, stepPreview, stepLarge, closePreview])
+  }, [previewId, showExport, showSettings, showLogin, showMember, showUpdate, viewMode, setViewMode, stepPreview, stepLarge, closePreview])
 
   // toast 自动消失
   useEffect(() => {
@@ -145,6 +147,7 @@ export default function App(): JSX.Element {
           {showSettings && <SettingsDialog />}
           {showLogin && <LoginDialog />}
           {showMember && <MemberCenterDialog />}
+          {showUpdate && <UpdateDialog />}
           {toast && (
             <div
               className={

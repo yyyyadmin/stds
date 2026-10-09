@@ -12,6 +12,18 @@ import { EventEmitter } from 'events'
 
 const execFileAsync = promisify(execFile)
 
+/**
+ * 序列化为纯 ASCII 的 JSON：把所有非 ASCII 字符转义成 \uXXXX。
+ * 这样写进引擎 stdin 的字节全是 ASCII，无论 PyInstaller 冻结 exe 用 GBK 还是 UTF-8
+ * 解码都完全一致，彻底避免含中文的照片路径在 stdio 传输阶段被解成乱码（导致 cannot decode）。
+ */
+function asciiJson(obj: unknown): string {
+  return JSON.stringify(obj).replace(/[\u007f-\uffff]/g, (c) => {
+    const h = c.charCodeAt(0).toString(16)
+    return '\\u' + '0'.repeat(4 - h.length) + h
+  })
+}
+
 export interface EngineCapabilities {
   faceBackend?: string
   eyes?: string
@@ -136,14 +148,14 @@ class RpcWorker {
         reject(new Error('engine timeout: ' + method))
       }, timeoutMs)
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer })
-      this.proc.stdin.write(JSON.stringify({ id, method, params }) + '\n')
+      this.proc.stdin.write(asciiJson({ id, method, params }) + '\n')
     })
   }
 
   stop(): void {
     if (this.proc) {
       try {
-        this.proc.stdin.write(JSON.stringify({ id: -1, method: 'shutdown', params: {} }) + '\n')
+        this.proc.stdin.write(asciiJson({ id: -1, method: 'shutdown', params: {} }) + '\n')
         this.proc.stdin.end()
       } catch {
         /* ignore */

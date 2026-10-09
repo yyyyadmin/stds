@@ -1,7 +1,8 @@
 /**
- * 顶栏：导入 / 开始筛选（进度条+百分比+已处理数量+停止）/ 视图切换 / 排序 / 导出 / 设置
+ * 顶栏：导入（单图/多选/文件夹三合一入口）/ 开始筛选（进度条+百分比+已处理数量+停止）/ 视图切换 / 排序 / 导出 / 设置
  * 引擎状态徽章（Python 完整引擎 / Node 基础引擎 / GPU-CPU）
  */
+import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store'
 import type { SortKey } from '../store'
 
@@ -23,15 +24,64 @@ export default function TopBar(): JSX.Element {
   const isMember = auth.loggedIn && (user?.membership.level || 'free') !== 'free' && !user?.membership.is_expired
   const balance = user?.points.balance ?? 0
   const dark = s.settings.theme === 'dark'
+  // 导入菜单：一个入口按钮，弹开后选“图片（可多选）”或“文件夹”
+  const [importMenu, setImportMenu] = useState(false)
+  const importRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!importMenu) return
+    const onDown = (e: MouseEvent): void => {
+      if (importRef.current && !importRef.current.contains(e.target as Node)) setImportMenu(false)
+    }
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setImportMenu(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [importMenu])
 
   return (
     <header className="shrink-0 bg-panel border-b border-line px-3 py-2 flex items-center gap-2 text-sm">
       <div className="font-bold text-fg mr-1 whitespace-nowrap">
         筛图大师 <span className="text-[10px] font-normal text-fg3">v2.0</span>
       </div>
-      <button className="btn" onClick={() => void s.pickAndImport()} disabled={!!s.importProgress}>
-        {s.importProgress ? `导入中 ${s.importProgress.done}/${s.importProgress.total}` : '导入文件夹'}
-      </button>
+      <div className="relative" ref={importRef}>
+        <button
+          className="btn"
+          disabled={!!s.importProgress}
+          onClick={() => setImportMenu((v) => !v)}
+          title="支持单张、多选图片，也支持整个文件夹（或直接把照片拖进窗口）"
+        >
+          {s.importProgress ? `导入中 ${s.importProgress.done}/${s.importProgress.total}` : '导入照片 ▾'}
+        </button>
+        {importMenu && (
+          <div className="absolute left-0 top-full mt-1 z-40 w-52 rounded-md border border-line bg-panel shadow-xl py-1">
+            <button
+              className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 transition-colors"
+              onClick={() => {
+                setImportMenu(false)
+                void s.pickAndImportImages()
+              }}
+            >
+              选择图片…
+              <span className="block text-[11px] text-fg3 mt-0.5">单张或 Ctrl/Shift 多选</span>
+            </button>
+            <button
+              className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 transition-colors"
+              onClick={() => {
+                setImportMenu(false)
+                void s.pickAndImport()
+              }}
+            >
+              选择文件夹…
+              <span className="block text-[11px] text-fg3 mt-0.5">递归导入全部照片</span>
+            </button>
+          </div>
+        )}
+      </div>
       {s.importProgress && (
         <button className="btn-danger" title="取消导入（已导入的记录保留）" onClick={() => void window.api.importCancel()}>
           取消导入

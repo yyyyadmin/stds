@@ -15,6 +15,7 @@ function sub<T>(channel: string, cb: (payload: T) => void): () => void {
 const api: RendererApi = {
   bootstrap: () => ipcRenderer.invoke(CH.appBootstrap),
   pickFolder: () => ipcRenderer.invoke(CH.pickFolder),
+  pickImages: () => ipcRenderer.invoke(CH.pickImages),
   importPaths: (paths: string[]) => ipcRenderer.invoke(CH.importPaths, paths),
   importCancel: () => ipcRenderer.invoke(CH.importCancel),
   listImages: (filter) => ipcRenderer.invoke(CH.listImages, filter),
