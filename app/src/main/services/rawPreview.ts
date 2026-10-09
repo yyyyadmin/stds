@@ -3,11 +3,12 @@
  * 相机 RAW 文件内嵌 1~N 个完整 JPEG 预览（相机已按显示方向渲染），
  * sharp/LibRaw 失败时直接从文件里提取最大内嵌 JPEG，纯 JS 无原生依赖，全平台可用。
  */
-import { readFileSync, existsSync, mkdirSync, statSync } from 'fs'
+import { readFileSync, existsSync, mkdirSync, statSync, readdirSync, unlinkSync } from 'fs'
 import { extname, join } from 'path'
 import { createHash } from 'crypto'
 import { app } from 'electron'
 import sharp from 'sharp'
+import exifr from 'exifr'
 
 const RAW_EXTS = new Set([
   '.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.srf', '.sr2', '.raf', '.rw2',
@@ -73,9 +74,18 @@ function wholeFile(path: string): Buffer {
   return b
 }
 
-/** EXIF Orientation(0x0112) -> 需顺时针旋转的角度。直接从文件字节扫 'Exif\0\0' 解析 TIFF IFD0，
- *  不依赖 libvips（libvips 读不了 CR3 容器的 EXIF，这正是 RAW 缩略图/检测侧躺的根因）。 */
+/** EXIF Orientation(0x0112) -> 需顺时针旋转的角度。优先用 exifr 读容器真实 EXIF（支持 CR3/HEIC 等），
+ *  exifr 失败时退回从文件字节扫 'Exif\0\0' 解析 TIFF IFD0（仅对 JPEG 型 EXIF 前缀有效）。 */
 const ORIENT_ANGLE: Record<number, number> = { 1: 0, 2: 0, 3: 180, 4: 0, 5: 90, 6: 90, 7: 270, 8: 270 }
+async function exifAngleOf(path: string): Promise<number> {
+  try {
+    const o = await exifr.orientation(path)
+    if (o && o >= 1 && o <= 8) return ORIENT_ANGLE[o] ?? 0
+  } catch {
+    /* exifr 读不了（异常文件/未支持容器）时退回字节扫描 */
+  }
+  return orientAngleOfBytes(wholeFile(path))
+}
 function orientAngleOfBytes(buf: Buffer): number {
   const i = buf.indexOf(Buffer.from([0x45, 0x78, 0x69, 0x66, 0x00, 0x00])) // 'Exif\0\0'
   if (i < 0) return 0
@@ -105,12 +115,7 @@ export async function sharpInput(path: string): Promise<string | Buffer> {
   if (cache && cache.path === path) return cache.buf
   const jpeg = extractEmbeddedJpeg(path)
   if (!jpeg) return path
-  let angle = 0
-  try {
-    angle = orientAngleOfBytes(wholeFile(path))
-  } catch {
-    angle = 0
-  }
+  const angle = await exifAngleOf(path)
   cache = { path, buf: jpeg, angle }
   return jpeg
 }
@@ -121,10 +126,12 @@ export async function orientedSharp(path: string): Promise<ReturnType<typeof sha
   const input = await sharpInput(path)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const s = sharp(input as any, { failOn: 'none' }) as ReturnType<typeof sharp>
-  if (Buffer.isBuffer(input)) {
-    const angle = cache && cache.path === path ? cache.angle : 0
+  if (isRawPath(path)) {
+    // RAW：一律按容器 EXIF 角度显式旋转（不依赖 libvips auto-orient，它也读不了 CR3 容器方向）
+    const angle = cache && cache.path === path ? cache.angle : await exifAngleOf(path)
     return (angle ? s.rotate(angle) : s) as ReturnType<typeof sharp>
   }
+  // JPG/HEIC/...：交给 sharp auto-orient（libvips 能读这些容器的 EXIF）
   return s.rotate() as ReturnType<typeof sharp>
 }
 
@@ -136,6 +143,26 @@ export async function decodeSource(path: string): Promise<{ input: string | Buff
 
 export function hasFile(p: string): boolean {
   return existsSync(p)
+}
+
+/** 清理引擎归一化 JPEG 磁盘缓存（升级方向修正后强制重建用），返回删除文件数 */
+export function clearEngineInputCache(): number {
+  const dir = join(app.getPath('userData'), 'data', 'engine-input')
+  let n = 0
+  try {
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith('.jpg')) continue
+      try {
+        unlinkSync(join(dir, f))
+        n++
+      } catch {
+        /* 占用中的文件跳过 */
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return n
 }
 
 /** 需要归一化后才能交给 Python 引擎的格式：冻结引擎的 libraw/heif 原生件不可靠，而 sharp 链路已被验证可用 */

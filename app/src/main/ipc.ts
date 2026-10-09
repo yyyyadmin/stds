@@ -30,6 +30,7 @@ import { scanner, reclassifyAll, type ScanProgress } from './services/scanner'
 import { exporter, type ExportOptions } from './services/exporter'
 import { importPaths, backfillThumbnails, clearThumbCache } from './services/importer'
 import { ensureBigPreview, clearBigCache } from './services/big'
+import { clearEngineInputCache } from './services/rawPreview'
 import { authManager } from './services/auth'
 import { engineManager } from './engine'
 import { autoTune, resetTuned, TUNE_MIN_CORRECTIONS } from './services/tuner'
@@ -302,10 +303,11 @@ export function registerIpc(win: BrowserWindow): void {
 
   // 一次性迁移：旧版缩略图未应用 EXIF 方向（竖拍被显示成横拍）。升级后清空缩略图缓存
   // 并重置指向，触发全量重建为正确方向；仅跑一次（thumbOrientVersion 记录已迁移）。
-  const THUMB_ORIENT_VERSION = 5
+  const THUMB_ORIENT_VERSION = 6
   if (getSettings().thumbOrientVersion !== THUMB_ORIENT_VERSION) {
     clearThumbCache()
     clearBigCache() // 旧版 RAW/HEIC 大图预览也是侧躺的，一并清掉强制重建
+    clearEngineInputCache() // 旧版归一化 JPEG 也是侧躺的，一并清掉，避免引擎复用侧躺输入
     getDb().prepare(`UPDATE images SET thumb = ''`).run()
     saveSettings({ thumbOrientVersion: THUMB_ORIENT_VERSION })
   }

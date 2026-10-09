@@ -8,7 +8,7 @@ import tempfile
 import cv2
 import numpy as np
 
-from .models import OnnxSession, haar_path, yunet_path
+from .models import haar_path, yunet_path
 
 ONNX_INPUT = 320
 
@@ -71,14 +71,17 @@ def _nms(boxes, iou_thr=0.35):
 
 class FaceDetector:
     def __init__(self):
-        self.onnx_model = None
-        weight = yunet_path()
-        if weight:
-            self.onnx_model = OnnxSession([weight], ONNX_INPUT)
-            if not self.onnx_model.available:
-                self.onnx_model = None
+        # YuNet 走 cv2.FaceDetectorYN（OpenCV DNN），不依赖 onnxruntime；只要权重文件在且 cv2
+        # 提供 FaceDetectorYN 即启用。此前用 OnnxSession(ORT) 是否加载成功来判定后端，导致
+        # ORT 读不了中文安装目录时整体降级为 haar（人脸维度全废），是错误耦合。
+        self.model_path = yunet_path()
         has_haar = bool(haar_path("haarcascade_frontalface_default.xml"))
-        self.backend = "yunet" if self.onnx_model else ("haar" if has_haar else "none")
+        if self.model_path and cv2 is not None and hasattr(cv2, "FaceDetectorYN"):
+            self.backend = "yunet"
+        elif has_haar:
+            self.backend = "haar"
+        else:
+            self.backend = "none"
         self._detector = None
         self._haar = None
         self._haar_profile = None
@@ -146,7 +149,7 @@ class FaceDetector:
     def _create_yunet(self):
         """创建 YuNet 检测器：优先用字节 buffer 重载（完全不碰路径，规避中文安装目录），
         buffer 重载不可用时退化为复制到 ASCII 临时目录再按路径加载。"""
-        path = self.onnx_model.path
+        path = self.model_path
         try:
             with open(path, "rb") as f:
                 buf = np.frombuffer(f.read(), dtype=np.uint8)

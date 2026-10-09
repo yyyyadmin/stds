@@ -26,7 +26,7 @@ class DetectEngine:
             "emotion": self.expr.emotion.available,
             "embedding": self.embed.available,
             "onnxruntime": _HAS_ORT,
-            "faceOnnx": bool(self.faces.onnx_model and self.faces.onnx_model.available),
+            "faceOnnx": self.faces.backend == "yunet",  # YuNet 启用（cv2.FaceDetectorYN，不经 ORT）
             "gazeOnnx": self.eyes.gaze.available,
             "ocecOnnx": self.eyes.ocec.available,
         }
