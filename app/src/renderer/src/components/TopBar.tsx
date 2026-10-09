@@ -19,6 +19,7 @@ export default function TopBar(): JSX.Element {
   const running = p?.running
   const pct = p && p.total > 0 ? Math.round((p.done / p.total) * 100) : 0
   const isInit = p?.phase === 'init'
+  const isIndeterminate = isInit || p?.phase === 'dup-cluster'
   const sceneLabels: Record<string, string> = { wedding: '婚礼跟拍', studio: '棚拍写真', kids: '儿童抓拍', default: '通用' }
   const auth = s.auth
   const user = auth.user
@@ -112,11 +113,11 @@ export default function TopBar(): JSX.Element {
       )}
       {(running || (p && p.total > 0)) && (
         <div className="flex items-center gap-2 min-w-0 flex-1 max-w-md" title={p?.message || ''}>
-          {isInit ? (
+          {isIndeterminate ? (
             <>
-              {/* 真正开始跑之前（引擎启动/加载模型，通常数秒）：给可见的等待提示 + 不确定进度条，避免用户误以为卡死 */}
+              {/* 无确定百分比的阶段（引擎启动/加载模型、重复聚类）：spinner + 可见文案 + 左右滑动不确定进度条，避免停在 0%/100% 像卡死 */}
               <span className="inline-block w-3.5 h-3.5 shrink-0 rounded-full border-2 border-brand border-t-transparent animate-spin" />
-              <span className="text-xs text-fg2 whitespace-nowrap">{p?.message || '正在启动 AI 引擎…'}</span>
+              <span className="text-xs text-fg2 whitespace-nowrap">{isInit ? p?.message || '正在启动 AI 引擎…' : '重复聚类中…'}</span>
               <div className="flex-1 h-2 bg-panel2 rounded-full overflow-hidden min-w-24">
                 <div className="h-full w-1/4 rounded-full bg-brand bar-indeterminate" />
               </div>
@@ -133,7 +134,7 @@ export default function TopBar(): JSX.Element {
                 />
               </div>
               <span className="text-xs text-gray-400 whitespace-nowrap tabular-nums">
-                {p?.phase === 'dup-cluster' ? '重复聚类中…' : `${pct}% · ${p?.done || 0}/${p?.total || 0}`}
+                {`${pct}% · ${p?.done || 0}/${p?.total || 0}`}
               </span>
               <span className="text-xs text-gray-500 truncate hidden lg:inline">{p?.current}</span>
             </>
