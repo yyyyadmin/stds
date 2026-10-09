@@ -66,6 +66,11 @@ def run():
         "closed_conf_open": None,
         "closed_conf_closed": None,
         "mount_closed_ok": False,
+        "closed_faces": 0,
+        "closed_enhanced": 0,
+        "closed_has_mp": False,
+        "open_reason": "",
+        "closed_reason": "",
         "error": None,
     }
     # --- yunet 共存冒烟（独立 try，先跑）：证明 cv2 与 mediapipe 在同一冻结引擎里都能用（Phase1 头号风险）---
@@ -153,9 +158,10 @@ def run():
             bgr, _sc = load_work_image(p)
             faces = fd.detect(bgr)
             n = enr.enhance(bgr, faces)
-            conf, _r = ea.closed_eye(bgr, faces)
+            conf, reason = ea.closed_eye(bgr, faces)
             return {"faces": len(faces), "enhanced": int(n),
-                    "has_mp": any("mp" in f for f in faces), "conf": round(float(conf), 3)}
+                    "has_mp": any("mp" in f for f in faces),
+                    "conf": round(float(conf), 3), "reason": (reason or "")[:180]}
 
         op = _probe("face_open.jpg")
         cl = _probe("face_closed.jpg")
@@ -165,9 +171,14 @@ def run():
             out["mount_ok"] = bool(op["faces"] >= 1 and op["enhanced"] >= 1)
             out["eye_mp_used"] = bool(op["has_mp"])
             out["closed_conf_open"] = op["conf"]
+            out["open_reason"] = op["reason"]
         if cl:
             out["closed_conf_closed"] = cl["conf"]
             out["mount_closed_ok"] = bool(cl["enhanced"] >= 1)
+            out["closed_faces"] = cl["faces"]
+            out["closed_enhanced"] = cl["enhanced"]
+            out["closed_has_mp"] = bool(cl["has_mp"])
+            out["closed_reason"] = cl["reason"]
     except Exception as _me:  # noqa: BLE001
         out["error"] = (out["error"] or "") + " |mount: %s: %s" % (type(_me).__name__, _me)
     return out
