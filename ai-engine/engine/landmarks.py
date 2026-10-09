@@ -25,6 +25,7 @@ class FaceLandmarkEnhancer:
         self.available = False
         self._lm = None
         self._mp = None
+        self.last_diag = {}  # 最近一次 enhance() 的诊断：ml/cands/faces/ious，供 selfcheck 定位挂载失败
         try:
             import mediapipe as mp
             from mediapipe.tasks import python as mp_python
@@ -86,6 +87,7 @@ class FaceLandmarkEnhancer:
             cands.append((mp_bbox, pts, blend, matrix))
         enhanced = 0
         used = set()
+        ious = []
         for face in faces:
             best_j, best_iou = -1, 0.0
             for j, (mp_bbox, _pts, _blend, _m) in enumerate(cands):
@@ -94,6 +96,7 @@ class FaceLandmarkEnhancer:
                 v = _iou(face["box"], mp_bbox)
                 if v > best_iou:
                     best_iou, best_j = v, j
+            ious.append(round(best_iou, 3))
             if best_j >= 0 and best_iou >= 0.30:
                 _bbox, pts, blend, matrix = cands[best_j]
                 used.add(best_j)
@@ -105,4 +108,5 @@ class FaceLandmarkEnhancer:
                     "score": round(best_iou, 3),
                 }
                 enhanced += 1
+        self.last_diag = {"ml": len(ml), "cands": len(cands), "faces": len(faces), "ious": ious}
         return enhanced
