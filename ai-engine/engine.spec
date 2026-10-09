@@ -43,8 +43,10 @@ try:
 except Exception:  # noqa: BLE001
     pass
 # MediaPipe（可选）：收集其原生库、graph 配置与隐藏导入。未安装则跳过（引擎回落 yunet）。
+_HAS_MP = False
 try:
     import mediapipe  # noqa: F401
+    _HAS_MP = True
     datas += collect_data_files("mediapipe")
     binaries += collect_dynamic_libs("mediapipe")
 except Exception as _e:  # noqa: BLE001
@@ -65,6 +67,15 @@ hiddenimports = [
     "google.protobuf",
 ]
 
+# matplotlib 是 mediapipe 的运行时依赖（`import mediapipe` 会连带导入它，否则冻结
+# exe 内报 ModuleNotFoundError）；仅当 mediapipe 可用时才需打包，否则维持排除以瘦身。
+# 【修正】之前无条件排除 matplotlib 导致三平台 selfcheck 均卡在 import mediapipe 失败。
+excludes = ["tkinter", "matplotlib", "PyQt5", "PySide2"]
+if _HAS_MP:
+    excludes.remove("matplotlib")
+    datas += collect_data_files("matplotlib")
+    hiddenimports.append("matplotlib")
+
 a = Analysis(
     [os.path.join(ROOT, "main.py")],
     pathex=[ROOT],
@@ -74,7 +85,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "PyQt5", "PySide2"],
+    excludes=excludes,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
