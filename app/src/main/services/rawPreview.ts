@@ -3,8 +3,10 @@
  * 相机 RAW 文件内嵌 1~N 个完整 JPEG 预览（相机已按显示方向渲染），
  * sharp/LibRaw 失败时直接从文件里提取最大内嵌 JPEG，纯 JS 无原生依赖，全平台可用。
  */
-import { readFileSync, existsSync } from 'fs'
-import { extname } from 'path'
+import { readFileSync, existsSync, mkdirSync, statSync } from 'fs'
+import { extname, join } from 'path'
+import { createHash } from 'crypto'
+import { app } from 'electron'
 import sharp from 'sharp'
 
 const RAW_EXTS = new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng'])
@@ -82,4 +84,33 @@ export async function decodeSource(path: string): Promise<{ input: string | Buff
 
 export function hasFile(p: string): boolean {
   return existsSync(p)
+}
+
+/** 需要归一化后才能交给 Python 引擎的格式：冻结引擎的 libraw/heif 原生件不可靠，而 sharp 链路已被验证可用 */
+const NEEDS_NORMALIZE = new Set([...RAW_EXTS, '.heic', '.heif', '.avif'])
+
+/**
+ * 引擎输入归一化：RAW/HEIC/AVIF 先经 sharp（含内嵌 JPEG 预览兜底）转成“已按 EXIF 转正”的 JPEG 磁盘缓存，
+ * 再把该缓存路径交给检测引擎——绕开冻结 Python 引擎解不开 RAW/HEIC 的问题，同时缓存路径为 ASCII，
+ * 顺带规避中文目录路径风险。普通格式（JPG/PNG 等）原路返回，不产生额外开销。失败回退原路径。
+ */
+export async function ensureNormalizedJpeg(path: string, maxSide = 2000): Promise<string> {
+  const ext = extname(path).toLowerCase()
+  if (!NEEDS_NORMALIZE.has(ext)) return path
+  const dir = join(app.getPath('userData'), 'data', 'engine-input')
+  try {
+    mkdirSync(dir, { recursive: true })
+    const out = join(dir, createHash('sha1').update(path).digest('hex').slice(0, 16) + '.jpg')
+    if (existsSync(out) && statSync(out).mtimeMs >= statSync(path).mtimeMs) return out
+    const input = await sharpInput(path)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (sharp(input as any, { failOn: 'none' }) as ReturnType<typeof sharp>)
+      .rotate()
+      .resize({ width: maxSide, height: maxSide, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 92 })
+      .toFile(out)
+    return out
+  } catch {
+    return path
+  }
 }

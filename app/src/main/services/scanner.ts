@@ -17,6 +17,7 @@ import {
 } from '../db'
 import { gradeDims, computeCategory } from '../classify'
 import { engineManager } from '../engine'
+import { ensureNormalizedJpeg } from './rawPreview'
 import type { DetectResult, DimensionKey, ImageRecord } from '../../shared/types'
 import { CAT_TRASH } from '../../shared/types'
 
@@ -41,6 +42,8 @@ class Scanner extends EventEmitter {
   /** 连续检测失败计数：用于引擎健康熔断（连续过多失败自动停止，避免长时间假死） */
   private consecFail = 0
   private engineAborted = false
+  /** 最近一次检测失败的原因：熔断时展示到进度消息，便于安装包内定位（console 在打包版不可见） */
+  private lastError = ''
   /** 本会话哈希表：id -> phash，聚类用 */
   private hashes = new Map<number, string>()
 
@@ -137,7 +140,7 @@ class Scanner extends EventEmitter {
       running: false,
       phase: this.engineAborted ? 'error' : this.stopRequested ? 'stopped' : 'done',
       message: this.engineAborted
-        ? `AI 引擎连续检测失败，已自动停止（${done}/${this.progress.total}）。请到设置里将引擎切换为“内置基础引擎”后重试`
+        ? `AI 引擎连续检测失败，已自动停止（${done}/${this.progress.total}）。最后错误：${this.lastError || '未知'}。请把此行截图发给开发者；或到设置里切换为“内置基础引擎”后重试`
         : this.stopRequested
           ? `已停止（${done}/${this.progress.total}），下次开始将自动续跑`
           : `筛选完成：${done} 张`
@@ -155,7 +158,10 @@ class Scanner extends EventEmitter {
       this.progress = { ...this.progress, current: basename(rec.path) }
       this.emit('progress', this.progress)
       try {
-        const raw = (await engineManager.detect(rec.path, rec.id)) as unknown as DetectResult & { phash?: string; nodeEngine?: boolean; error?: string }
+        // RAW/HEIC/AVIF 先归一化为“已按 EXIF 转正”的 JPEG 缓存再检测：冻结 Python 引擎解不开这些格式，
+        // 而 sharp 链路（含 RAW 内嵌预览兜底）已被验证可用；普通格式原路返回无额外开销。
+        const detectPath = await ensureNormalizedJpeg(rec.path)
+        const raw = (await engineManager.detect(detectPath, rec.id)) as unknown as DetectResult & { phash?: string; nodeEngine?: boolean; error?: string }
         // 引擎以 in-band error 返回（如无法解码：中文路径/RAW/HEIC）且无任何维度结果时，
         // 绝不能当成“正常但无坏维度”静默判进成品库——必须走失败路径，让状态可见并计入熔断。
         if (raw && raw.error && (!raw.dims || Object.keys(raw.dims).length === 0)) {
@@ -164,6 +170,8 @@ class Scanner extends EventEmitter {
         this.handleResult(rec, raw)
         this.consecFail = 0
       } catch (e) {
+        const errMsg = String((e as Error)?.message || e)
+        this.lastError = errMsg
         updateDetectResult(rec.id, rec.tags, rec.details, rec.dupGroup, rec.category, rec.categoryBy, 'error')
         this.emit('image', { ...rec, status: 'error' })
         this.consecFail++

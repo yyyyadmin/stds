@@ -102,7 +102,10 @@ jobs:
   # ---------------- macOS Intel (x64) ----------------
   macos-x64:
     if: ${{ github.event_name == 'push' || inputs.buildMacX64 }}
-    runs-on: macos-13
+    # macos-13 已于 2025-12-04 退役（会无限排队而非报错，进而卡死依赖它的 release job）。
+    # macos-15-intel 是 GitHub 官方的 x86_64 替代标签，预计 2027 秋随 macOS 15 镜像退役。
+    # 若不再需要支持 Intel Mac，可整段删除本 job 并从下方 release.needs 移除 macos-x64，构建更快。
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
