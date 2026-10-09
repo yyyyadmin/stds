@@ -107,9 +107,8 @@ class DetectEngine:
                 dims["no_person"] = {"confidence": 0.97 if not upper else 0.80, "reason": "未检出人脸（检出 %d 躯干）" % len(upper), "method": "face-count"}
         elif face_count == 1:
             dims["single_person"] = {"confidence": 0.985, "reason": "检出 1 张人脸", "method": "face-count"}
-        elif face_count == 2:
-            dims["two_person"] = {"confidence": 0.98, "reason": "检出 2 张人脸", "method": "face-count"}
         else:
+            # >=2 人统一归多人合照（“双人照”类型已按产品决策并入多人）
             dims["group_photo"] = {"confidence": 0.975, "reason": "检出 %d 张人脸" % face_count, "method": "face-count"}
 
         # 重复/连拍在跨图层面处理：返回 phash + embedding，由主进程聚类

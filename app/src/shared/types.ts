@@ -13,9 +13,8 @@ export type DimensionKey =
   | 'half_head' // 半截头
   | 'duplicate' // 重复/连拍
   | 'single_person' // 单人照
-  | 'two_person' // 双人照
   | 'group_photo' // 多人合照
-  | 'no_person' // 无人物照
+  | 'no_person' // 无人物场景
   | 'black_white' // 黑白照
 
 /** 坏维度：被标记后进入待修正区或垃圾桶 */
@@ -32,7 +31,6 @@ export const BAD_DIMENSIONS: DimensionKey[] = [
 /** 中性维度：仅作为分类标签 */
 export const NEUTRAL_DIMENSIONS: DimensionKey[] = [
   'single_person',
-  'two_person',
   'group_photo',
   'no_person',
   'black_white'
@@ -47,9 +45,8 @@ export const DIMENSION_LABELS: Record<DimensionKey, string> = {
   half_head: '半截头',
   duplicate: '重复/连拍',
   single_person: '单人照',
-  two_person: '双人照',
   group_photo: '多人合照',
-  no_person: '无人物照',
+  no_person: '无人物场景',
   black_white: '黑白照'
 }
 
@@ -87,7 +84,6 @@ export const DIMENSION_BIAS: Record<DimensionKey, DimBias> = {
   half_head: 'recall',
   duplicate: 'recall',
   single_person: 'high',
-  two_person: 'high',
   group_photo: 'high',
   no_person: 'high',
   black_white: 'high'
@@ -267,13 +263,13 @@ export const SUPPORTED_EXTS = [
 
 /** 维度精度分级承诺（第八章 8.3） */
 export const PRECISION_TIERS: Record<string, { label: string; tip: string }> = {
-  trust: { label: '可直接信任', tip: '单人/双人/多人、无人物、黑白照、曝光 —— 99%+，自动标记' },
+  trust: { label: '可直接信任', tip: '单人/多人、无人物、黑白照、曝光 —— 99%+，自动标记' },
   review: { label: '建议复核', tip: '闭眼、模糊、重复/连拍 —— 97-98%，黄色高亮待确认' },
   ref: { label: '仅作参考', tip: '狰狞、斜视、半截头 —— 90-95%，标注"建议人工复核"' }
 }
 
 export function dimTier(dim: DimensionKey): 'trust' | 'review' | 'ref' {
-  if (['single_person', 'two_person', 'group_photo', 'no_person', 'black_white', 'exposure'].includes(dim)) return 'trust'
+  if (['single_person', 'group_photo', 'no_person', 'black_white', 'exposure'].includes(dim)) return 'trust'
   if (['eyes_closed', 'blur', 'duplicate'].includes(dim)) return 'review'
   return 'ref'
 }

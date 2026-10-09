@@ -81,6 +81,9 @@ export async function initDbAsync(): Promise<void> {
     /* 列已存在，忽略 */
   }
   db.exec(`UPDATE images SET sort_order = id WHERE sort_order IS NULL`)
+  // 一次性迁移：产品决策取消“双人照”类型，2 人并入“多人合照”。老库中归在 two_person 桶的图片迁到 group_photo，
+  // 避免出现无对应 tab 的孤儿图片。（tags 里残留的 two_person 键被 classify 忽略，重扫即覆盖，无需单独处理）
+  db.exec(`UPDATE images SET category = 'group_photo' WHERE category = 'two_person'`)
 }
 
 export function getDb(): SqlDb {
