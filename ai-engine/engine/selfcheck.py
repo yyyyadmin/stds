@@ -17,7 +17,11 @@ def _synthetic_png():
     import cv2
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_selfcheck_synth.png")
     img = np.full((240, 240, 3), 120, dtype=np.uint8)
-    cv2.imwrite(p, img)
+    if not cv2.imwrite(p, img):
+        # 模块目录不可写（只读冻结包）时退回系统临时目录，保证 e2e 拿得到真实可读文件
+        import tempfile
+        p = os.path.join(tempfile.gettempdir(), "screener_selfcheck_synth.png")
+        cv2.imwrite(p, img)
     return p
 
 
@@ -66,31 +70,30 @@ def run():
         task = _find_task()
         out["task_found"] = bool(task)
         if not task:
-            out["error"] = "face_landmarker.task not found"
-            return out
+            out["error"] = (out["error"] or "") + " |mp: face_landmarker.task not found"
+        else:
+            from .face import _ascii_model_path
+            ascii_task = _ascii_model_path(task)
+            out["task_ascii_path_ok"] = bool(ascii_task) and ascii_task.endswith(".task")
 
-        from .face import _ascii_model_path
-        ascii_task = _ascii_model_path(task)
-        out["task_ascii_path_ok"] = bool(ascii_task) and ascii_task.endswith(".task")
-
-        opts = vision.FaceLandmarkerOptions(
-            base_options=mp_python.BaseOptions(model_asset_path=ascii_task),
-            running_mode=vision.RunningMode.IMAGE,
-            num_faces=6,
-            output_face_blendshapes=True,
-            output_facial_transformation_matrixes=True,
-        )
-        lm = vision.FaceLandmarker.create_from_options(opts)
-        # 合成一张 64x64 灰度图（无脸也应返回空结果而非抛异常）
-        img = np.full((64, 64, 3), 128, dtype=np.uint8)
-        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=img)
-        res = lm.detect(mp_img)
-        out["detect_ok"] = True
-        out["num_faces"] = len(res.face_landmarks) if res.face_landmarks else 0
-        if res.face_blendshapes and len(res.face_blendshapes) > 0:
-            out["blend_keys"] = len(res.face_blendshapes[0])
+            opts = vision.FaceLandmarkerOptions(
+                base_options=mp_python.BaseOptions(model_asset_path=ascii_task),
+                running_mode=vision.RunningMode.IMAGE,
+                num_faces=6,
+                output_face_blendshapes=True,
+                output_facial_transformation_matrixes=True,
+            )
+            lm = vision.FaceLandmarker.create_from_options(opts)
+            # 合成一张 64x64 灰度图（无脸也应返回空结果而非抛异常）
+            img = np.full((64, 64, 3), 128, dtype=np.uint8)
+            mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=img)
+            res = lm.detect(mp_img)
+            out["detect_ok"] = True
+            out["num_faces"] = len(res.face_landmarks) if res.face_landmarks else 0
+            if res.face_blendshapes and len(res.face_blendshapes) > 0:
+                out["blend_keys"] = len(res.face_blendshapes[0])
     except Exception as e:  # noqa: BLE001
-        out["error"] = "%s: %s" % (type(e).__name__, e)
+        out["error"] = (out["error"] or "") + " |mp: %s: %s" % (type(e).__name__, e)
     # --- 增强层冒烟：能实例化 + 对合成图跑 enhance() 不崩（无脸应返回 0）---
     try:
         from .landmarks import FaceLandmarkEnhancer
