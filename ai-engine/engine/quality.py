@@ -78,6 +78,12 @@ def exposure_score(bgr):
     return conf, "亮度均值 %.1f std %.1f 高光 %.2f 暗部 %.2f -> %s" % (mean, std, hi_ratio, lo_ratio, direction)
 
 
+def mean_brightness(bgr):
+    """Lab 的 L 通道均值（0-100），供上层判断画面是否整体偏暗（人脸漏检风险）。"""
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
+    return float(lab[:, :, 0].astype(np.float32).mean() * (100.0 / 255.0))
+
+
 # ---------- 黑白照 ----------
 
 def black_white_score(bgr):

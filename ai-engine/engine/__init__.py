@@ -50,9 +50,14 @@ class DetectEngine:
 
         dims = {}
 
+        # 暗光下眼睛分析改用提亮副本：闭眼/斜眼靠眼睛 ROI 纹理，暗部会压低信号；
+        # 增强副本与原图同尺寸，脸框坐标可直接复用。画质维度（模糊/曝光/黑白）仍用原图。
+        bright = Q.mean_brightness(bgr)
+        eye_bgr = self.faces.enhance_lowlight(bgr) if (face_count and bright < 25) else bgr
+
         # --- 闭眼 / 斜眼 ---
-        closed_conf, closed_reason = self.eyes.closed_eye(bgr, faces)
-        gaze_conf, gaze_off, gaze_reason = self.eyes.gaze_offset(bgr, faces)
+        closed_conf, closed_reason = self.eyes.closed_eye(eye_bgr, faces)
+        gaze_conf, gaze_off, gaze_reason = self.eyes.gaze_offset(eye_bgr, faces)
         if face_count:
             dims["eyes_closed"] = {"confidence": round(closed_conf, 4), "reason": closed_reason, "method": self.eyes.method}
             dims["eyes_side"] = {"confidence": round(gaze_conf, 4), "reason": gaze_reason, "method": self.eyes.method}
@@ -60,7 +65,7 @@ class DetectEngine:
         # --- 面部狰狞（子特征综合） ---
         closed_probs = []
         for f in faces[:6]:
-            for roi in _eye_rois_safe(self.eyes, bgr, f):
+            for roi in _eye_rois_safe(self.eyes, eye_bgr, f):
                 closed_probs.append(roi)
         trig, ugly_conf, ugly_reason = self.expr.subfeatures(bgr, faces, closed_probs)
         if face_count:
@@ -84,7 +89,12 @@ class DetectEngine:
 
         # --- 人数分类（中性维度，精度本身高） ---
         if face_count == 0:
-            dims["no_person"] = {"confidence": 0.97 if not upper else 0.80, "reason": "未检出人脸（检出 %d 躯干）" % len(upper), "method": "face-count"}
+            if bright < 25:
+                # 暗光安全网：画面整体偏暗时人脸极易漏检，不把 no_person 拉满，
+                # 降为中置信（待确认）并标注可能漏检，避免暗部人像被误判为无人物。
+                dims["no_person"] = {"confidence": 0.55, "reason": "未检出人脸（检出 %d 躯干），但画面偏暗(亮度%.0f)，可能漏检" % (len(upper), bright), "method": "face-count"}
+            else:
+                dims["no_person"] = {"confidence": 0.97 if not upper else 0.80, "reason": "未检出人脸（检出 %d 躯干）" % len(upper), "method": "face-count"}
         elif face_count == 1:
             dims["single_person"] = {"confidence": 0.985, "reason": "检出 1 张人脸", "method": "face-count"}
         elif face_count == 2:

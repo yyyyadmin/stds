@@ -120,6 +120,27 @@ class FaceDetector:
     # ---------- 后端实现 ----------
 
     def _detect_onnx(self, bgr):
+        faces = self._yunet_pass(bgr)
+        if not faces:
+            # 暗光/低对比兜底：原图 0 脸时，对提亮+均衡副本再跑一次。
+            # 正常曝光图第一次即命中，不进这条分支，故不增加常规耗时。
+            faces = self._yunet_pass(self.enhance_lowlight(bgr))
+        return faces
+
+    @staticmethod
+    def enhance_lowlight(bgr):
+        """暗光提亮预处理：整体偏暗时 gamma 提亮 + L 通道 CLAHE 局部均衡。
+        供人脸漏检兜底与暗光眼睛分析复用；与原图同尺寸，脸框坐标可直接套用。"""
+        lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+        l, a, bb = cv2.split(lab)
+        if float(l.mean()) < 100.0:  # 8bit L 通道，整体偏暗才 gamma 提升
+            gamma = 0.55
+            lut = np.clip((np.arange(256, dtype=np.float32) / 255.0) ** gamma * 255.0, 0, 255).astype(np.uint8)
+            l = cv2.LUT(l, lut)
+        l = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)).apply(l)
+        return cv2.cvtColor(cv2.merge((l, a, bb)), cv2.COLOR_LAB2BGR)
+
+    def _yunet_pass(self, bgr):
         if self._detector is None:
             self._detector = self._create_yunet()
         h, w = bgr.shape[:2]
