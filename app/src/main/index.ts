@@ -15,6 +15,7 @@ import { engineManager } from './engine'
 import { pruneMissing } from './services/importer'
 import { getSettings } from './db'
 import { setupErrorLogger, getLogRoot, logRendererError } from './logger'
+import { dumpCalibration } from './services/calib'
 
 // 尽早安装错误日志（捕获启动期异常），在所有逻辑之前
 setupErrorLogger()
@@ -151,6 +152,8 @@ if (!gotLock) {
   app.on('before-quit', () => {
     engineManager.shutdown()
     flushDb()
+    // 退出前最后一次校准落盘：带上扫描结束后用户的全部手动纠错（category_by='user'），必须在 closeDb 之前
+    dumpCalibration()
     closeDb()
   })
 

@@ -18,6 +18,7 @@ import {
 import { gradeDims, computeCategory } from '../classify'
 import { engineManager } from '../engine'
 import { logError } from '../logger'
+import { dumpCalibration } from './calib'
 import { ensureNormalizedJpeg } from './rawPreview'
 import type { DetectResult, DimensionKey, ImageRecord } from '../../shared/types'
 import { CAT_TRASH } from '../../shared/types'
@@ -136,6 +137,8 @@ class Scanner extends EventEmitter {
 
     const done = this.progress.done
     this.running = false
+    // 校准数据静默落盘（开发者诊断，无 UI）：完成/停止都写；退出前还会再写一次，带上这期间用户的手动纠错
+    dumpCalibration()
     this.progress = {
       ...this.progress,
       running: false,
