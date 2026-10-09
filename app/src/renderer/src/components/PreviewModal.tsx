@@ -32,13 +32,15 @@ export default function PreviewModal(): JSX.Element | null {
   const settings = useStore((s) => s.settings)
   const selection = useStore((s) => s.selection)
   const toggleSelect = useStore((s) => s.toggleSelect)
+  // 标记叠加开关提到全局 store：切换图片 / 关闭重开大图都保持上次选择（本次筛选全程记忆）
+  const showOverlay = useStore((s) => s.previewOverlay)
+  const togglePreviewOverlay = useStore((s) => s.togglePreviewOverlay)
 
   const img = useMemo(() => images.find((i) => i.id === previewId) || null, [images, previewId])
   // 原图加载：缩略图占位 → 原图就绪无缝替换；超 300ms 才提示
   const big = useBigSrc(img)
 
   const [t, setT] = useState<Transform>({ scale: 1, x: 0, y: 0 })
-  const [showOverlay, setShowOverlay] = useState(true)
   const [compareOriginal, setCompareOriginal] = useState(true)
   const dragging = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -134,14 +136,14 @@ export default function PreviewModal(): JSX.Element | null {
             {selection.has(img.id) ? '✓ 已选中' : '☐ 选中'}
           </button>
         )}
-        <button className="btn-ghost text-sm text-white/85" onClick={() => setCompareOriginal(!compareOriginal)} title="原图/缓存对比切换">
+        <button className="btn-ghost-dark text-sm text-white/85" onClick={() => setCompareOriginal(!compareOriginal)} title="原图/缓存对比切换">
           {compareOriginal ? '原图' : '缓存图'}
         </button>
-        <button className={'btn-ghost text-sm ' + (showOverlay ? 'text-brand' : 'text-white/60')} onClick={() => setShowOverlay(!showOverlay)}>
+        <button className={'btn-ghost-dark text-sm ' + (showOverlay ? 'text-brand' : 'text-white/60')} onClick={togglePreviewOverlay}>
           标记叠加 {showOverlay ? '开' : '关'}
         </button>
-        <button className="btn-ghost text-sm text-white/85" onClick={reset} title="双击画面也可复位">复位缩放</button>
-        <button className="btn-ghost text-sm text-white/85" onClick={closePreview}>ESC 关闭</button>
+        <button className="btn-ghost-dark text-sm text-white/85" onClick={reset} title="双击画面也可复位">复位缩放</button>
+        <button className="btn-ghost-dark text-sm text-white/85" onClick={closePreview}>ESC 关闭</button>
       </div>
 
       {/* 主画布 */}

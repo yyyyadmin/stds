@@ -46,6 +46,7 @@ interface StoreState {
   selection: Set<number>
   anchorIndex: number
   previewId: number | null
+  previewOverlay: boolean
   largeIndex: number
   scanProgress: ScanProgress | null
   importProgress: { done: number; total: number; current: string } | null
@@ -99,6 +100,7 @@ interface StoreState {
   correctBatch(ids: number[], action: 'correct' | 'wrong', targetCategory?: CategoryKey): Promise<void>
   openPreview(id: number): void
   closePreview(): void
+  togglePreviewOverlay(): void
   stepPreview(delta: number): void
   setLargeIndex(i: number): void
   stepLarge(delta: number): void
@@ -166,6 +168,7 @@ export const useStore = create<StoreState>((set, get) => ({
   selection: new Set<number>(),
   anchorIndex: -1,
   previewId: null,
+  previewOverlay: true,
   largeIndex: 0,
   scanProgress: null,
   importProgress: null,
@@ -527,6 +530,9 @@ export const useStore = create<StoreState>((set, get) => ({
   },
   closePreview() {
     set({ previewId: null })
+  },
+  togglePreviewOverlay() {
+    set((s) => ({ previewOverlay: !s.previewOverlay }))
   },
   stepPreview(delta) {
     const { previewId, images } = get()

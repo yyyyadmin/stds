@@ -81,6 +81,10 @@ body {
   .btn-ghost {
     @apply px-2 py-1 rounded-md text-sm hover:bg-panel2 transition-colors cursor-pointer border border-transparent;
   }
+  /* 大图预览等深色遮罩层专用：hover 用半透明白而非随主题的 bg-panel2（浅色主题下 bg-panel2 近白，会白底白字看不清） */
+  .btn-ghost-dark {
+    @apply px-2 py-1 rounded-md text-sm hover:bg-white/20 transition-colors cursor-pointer border border-transparent;
+  }
   .chip {
     @apply inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] leading-none font-medium;
   }
