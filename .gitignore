@@ -32,3 +32,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.local
+
+# Superpowers SDD 工作区（计划执行的账本/评审临时文件，不入库）
+.superpowers/
