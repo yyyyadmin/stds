@@ -115,12 +115,26 @@ const srcModels = join(ENGINE_SRC, 'models')
 for (const f of existsSync(srcModels) ? readdirSync(srcModels) : []) {
   if (f.toLowerCase().endsWith('.onnx')) cpSync(join(srcModels, f), join(outModels, f))
 }
+// 复制仓库里的 MediaPipe 权重（.task），随 models/ 分发
+for (const f of existsSync(srcModels) ? readdirSync(srcModels) : []) {
+  if (f.toLowerCase().endsWith('.task')) cpSync(join(srcModels, f), join(outModels, f))
+}
 // 硬校验：YuNet 人脸权重必须随包（已入库）。缺失说明构建未取到仓库文件，
 // 绝不能打包成人脸退化为 haar 的残缺版本（会导致无人物照/半截头等人脸维度全废）。
 const hasYunet = existsSync(outModels) && readdirSync(outModels).some((f) => /face_detection_yunet.*\.onnx$/i.test(f))
 if (!hasYunet) {
   console.error(
     `\n❌ 引擎缺少 YuNet 人脸权重（face_detection_yunet*.onnx），实际 models/ 内容：` +
+      `${existsSync(outModels) ? readdirSync(outModels).join(', ') : '(目录不存在)'}\n` +
+      '该文件已随仓库提交，若仍缺失请确认构建机拉到了完整仓库。拒绝打包残缺引擎。'
+  )
+  process.exit(1)
+}
+// 硬校验：face_landmarker.task 必须随包（已入库）。缺失说明构建未取到仓库文件。
+const hasTask = existsSync(outModels) && readdirSync(outModels).some((f) => /face_landmarker.*\.task$/i.test(f))
+if (!hasTask) {
+  console.error(
+    `\n❌ 引擎缺少 MediaPipe 权重（face_landmarker.task），实际 models/ 内容：` +
       `${existsSync(outModels) ? readdirSync(outModels).join(', ') : '(目录不存在)'}\n` +
       '该文件已随仓库提交，若仍缺失请确认构建机拉到了完整仓库。拒绝打包残缺引擎。'
   )
