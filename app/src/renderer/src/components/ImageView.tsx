@@ -158,7 +158,7 @@ function Thumb({ img, size, index, onClick, onDoubleClick, dragIds, dragging, on
   elRef?: (el: HTMLDivElement | null) => void
 }): JSX.Element {
   const selected = useStore((s) => s.selection.has(img.id))
-  const scanCurrent = useStore((s) => (s.scanProgress?.running ? s.scanProgress.current : ''))
+  const scanCurrent = useStore((s) => (s.scanProgress?.running && s.scanProgress.phase === 'scanning' ? s.scanProgress.current : ''))
   const isScanning = !!scanCurrent && img.filename === scanCurrent
   const src = img.thumb ? toSrc(img.thumb) : toSrc(img.path)
   return (
@@ -437,7 +437,7 @@ export default function ImageView(): JSX.Element {
   }
 
   if (viewMode === 'list') {
-    const scanning = scanProgress?.running === true
+    const scanning = scanProgress?.running === true && scanProgress?.phase === 'scanning'
     const currentName = scanProgress?.current ?? ''
     return (
       <div className="h-full overflow-auto px-2 py-1 fade-in">
@@ -567,7 +567,7 @@ function StatusPill({ status, scanning }: { status: string; scanning: boolean })
 function MasonryThumb(props: { img: ImageRecord; index: number; onClick: (i: number, e: React.MouseEvent) => void; onDoubleClick: (img: ImageRecord) => void; dragIds: number[] }): JSX.Element {
   const { img, index, onClick, onDoubleClick, dragIds } = props
   const selected = useStore((s) => s.selection.has(img.id))
-  const scanCurrent = useStore((s) => (s.scanProgress?.running ? s.scanProgress.current : ''))
+  const scanCurrent = useStore((s) => (s.scanProgress?.running && s.scanProgress.phase === 'scanning' ? s.scanProgress.current : ''))
   const isScanning = !!scanCurrent && img.filename === scanCurrent
   const ratio = img.width && img.height ? img.width / img.height : 1
   return (
