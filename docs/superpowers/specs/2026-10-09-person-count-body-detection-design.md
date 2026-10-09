@@ -64,6 +64,16 @@
 - 二者任一不达标 → 视为背景路人，不计入 `person_count`。
 - 依据（参考方案，婚礼实测）：主角占图高通常 ≥30%，远景宾客 3-6%；阈值留裕度。**这些常量提为具名，待真实照分布再校，不写死在逻辑里。**
 
+## 非回归硬约束（用户明确要求：绝不影响闭眼 / 半截头，含 v1 启发式）
+
+本次人体检测只替换人数三分类的计数权威，对闭眼/半截头/斜眼/狰狞零改动，靠三重保证：
+
+1. 不碰输入：闭眼/斜眼/狰狞仍用 `faces`（`self.eyes.closed_eye(eye_bgr, faces)`、`face_count` 门控），半截头仍用 `faces + upper`（`Q.half_head_score(bgr.shape, faces, upper, scale)`）。本次不修改 `faces` 的数量/顺序/内容，不修改 `face_count`、`upper`、`eye_bgr` 的任何计算——`person_count` 是并行新增的独立信号，只喂给分类分支，不回灌人脸维度。
+2. 不改 v1 启发式：`eyes.py` 的启发式闭眼判据与 `landmarks.py` 的 MediaPipe 增强（Phase 1/2 成果）完全不动；人体检测器是新文件 `engine/person.py`，与眼睛/半截头代码路径无交集。
+3. CI 回归闸（机器验证，非口头保证）：`selfcheck.py` 每次人体检测改动都同时重跑 Phase 2 的闭眼正向字段（`mount_closed_ok`、`closed_enhanced`、`closed_has_mp`、`closed_conf_closed > closed_conf_open`、reason 含 `[mediapipe]`）并要求保持 PASS；半截头字段同样不得相对基线回退。任一闭眼/半截头字段变差 = 本次改动判 FAIL、不予合入。
+
+如果人体检测的接入让闭眼或半截头的自检字段回退，就视为本任务失败，而不是顺带的小副作用。
+
 ## 关键设计原则与风险
 
 1. **零回归**：人脸缺失时新逻辑不触发（走 fallback）；人脸维度门控不动。Phase 1/2 闭眼结果不受影响（person 只改人数三类）。
