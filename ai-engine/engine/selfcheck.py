@@ -75,6 +75,15 @@ def run():
         "open_ious": None,
         "closed_ml": None,
         "closed_ious": None,
+        "person_model_found": False,
+        "person_available": False,
+        "person_count_run_ok": False,
+        "person_count_synth": None,
+        "person_count_open": None,
+        "person_count_multi": None,
+        "person_count_empty": None,
+        "e2e_person_dim": None,
+        "e2e_person_method": None,
         "error": None,
     }
     # --- yunet 共存冒烟（独立 try，先跑）：证明 cv2 与 mediapipe 在同一冻结引擎里都能用（Phase1 头号风险）---
@@ -191,6 +200,44 @@ def run():
             out["closed_ious"] = cl["ious"]
     except Exception as _me:  # noqa: BLE001
         out["error"] = (out["error"] or "") + " |mount: %s: %s" % (type(_me).__name__, _me)
+    # --- Phase 3 人体计数冒烟：证明 ObjectDetector 能在冻结引擎里加载 .tflite 并跑 count()。
+    # 人数分类新权威；任何异常不阻断（模型缺失时 available=False，引擎自动回落人脸计数）。---
+    try:
+        from .person import PersonDetector
+        from .models import person_model_path
+        from .imaging import load_work_image
+        out["person_model_found"] = bool(person_model_path())
+        pd = PersonDetector(log=lambda *a, **k: None)
+        out["person_available"] = bool(pd.available)
+        if pd.available:
+            # 合成灰图：无人体 -> count()==0（验证不崩 + 背景过滤不误触发）
+            c0, _b0 = pd.count(np.full((320, 320, 3), 120, dtype=np.uint8))
+            out["person_count_synth"] = c0
+            # 具名 fixture：单人脸 / 多人 / 无人（存在则跑）
+            for key, name in (("person_count_open", "face_open.jpg"),
+                              ("person_count_multi", "person_multi.jpg"),
+                              ("person_count_empty", "no_person.jpg")):
+                p = _fixture_named(name)
+                if p:
+                    cc, _bb = pd.count(load_work_image(p)[0])
+                    out[key] = cc
+            out["person_count_run_ok"] = out["person_count_synth"] is not None
+        # 端到端：完整 detect() 里人数维度走 body-count 还是 face-count（模型可用时应为 body-count）
+        try:
+            from . import DetectEngine
+            eng2 = DetectEngine(log=lambda *a, **k: None)
+            rr = eng2.detect(_fixture_or_synthetic())
+            dd = rr.get("dims") or {}
+            for dim in ("single_person", "group_photo", "no_person"):
+                if dim in dd:
+                    out["e2e_person_dim"] = dim
+                    out["e2e_person_method"] = (dd[dim] or {}).get("method")
+                    break
+        except Exception as _e2:  # noqa: BLE001
+            out["error"] = (out["error"] or "") + " |person-e2e: %s: %s" % (type(_e2).__name__, _e2)
+    except Exception as _pe:  # noqa: BLE001
+        out["person_count_run_ok"] = False
+        out["error"] = (out["error"] or "") + " |person: %s: %s" % (type(_pe).__name__, _pe)
     return out
 
 

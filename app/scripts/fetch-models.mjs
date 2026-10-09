@@ -36,6 +36,12 @@ const MANIFEST = [
     url: 'https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx',
     license: 'MIT',
     unlocks: '人脸检测 Haar→YuNet(DNN)：半截头/双人/闭眼/斜眼/狰狞 的人脸框与关键点精度整体跃升'
+  },
+  {
+    file: 'efficientdet_lite0.tflite',
+    url: 'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/1/efficientdet_lite0.tflite',
+    license: 'Apache-2.0',
+    unlocks: '人体检测(MediaPipe ObjectDetector)：单人/多人/无人物 人数分类权威从数人脸切换为数人体，根治背对/侧脸/面纱漏检导致的 undercount'
   }
   // 注意：不要把 onnx/models（ONNX Model Zoo）的 /raw/ 地址加进来——该仓库已于 2025-07-01 起
   // 停用 Git LFS 下载，/raw/ 只会返回 ~130B 的 LFS 指针文本，触发本脚本 <1024B 守卫而硬失败，

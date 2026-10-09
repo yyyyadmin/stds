@@ -119,6 +119,12 @@ def mediapipe_task_path():
     return find_model("face_landmarker.task", "*.task")
 
 
+def person_model_path():
+    """人体检测 MediaPipe 模型（efficientdet_lite0.tflite，由 CI 的 fetch-models 自动下载到 models/，与 YuNet 同构）。
+    供 engine/person.py ObjectDetector 加载；缺失时 PersonDetector.available=False，人数分类回落人脸计数。"""
+    return find_model("efficientdet*.tflite", "person_*.tflite")
+
+
 def yunet_path():
     """YuNet 人脸检测权重（可选放置于 models/）"""
     return find_model("face_detection_yunet*.onnx", "scrfd*.onnx", "retinaface*.onnx", "ufadd*.onnx")

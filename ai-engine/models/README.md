@@ -1,15 +1,16 @@
 # AI 模型权重目录
 
 **一键拉取（推荐）**：在 `app/` 下运行 `npm run fetch-models`（或 `npm run build:engine:ai` 一步完成拉取+打包），
-会自动下载开源可商用的 **YuNet 人脸检测权重**（MIT，~228KB）到本目录。YuNet 替换 Haar 后，
-半截头/双人/闭眼/斜眼/狰狞 等依赖人脸框的维度精度整体跃升。CI（release.yml）已内置该步骤。
+会自动下载开源可商用的 **YuNet 人脸检测权重**（MIT，~228KB）与 **EfficientDet-Lite0 人体检测模型**（Apache-2.0，~4.6MB，int8）到本目录。
+YuNet 替换 Haar 后，半截头/双人/闭眼/斜眼/狰狞 等依赖人脸框的维度精度整体跃升；EfficientDet 让人数分类（单人/多人/无人物）从数人脸升级为数人体，根治背对/侧脸/面纱漏检。CI（release.yml）已内置该步骤。
 
 其余权重可手动放入本目录，引擎会自动从"规则降级模式"升级为"深度学习完整模式"
 （文件名可不严格一致，引擎按关键字模糊匹配；缺失的模型会逐项自动回退到传统算法）。
 
 | 维度 | 模型 | 获取途径 |
 | ---- | ---- | -------- |
-| 人脸检测 | YuNet / SCRFD | onnxmodels / insightface 开源权重 |
+| 人脸检测 | YuNet / SCRFD | onnxmodels / insightface 开源权重（fetch-models 自动下载）|
+| 人体检测（人数分类）| EfficientDet-Lite0 (MediaPipe) | Google storage 稳定 URL（fetch-models 自动下载）|
 | 关键点 | PFLD / 106点 | insightface |
 | 闭眼检测 | OCEC (eyes_closed) | GitHub `OCEC` 仓库导出的 onnx |
 | 视线估计 | MobileGaze / XGaze | 原作者发布权重 |

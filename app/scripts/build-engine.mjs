@@ -125,6 +125,10 @@ for (const f of existsSync(srcModels) ? readdirSync(srcModels) : []) {
 for (const f of existsSync(srcModels) ? readdirSync(srcModels) : []) {
   if (f.toLowerCase().endsWith('.task')) cpSync(join(srcModels, f), join(outModels, f))
 }
+// 复制仓库里的 MediaPipe 人体模型（.tflite），随 models/ 分发
+for (const f of existsSync(srcModels) ? readdirSync(srcModels) : []) {
+  if (f.toLowerCase().endsWith('.tflite')) cpSync(join(srcModels, f), join(outModels, f))
+}
 // 硬校验：YuNet 人脸权重必须随包（已入库）。缺失说明构建未取到仓库文件，
 // 绝不能打包成人脸退化为 haar 的残缺版本（会导致无人物照/半截头等人脸维度全废）。
 const hasYunet = existsSync(outModels) && readdirSync(outModels).some((f) => /face_detection_yunet.*\.onnx$/i.test(f))
@@ -143,6 +147,17 @@ if (!hasTask) {
     `\n❌ 引擎缺少 MediaPipe 权重（face_landmarker.task），实际 models/ 内容：` +
       `${existsSync(outModels) ? readdirSync(outModels).join(', ') : '(目录不存在)'}\n` +
       '该文件已随仓库提交，若仍缺失请确认构建机拉到了完整仓库。拒绝打包残缺引擎。'
+  )
+  process.exit(1)
+}
+// 硬校验：人体检测模型（efficientdet*.tflite）必须随包（由 fetch-models 从 Google storage 自动下载，与 YuNet 同构）。缺失拒绝打包，
+// 避免人数分类静默退化回人脸计数（与 yunet/face_landmarker 同构的防残缺包机制）。
+const hasPerson = existsSync(outModels) && readdirSync(outModels).some((f) => /efficientdet.*\.tflite$|person_.*\.tflite$/i.test(f))
+if (!hasPerson) {
+  console.error(
+    `\n❌ 引擎缺少人体检测模型（efficientdet*.tflite），实际 models/ 内容：` +
+      `${existsSync(outModels) ? readdirSync(outModels).join(', ') : '(目录不存在)'}\n` +
+      '该文件已随仓库提交，若仍缺失请确认已下载并入库 ai-engine/models/efficientdet_lite0.tflite。拒绝打包残缺引擎。'
   )
   process.exit(1)
 }
