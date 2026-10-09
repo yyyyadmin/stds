@@ -137,14 +137,16 @@ class EyesAnalyzer:
         worst = 0.0
         worst_detail = None
         parts = []
-        used_mp = False
+        worst_from_mp = False
         for face in faces[:6]:
             mp = _mp_closed_prob(face)
             if mp is not None:
                 prob, d = mp
-                used_mp = True
                 parts.append(d)
-                worst = max(worst, prob)
+                if prob >= worst:
+                    worst = prob
+                    worst_detail = None  # mp 路径无启发式 vv/dyn/rp，清掉避免错拼非最坏脸的诊断
+                    worst_from_mp = True
                 continue
             for roi in eye_rois(face, bgr):
                 side, x, y, w, h, _, _ = roi
@@ -156,10 +158,13 @@ class EyesAnalyzer:
                     parts.append("%s:%.2f" % (side, prob))
                     if prob >= worst:
                         worst_detail = dd
+                        worst_from_mp = False
                 else:
                     parts.append("%s:ocec%.2f" % (side, prob))
+                    if prob >= worst:
+                        worst_from_mp = False
                 worst = max(worst, prob)
-        method = "mediapipe" if used_mp else ("ocec" if self.ocec.available else "heuristic")
+        method = "mediapipe" if worst_from_mp else ("ocec" if self.ocec.available else "heuristic")
         reason = "眼闭合度 %.2f (%s) [%s]" % (worst, ", ".join(parts), method)
         if worst_detail:
             reason += " vv=%.0f dyn=%.0f rp=%.1f" % (
