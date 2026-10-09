@@ -255,10 +255,14 @@ export const DEFAULT_SETTINGS: AppSettings = {
   skipUpdateVersion: null
 }
 
-/** 支持的导入格式（第九章） */
+/** 支持的导入格式（第九章）：常见格式 + iPhone HEIC + 新格式 AVIF/JXL + 全相机 RAW（LibRaw 系）。
+ *  设计/医疗/矢量格式（psd/ai/cdr/xcf/sketch/fig/dcm/nii/fits/exr/dpx/eps/svg/ico 等）不属于照片，
+ *  无人脸/EXIF 语义，不予导入（导入只会产生无意义失败）。 */
 export const SUPPORTED_EXTS = [
-  '.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.webp', '.heic', '.heif', '.avif',
-  '.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng'
+  '.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.webp', '.heic', '.heif', '.avif', '.jxl',
+  // 相机 RAW：Canon / Nikon / Sony / Fuji / Olympus / Panasonic / Pentax / Leica / Samsung / Sigma
+  '.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.srf', '.sr2', '.raf', '.rw2',
+  '.raw', '.orf', '.pef', '.ptx', '.rwl', '.dng', '.srw', '.x3f'
 ]
 
 /** 维度精度分级承诺（第八章 8.3） */

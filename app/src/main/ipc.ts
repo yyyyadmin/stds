@@ -302,7 +302,7 @@ export function registerIpc(win: BrowserWindow): void {
 
   // 一次性迁移：旧版缩略图未应用 EXIF 方向（竖拍被显示成横拍）。升级后清空缩略图缓存
   // 并重置指向，触发全量重建为正确方向；仅跑一次（thumbOrientVersion 记录已迁移）。
-  const THUMB_ORIENT_VERSION = 3
+  const THUMB_ORIENT_VERSION = 4
   if (getSettings().thumbOrientVersion !== THUMB_ORIENT_VERSION) {
     clearThumbCache()
     clearBigCache() // 旧版 RAW/HEIC 大图预览也是侧躺的，一并清掉强制重建

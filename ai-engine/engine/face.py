@@ -1,12 +1,49 @@
 # -*- coding: utf-8 -*-
 """人脸/人体检测：优先 ONNX（YuNet/SCRFD/RetinaFace 权重），否则退回 OpenCV 自带 Haar 级联。
 另提供上半身检测（半截头维度：躯干存在但头部缺失）。"""
+import os
+import shutil
+import tempfile
+
 import cv2
 import numpy as np
 
 from .models import OnnxSession, haar_path, yunet_path
 
 ONNX_INPUT = 320
+
+
+def _is_ascii(s):
+    try:
+        s.encode("ascii")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ascii_model_path(path):
+    """OpenCV 在 Windows 以窄字符 fopen 读模型/级联文件，非 ASCII 路径（如中文安装目录 D:\\软件安装\\）
+    会报 Can't read ONNX file / 级联加载为空。若非 ASCII，复制到某个 ASCII 可写目录后返回新路径。"""
+    if not path or _is_ascii(path):
+        return path
+    cands = [
+        tempfile.gettempdir(),
+        os.environ.get("PROGRAMDATA", ""),
+        os.environ.get("SYSTEMDRIVE", "C:") + os.sep,
+    ]
+    for base in cands:
+        if not base or not _is_ascii(base):
+            continue
+        dst_dir = os.path.join(base, "screener-engine-models")
+        try:
+            os.makedirs(dst_dir, exist_ok=True)
+            dst = os.path.join(dst_dir, os.path.basename(path))
+            if not os.path.exists(dst) or os.path.getsize(dst) != os.path.getsize(path):
+                shutil.copyfile(path, dst)
+            return dst
+        except Exception:  # noqa: BLE001
+            continue
+    return path
 
 
 def _nms(boxes, iou_thr=0.35):
@@ -46,15 +83,15 @@ class FaceDetector:
         self._haar = None
         self._haar_profile = None
         if self.backend == "haar":
-            self._haar = cv2.CascadeClassifier(haar_path("haarcascade_frontalface_default.xml"))
+            self._haar = cv2.CascadeClassifier(_ascii_model_path(haar_path("haarcascade_frontalface_default.xml")))
             # 侧脸级联：提升斜眼/侧身/半侧人头脸召回（⑤⑧）
             pf = haar_path("haarcascade_profileface.xml")
             if pf:
-                self._haar_profile = cv2.CascadeClassifier(pf)
+                self._haar_profile = cv2.CascadeClassifier(_ascii_model_path(pf))
         self._upper = None
         ub = haar_path("haarcascade_upperbody.xml")
         if ub:
-            self._upper = cv2.CascadeClassifier(ub)
+            self._upper = cv2.CascadeClassifier(_ascii_model_path(ub))
 
     # ---------- 主入口 ----------
 
@@ -81,7 +118,7 @@ class FaceDetector:
 
     def _detect_onnx(self, bgr):
         if self._detector is None:
-            self._detector = cv2.FaceDetectorYN.create(self.onnx_model.path, "", (ONNX_INPUT, ONNX_INPUT), 0.6, 0.3, 5000)
+            self._detector = self._create_yunet()
         h, w = bgr.shape[:2]
         # YuNet 需要宽高为 32 的倍数
         nw, nh = max(32, (w // 32) * 32), max(32, (h // 32) * 32)
@@ -105,6 +142,19 @@ class FaceDetector:
                 "landmarks5": pts,
             })
         return out
+
+    def _create_yunet(self):
+        """创建 YuNet 检测器：优先用字节 buffer 重载（完全不碰路径，规避中文安装目录），
+        buffer 重载不可用时退化为复制到 ASCII 临时目录再按路径加载。"""
+        path = self.onnx_model.path
+        try:
+            with open(path, "rb") as f:
+                buf = np.frombuffer(f.read(), dtype=np.uint8)
+            return cv2.FaceDetectorYN.create(buf, "", (ONNX_INPUT, ONNX_INPUT), 0.6, 0.3, 5000)
+        except Exception:  # noqa: BLE001
+            return cv2.FaceDetectorYN.create(
+                _ascii_model_path(path), "", (ONNX_INPUT, ONNX_INPUT), 0.6, 0.3, 5000
+            )
 
     def _detect_haar(self, bgr, min_face):
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)

@@ -9,7 +9,10 @@ import { createHash } from 'crypto'
 import { app } from 'electron'
 import sharp from 'sharp'
 
-const RAW_EXTS = new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng'])
+const RAW_EXTS = new Set([
+  '.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.srf', '.sr2', '.raf', '.rw2',
+  '.raw', '.orf', '.pef', '.ptx', '.rwl', '.dng', '.srw', '.x3f'
+])
 
 /** 浏览器 <img> 无法直接显示、必须走缩略图/预览的格式 */
 export const BROWSER_UNDISPLAYABLE_EXTS = new Set([
@@ -87,7 +90,7 @@ export function hasFile(p: string): boolean {
 }
 
 /** 需要归一化后才能交给 Python 引擎的格式：冻结引擎的 libraw/heif 原生件不可靠，而 sharp 链路已被验证可用 */
-const NEEDS_NORMALIZE = new Set([...RAW_EXTS, '.heic', '.heif', '.avif'])
+const NEEDS_NORMALIZE = new Set([...RAW_EXTS, '.heic', '.heif', '.avif', '.jxl'])
 
 /**
  * 引擎输入归一化：RAW/HEIC/AVIF 先经 sharp（含内嵌 JPEG 预览兜底）转成“已按 EXIF 转正”的 JPEG 磁盘缓存，

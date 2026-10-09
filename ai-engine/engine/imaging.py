@@ -118,7 +118,8 @@ def imread_any(path):
         except Exception as e:  # noqa: BLE001
             reasons.append("heic:%s" % e)
     # RAW：尝试 rawpy -> 内嵌 JPEG（用二进制文件对象喂入，绕开中文路径）
-    if ext in (".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf", ".rw2", ".dng"):
+    if ext in (".cr2", ".cr3", ".crw", ".nef", ".nrw", ".arw", ".srf", ".sr2", ".raf", ".rw2",
+               ".raw", ".orf", ".pef", ".ptx", ".rwl", ".dng", ".srw", ".x3f"):
         try:
             import rawpy  # type: ignore
 
