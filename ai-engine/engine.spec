@@ -42,6 +42,13 @@ try:
     binaries += collect_dynamic_libs("pillow_avif")
 except Exception:  # noqa: BLE001
     pass
+# MediaPipe（可选）：收集其原生库、graph 配置与隐藏导入。未安装则跳过（引擎回落 yunet）。
+try:
+    import mediapipe  # noqa: F401
+    datas += collect_data_files("mediapipe")
+    binaries += collect_dynamic_libs("mediapipe")
+except Exception as _e:  # noqa: BLE001
+    print(f"[engine.spec] mediapipe 未收集（将回落 yunet）：{_e}")
 
 hiddenimports = [
     "numpy",
@@ -54,6 +61,8 @@ hiddenimports = [
     "pillow_heif",
     "pillow_avif",
     "imageio",
+    "mediapipe",
+    "google.protobuf",
 ]
 
 a = Analysis(
