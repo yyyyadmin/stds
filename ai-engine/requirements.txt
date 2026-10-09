@@ -1,6 +1,8 @@
 # AI 引擎依赖（完整引擎）
 # 基础必装：无需任何模型下载即可运行全部规则/传统算法检测
-opencv-python>=4.9.0
+# 统一为 opencv-contrib-python（单一 cv2 提供方）：mediapipe 依赖 contrib，若与 opencv-python
+# 并存会双份 cv2 冲突；contrib 是 base 超集，FaceDetectorYN/haarcascade 等照常可用。
+opencv-contrib-python>=4.9.0
 numpy>=1.26,<2.0
 Pillow>=10.2.0
 

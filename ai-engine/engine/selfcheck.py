@@ -20,8 +20,22 @@ def run():
         "detect_ok": False,
         "num_faces": 0,
         "blend_keys": 0,
+        "yunet_backend": "none",
+        "yunet_ok": False,
         "error": None,
     }
+    # --- yunet 共存冒烟（独立 try，先跑）：证明 cv2 与 mediapipe 在同一冻结引擎里都能用（Phase1 头号风险）---
+    try:
+        from .face import FaceDetector
+        fd = FaceDetector()
+        out["yunet_backend"] = fd.backend
+        if fd.backend == "yunet":
+            probe = np.full((320, 320, 3), 120, dtype=np.uint8)
+            _ = fd.detect(probe)  # 能建 FaceDetectorYN 并对图跑通即证明 cv2 完好
+            out["yunet_ok"] = True
+    except Exception as _ye:  # noqa: BLE001
+        out["yunet_ok"] = False
+        out["error"] = (out["error"] or "") + " |yunet: %s: %s" % (type(_ye).__name__, _ye)
     try:
         import mediapipe as mp  # noqa: F401
         from mediapipe.tasks import python as mp_python
