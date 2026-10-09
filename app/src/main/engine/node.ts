@@ -16,6 +16,7 @@ interface RawImage {
 
 async function loadGray(path: string, maxSide = 800): Promise<{ gray: Float64Array; w: number; h: number; rgb: RawImage | null }> {
   const img = await sharp(await sharpInput(path), { failOn: 'none' })
+    .rotate() // 应用 EXIF 方向，与 Python 引擎/显示保持一致
     .resize({ width: maxSide, height: maxSide, fit: 'inside', withoutEnlargement: true })
     .greyscale()
     .raw()
@@ -55,6 +56,7 @@ function blurConf(variance: number): number {
 
 async function statsRgb(path: string): Promise<{ rgb: RawImage }> {
   const img = await sharp(await sharpInput(path), { failOn: 'none' })
+    .rotate() // 应用 EXIF 方向
     .resize({ width: 512, height: 512, fit: 'inside', withoutEnlargement: true })
     .removeAlpha()
     .raw()
@@ -121,6 +123,7 @@ function blackWhiteConf(rgb: RawImage): { conf: number; reason: string } {
 /** 感知哈希：与 Python 引擎同构的 64bit DCT phash（16 位十六进制），跨引擎自洽 */
 async function phash(path: string): Promise<string> {
   const img = await sharp(await sharpInput(path), { failOn: 'none' })
+    .rotate() // 应用 EXIF 方向，保证跨引擎 phash 自洽
     .resize({ width: 32, height: 32, fit: 'fill' })
     .greyscale()
     .raw()

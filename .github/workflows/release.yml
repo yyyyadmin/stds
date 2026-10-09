@@ -53,6 +53,8 @@ jobs:
           python-version: '3.11'
       - name: 安装 JS 依赖
         run: npm ci
+      - name: 拉取开源 ONNX 权重（YuNet 人脸检测；失败则硬失败，避免静默降级）
+        run: npm run fetch-models
       - name: 构建自带 Python AI 引擎（PyInstaller）
         run: npm run build:engine
       - name: 构建前端与主进程（electron-vite，产出 out/）
@@ -81,6 +83,8 @@ jobs:
           python-version: '3.11'
       - name: 安装 JS 依赖
         run: npm ci
+      - name: 拉取开源 ONNX 权重（YuNet 人脸检测；失败则硬失败，避免静默降级）
+        run: npm run fetch-models
       - name: 构建自带 Python AI 引擎（PyInstaller, arm64）
         run: npm run build:engine
       - name: 构建前端与主进程（electron-vite，产出 out/）
@@ -109,6 +113,8 @@ jobs:
           python-version: '3.11'
       - name: 安装 JS 依赖
         run: npm ci
+      - name: 拉取开源 ONNX 权重（YuNet 人脸检测；失败则硬失败，避免静默降级）
+        run: npm run fetch-models
       - name: 构建自带 Python AI 引擎（PyInstaller, x64）
         run: npm run build:engine
       - name: 构建前端与主进程（electron-vite，产出 out/）

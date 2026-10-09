@@ -155,7 +155,12 @@ class Scanner extends EventEmitter {
       this.progress = { ...this.progress, current: basename(rec.path) }
       this.emit('progress', this.progress)
       try {
-        const raw = (await engineManager.detect(rec.path, rec.id)) as unknown as DetectResult & { phash?: string; nodeEngine?: boolean }
+        const raw = (await engineManager.detect(rec.path, rec.id)) as unknown as DetectResult & { phash?: string; nodeEngine?: boolean; error?: string }
+        // 引擎以 in-band error 返回（如无法解码：中文路径/RAW/HEIC）且无任何维度结果时，
+        // 绝不能当成“正常但无坏维度”静默判进成品库——必须走失败路径，让状态可见并计入熔断。
+        if (raw && raw.error && (!raw.dims || Object.keys(raw.dims).length === 0)) {
+          throw new Error(String(raw.error))
+        }
         this.handleResult(rec, raw)
         this.consecFail = 0
       } catch (e) {

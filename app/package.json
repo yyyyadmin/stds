@@ -12,6 +12,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "start": "electron-vite preview",
     "build:engine": "node scripts/build-engine.mjs",
+    "fetch-models": "node scripts/fetch-models.mjs",
+    "build:engine:ai": "npm run fetch-models && node scripts/build-engine.mjs",
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win",
     "dist:mac": "npm run build && electron-builder --mac",

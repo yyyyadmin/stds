@@ -4,7 +4,7 @@
  */
 import { app } from 'electron'
 import { join } from 'path'
-import { existsSync, mkdirSync, statSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'fs'
 import sharp from 'sharp'
 import { getDb } from '../db'
 import { sharpInput } from './rawPreview'
@@ -16,6 +16,26 @@ function bigDir(): string {
   const dir = join(app.getPath('userData'), 'data', 'big')
   mkdirSync(dir, { recursive: true })
   return dir
+}
+
+/** 清理大图预览磁盘缓存（升级方向修正后强制重建用），返回删除文件数 */
+export function clearBigCache(): number {
+  const dir = bigDir()
+  let n = 0
+  try {
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith('.jpg')) continue
+      try {
+        unlinkSync(join(dir, f))
+        n++
+      } catch {
+        /* 占用中的文件跳过 */
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return n
 }
 
 /**

@@ -29,7 +29,7 @@ import {
 import { scanner, reclassifyAll, type ScanProgress } from './services/scanner'
 import { exporter, type ExportOptions } from './services/exporter'
 import { importPaths, backfillThumbnails, clearThumbCache } from './services/importer'
-import { ensureBigPreview } from './services/big'
+import { ensureBigPreview, clearBigCache } from './services/big'
 import { authManager } from './services/auth'
 import { engineManager } from './engine'
 import { autoTune, resetTuned, TUNE_MIN_CORRECTIONS } from './services/tuner'
@@ -299,6 +299,16 @@ export function registerIpc(win: BrowserWindow): void {
 
   // RAW/HEIC 大图原图高清预览（普通格式直接用原文件，不走这里）
   ipcMain.handle(CH.bigPreview, (_e, id: number) => ensureBigPreview(id))
+
+  // 一次性迁移：旧版缩略图未应用 EXIF 方向（竖拍被显示成横拍）。升级后清空缩略图缓存
+  // 并重置指向，触发全量重建为正确方向；仅跑一次（thumbOrientVersion 记录已迁移）。
+  const THUMB_ORIENT_VERSION = 2
+  if (getSettings().thumbOrientVersion !== THUMB_ORIENT_VERSION) {
+    clearThumbCache()
+    clearBigCache() // 旧版 RAW/HEIC 大图预览也是侧躺的，一并清掉强制重建
+    getDb().prepare(`UPDATE images SET thumb = ''`).run()
+    saveSettings({ thumbOrientVersion: THUMB_ORIENT_VERSION })
+  }
 
   // 启动时补齐上次遗留的缩略图（幂等；无遗留则不产生 UI 进度）
   runBackfill(send)

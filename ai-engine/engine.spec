@@ -36,6 +36,12 @@ try:
     binaries += collect_dynamic_libs("pillow_heif")
 except Exception:  # noqa: BLE001
     pass
+# pillow-avif-plugin 的原生 _avif 库（AVIF 解码）
+try:
+    datas += collect_data_files("pillow_avif")
+    binaries += collect_dynamic_libs("pillow_avif")
+except Exception:  # noqa: BLE001
+    pass
 
 hiddenimports = [
     "numpy",
@@ -46,6 +52,8 @@ hiddenimports = [
     "onnxruntime",
     "rawpy",
     "pillow_heif",
+    "pillow_avif",
+    "imageio",
 ]
 
 a = Analysis(

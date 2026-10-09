@@ -235,6 +235,8 @@ export interface AppSettings {
   lastImportDir: string | null
   /** 启动自动更新弹窗：对此版本点过“跳过”后不再弹，新版本再弹 */
   skipUpdateVersion?: string | null
+  /** 缩略图方向修正版本：旧版缩略图未应用 EXIF 方向（竖拍显示为横），升级后需一次性重建。不设默认值，未迁移时为 undefined */
+  thumbOrientVersion?: number
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -255,7 +257,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 
 /** 支持的导入格式（第九章） */
 export const SUPPORTED_EXTS = [
-  '.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.webp', '.heic', '.heif',
+  '.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.webp', '.heic', '.heif', '.avif',
   '.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng'
 ]
 

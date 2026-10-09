@@ -97,19 +97,37 @@ class ExpressionAnalyzer:
         if not self.emotion.available:
             return None
         try:
+            shape = self.emotion.session.get_inputs()[0].shape
+            # 自适应输入契约：NCHW(1,C,H,W) 或 NHWC(1,H,W,C)；C=1 灰度 / C=3 彩色；尺寸取空间维。
+            # 兼容 ONNX Model Zoo emotion-ferplus(1,1,64,64 灰度 8 类) 与常见 FER2013(48 灰度)/224 RGB 模型，
+            # 避免按错形状喂数据产出垃圾置信度。
+            if len(shape) == 4 and shape[1] in (1, 3):
+                ch, size, nhwc = shape[1], shape[2], False
+            elif len(shape) == 4 and shape[3] in (1, 3):
+                ch, size, nhwc = shape[3], shape[1], True
+            else:
+                ch, size, nhwc = 3, 224, False
+            size = int(size) if isinstance(size, int) and size > 0 else 224
             x, y, w, h = faces[0]["box"]
             crop = bgr[max(0, y):y + h, max(0, x):x + w]
-            p = cv2.resize(crop, (224, 224)).astype(np.float32)
-            if self.emotion.session.get_inputs()[0].shape[1] == 3:
-                blob = p[:, :, ::-1].transpose(2, 0, 1)[None, ...] / 255.0
+            if crop.size == 0:
+                return None
+            p = cv2.resize(crop, (size, size))
+            if ch == 1:
+                g = (cv2.cvtColor(p, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0)
+                blob = g[:, :, None][None, ...] if nhwc else g[None, None, :, :]
             else:
-                blob = p[:, :, ::-1][None, ...] / 255.0
+                rgb = p[:, :, ::-1].astype(np.float32) / 255.0
+                blob = rgb[None, ...] if nhwc else rgb.transpose(2, 0, 1)[None, ...]
             out = self.emotion.run(blob).flatten()
             probs = np.exp(out - out.max())
             probs = probs / probs.sum()
             names = getattr(self.emotion, "labels", None)
             if names and len(names) == probs.size:
                 return float(sum(probs[i] for i, nm in enumerate(names) if str(nm).lower() in EMOTION_LABELS_NEG))
+            # ONNX Model Zoo emotion-ferplus：8 类 angry,contempt,disgust,fear,happy,neutral,sad,surprise
+            if probs.size == 8:
+                return float(probs[0] + probs[1] + probs[2] + probs[3])
             # 常见 FER2013 顺序: angry,disgust,fear,happy,sad,surprise,neutral
             if probs.size == 7:
                 return float(probs[0] + probs[1] + probs[2])
