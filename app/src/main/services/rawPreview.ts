@@ -87,22 +87,49 @@ async function exifAngleOf(path: string): Promise<number> {
   return orientAngleOfBytes(wholeFile(path))
 }
 function orientAngleOfBytes(buf: Buffer): number {
-  const i = buf.indexOf(Buffer.from([0x45, 0x78, 0x69, 0x66, 0x00, 0x00])) // 'Exif\0\0'
-  if (i < 0) return 0
-  const t = i + 6
-  if (t + 8 > buf.length || buf[t + 2] !== 0x2a) return 0
+  // 收集所有可能的 TIFF 头起点：JPEG 的 'Exif\0\0'+TIFF；TIFF 型 RAW(CR2/NEF/DNG) 文件头即 II*/MM*；
+  // CR3 等 ISO-BMFF 容器在 CMT1 盒内含 II*\0。逐个尝试，第一个能解出合法 Orientation(1-8) 的为准。
+  const heads: number[] = []
+  const exifMark = buf.indexOf(Buffer.from([0x45, 0x78, 0x69, 0x66, 0x00, 0x00])) // 'Exif\0\0'
+  if (exifMark >= 0) heads.push(exifMark + 6)
+  for (const sig of [Buffer.from([0x49, 0x49, 0x2a, 0x00]), Buffer.from([0x4d, 0x4d, 0x00, 0x2a])]) {
+    let off = 0
+    while (heads.length < 48) {
+      const i = buf.indexOf(sig, off)
+      if (i < 0) break
+      heads.push(i)
+      off = i + 1
+    }
+  }
+  for (const t of heads) {
+    const a = angleFromTiff(buf, t)
+    if (a !== null) return a
+  }
+  return 0
+}
+
+/** 从 buf[t] 处的 TIFF 头解析 IFD0 的 Orientation(0x0112)，映射为旋转角度；无法解析返回 null */
+function angleFromTiff(buf: Buffer, t: number): number | null {
+  if (t + 8 > buf.length) return null
   const little = buf[t] === 0x49 && buf[t + 1] === 0x49
+  const big = buf[t] === 0x4d && buf[t + 1] === 0x4d
+  if (!little && !big) return null
   const r16 = (o: number): number => (little ? buf.readUInt16LE(o) : buf.readUInt16BE(o))
   const r32 = (o: number): number => (little ? buf.readUInt32LE(o) : buf.readUInt32BE(o))
+  if (r16(t + 2) !== 0x2a) return null
   const ifd = t + r32(t + 4)
-  if (ifd + 2 > buf.length) return 0
+  if (ifd + 2 > buf.length) return null
   const n = r16(ifd)
+  if (n > 1000) return null
   for (let k = 0; k < n; k++) {
     const e = ifd + 2 + k * 12
     if (e + 12 > buf.length) break
-    if (r16(e) === 0x0112) return ORIENT_ANGLE[r16(e + 8)] ?? 0
+    if (r16(e) === 0x0112) {
+      const v = r16(e + 8)
+      return v >= 1 && v <= 8 ? ORIENT_ANGLE[v] ?? 0 : null
+    }
   }
-  return 0
+  return null
 }
 
 /**

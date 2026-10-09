@@ -71,8 +71,14 @@ export default function App(): JSX.Element {
       }
       if (previewId) {
         if (e.key === 'Escape') closePreview()
-        if (e.key === 'ArrowLeft') stepPreview(-1)
-        if (e.key === 'ArrowRight') stepPreview(1)
+        if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+          e.preventDefault()
+          stepPreview(-1)
+        }
+        if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+          e.preventDefault()
+          stepPreview(1)
+        }
         if (e.key === '1') void setViewMode('grid')
         if (e.key === '2') void setViewMode('list')
         if (e.key === '3') void setViewMode('masonry')
@@ -149,15 +155,17 @@ export default function App(): JSX.Element {
           {showMember && <MemberCenterDialog />}
           {showUpdate && <UpdateDialog />}
           {toast && (
-            <div
-              className={
-                'fixed bottom-16 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg shadow-lg text-sm fade-in cursor-pointer max-w-[80%] ' +
-                (toast.kind === 'error' ? 'bg-red-900/90 text-red-100' : toast.kind === 'success' ? 'bg-emerald-900/90 text-emerald-100' : 'bg-panel2 border border-line')
-              }
-              onClick={dismissToast}
-              title="点击关闭"
-            >
-              {toast.msg}
+            <div className="fixed inset-x-0 bottom-0 z-50 pl-56 pb-16 flex justify-center pointer-events-none">
+              <div
+                className={
+                  'pointer-events-auto px-4 py-2 rounded-lg shadow-lg text-sm fade-in cursor-pointer max-w-[80%] ' +
+                  (toast.kind === 'error' ? 'bg-red-900/90 text-red-100' : toast.kind === 'success' ? 'bg-emerald-900/90 text-emerald-100' : 'bg-panel2 border border-line')
+                }
+                onClick={dismissToast}
+                title="点击关闭"
+              >
+                {toast.msg}
+              </div>
             </div>
           )}
         </>

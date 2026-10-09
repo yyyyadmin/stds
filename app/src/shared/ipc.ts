@@ -166,7 +166,7 @@ export interface RendererApi {
   bootstrap(): Promise<BootstrapInfo>
   pickFolder(): Promise<string | null>
   pickImages(): Promise<string[] | null>
-  importPaths(paths: string[]): Promise<{ added: number; skipped: number; existed: number }>
+  importPaths(paths: string[]): Promise<{ added: number; skipped: number; existed: number; filtered: number }>
   importCancel(): Promise<void>
   listImages(filter: { category?: CategoryKey; status?: string }): Promise<ImageRecord[]>
   getImage(id: number): Promise<ImageRecord | null>

@@ -95,17 +95,27 @@ export function Spinner(props: { label: string; dark?: boolean }): JSX.Element {
   )
 }
 
-/** 中部视图顶部的后台任务横幅：导入中 / 生成缩略图中 */
+/** 中部视图顶部的后台任务横幅：导入中 / 生成缩略图中（醒目大号品牌色胶囊） */
 function BusyBanner(): JSX.Element | null {
   const imp = useStore((s) => s.importProgress)
   const th = useStore((s) => s.thumbsProgress)
   let label: string | null = null
-  if (imp) label = `导入中 ${imp.done}/${imp.total}，正在登记文件…`
-  else if (th) label = `生成缩略图中 ${th.done}/${th.total}…`
+  let pct: number | null = null
+  if (imp) {
+    label = `导入中 ${imp.done}/${imp.total}，正在登记文件…`
+    pct = imp.total ? imp.done / imp.total : null
+  } else if (th) {
+    label = `正在生成缩略图 ${th.done}/${th.total}…`
+    pct = th.total ? th.done / th.total : null
+  }
   if (!label) return null
   return (
-    <div className="sticky top-0 z-20 flex justify-center pb-2">
-      <Spinner label={label} />
+    <div className="sticky top-0 z-30 flex justify-center py-2 pointer-events-none">
+      <div className="flex items-center gap-3 rounded-full bg-brand text-white shadow-2xl ring-2 ring-white/30 px-6 py-3 text-lg font-semibold">
+        <span className="w-5 h-5 rounded-full border-[3px] border-white/40 border-t-white animate-spin inline-block shrink-0" />
+        <span>{label}</span>
+        {pct != null && <span className="tabular-nums text-white/90">{Math.round(pct * 100)}%</span>}
+      </div>
     </div>
   )
 }
@@ -148,13 +158,19 @@ function Thumb({ img, size, index, onClick, onDoubleClick, dragIds, dragging, on
   elRef?: (el: HTMLDivElement | null) => void
 }): JSX.Element {
   const selected = useStore((s) => s.selection.has(img.id))
+  const scanCurrent = useStore((s) => (s.scanProgress?.running ? s.scanProgress.current : ''))
+  const isScanning = !!scanCurrent && img.filename === scanCurrent
   const src = img.thumb ? toSrc(img.thumb) : toSrc(img.path)
   return (
     <div
       ref={elRef}
       className={
         'relative rounded-md overflow-hidden bg-panel2 border transition-all duration-150 cursor-pointer group ' +
-        (selected ? 'border-brand ring-2 ring-brand shadow-[0_0_0_2px_rgba(59,130,246,0.45)]' : 'border-line hover:border-gray-500') +
+        (isScanning
+          ? 'border-red-500 ring-[3px] ring-red-500 scale-105 z-20 '
+          : selected
+            ? 'border-brand ring-2 ring-brand shadow-[0_0_0_2px_rgba(59,130,246,0.45)]'
+            : 'border-line hover:border-gray-500') +
         (dragging ? ' opacity-40 scale-90' : '')
       }
       style={{ width: size, height: size }}
@@ -175,6 +191,7 @@ function Thumb({ img, size, index, onClick, onDoubleClick, dragIds, dragging, on
     >
       <img src={src} loading="lazy" className="w-full h-full object-cover pointer-events-none" alt={img.filename} draggable={false} />
       {selected && <span className="absolute left-1 top-1 w-4 h-4 rounded-full bg-brand text-white text-[10px] flex items-center justify-center">✓</span>}
+      {isScanning && <span className="absolute left-1 top-1 z-10 px-1.5 py-0.5 rounded bg-red-500 text-white text-[10px] font-bold animate-pulse shadow">检测中</span>}
       <StatusRibbon img={img} />
       <TagChips img={img} />
     </div>
@@ -310,6 +327,7 @@ export default function ImageView(): JSX.Element {
   const handleClickSelect = useStore((s) => s.handleClickSelect)
   const openPreview = useStore((s) => s.openPreview)
   const selection = useStore((s) => s.selection)
+  const scanProgress = useStore((s) => s.scanProgress)
 
   const sorted = useMemo(() => {
     const arr = [...images]
@@ -365,15 +383,45 @@ export default function ImageView(): JSX.Element {
 
   if (!sorted.length) {
     return (
-      <div className="h-full flex flex-col items-center justify-center text-gray-600 gap-3">
+      <div className="h-full overflow-auto flex flex-col items-center justify-center text-fg2 p-6">
         <BusyBanner />
-        <div className="text-5xl">📷</div>
-        <div className="text-lg">拖入照片文件夹，或点击左上角「导入文件夹」</div>
-        <div className="text-xs text-gray-700">
-          支持 JPG / PNG / TIFF / BMP / WebP / HEIC 及主流 RAW · 全程本地处理 · 无网络请求
-        </div>
-        <div className="text-xs text-gray-700 mt-2">
-          坏维度：{BAD_DIMENSIONS.map((d) => DIMENSION_LABELS[d]).join(' / ')}
+        <div className="w-full max-w-2xl rounded-xl border border-line bg-panel2/50 p-6 fade-in">
+          <div className="flex flex-col items-center text-center gap-1">
+            <div className="text-5xl">📷</div>
+            <div className="text-lg text-fg">拖入照片文件夹，或点击左上角「导入文件夹」</div>
+            <div className="text-xs text-fg3">全程本地处理 · 无网络请求</div>
+          </div>
+
+          {/* 检测维度：直接复用 BAD_DIMENSIONS + DIMENSION_LABELS，不写死 */}
+          <div className="mt-5">
+            <div className="text-xs font-medium text-fg3 mb-2">AI 检测维度（命中即归入待修正 / 垃圾桶）</div>
+            <div className="flex flex-wrap gap-1.5">
+              {BAD_DIMENSIONS.map((d) => (
+                <span key={d} className="px-2 py-0.5 rounded-full text-xs bg-bad/10 text-bad border border-bad/20">
+                  {DIMENSION_LABELS[d]}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* 格式三档：与「导入照片」下拉菜单保持一致 */}
+          <div className="mt-5 grid gap-3 sm:grid-cols-3">
+            <div className="rounded-lg border border-line bg-panel p-3">
+              <div className="text-xs font-medium text-good mb-1">✓ 推荐（检测最稳）</div>
+              <div className="text-xs text-fg2 leading-relaxed">JPG · JPEG · PNG · TIFF · BMP · WebP</div>
+              <div className="text-[11px] text-fg3 mt-1 leading-relaxed">直接解码 + EXIF 自动转正，全维度稳定</div>
+            </div>
+            <div className="rounded-lg border border-line bg-panel p-3">
+              <div className="text-xs font-medium text-brand mb-1">✓ 完整支持</div>
+              <div className="text-xs text-fg2 leading-relaxed">相机 RAW（CR2/CR3/NEF/ARW/DNG…）· iPhone HEIC · AVIF / JXL</div>
+              <div className="text-[11px] text-fg3 mt-1 leading-relaxed">内嵌预览兜底 + 方向解析，全维度可检</div>
+            </div>
+            <div className="rounded-lg border border-line bg-panel p-3">
+              <div className="text-xs font-medium text-fg3 mb-1">✕ 不支持（自动跳过）</div>
+              <div className="text-xs text-fg2 leading-relaxed">PSD · AI · SVG · ICO 等设计 / 矢量 / 医疗格式</div>
+              <div className="text-[11px] text-fg3 mt-1 leading-relaxed">非照片，无人脸 / EXIF 语义，导入时过滤</div>
+            </div>
+          </div>
         </div>
       </div>
     )
@@ -389,48 +437,68 @@ export default function ImageView(): JSX.Element {
   }
 
   if (viewMode === 'list') {
+    const scanning = scanProgress?.running === true
+    const currentName = scanProgress?.current ?? ''
     return (
-      <div className="h-full overflow-auto p-2 fade-in">
+      <div className="h-full overflow-auto px-2 py-1 fade-in">
         <BusyBanner />
-        <table className="w-full text-xs border-collapse">
+        <table className="w-full text-xs border-separate border-spacing-0">
           <thead>
-            <tr className="text-gray-500 text-left sticky top-0 bg-base">
-              <th className="p-2 w-20"></th>
-              <th className="p-2">文件名</th>
-              <th className="p-2">AI 标签</th>
-              <th className="p-2 w-24">最高置信度</th>
-              <th className="p-2 w-24">分类</th>
-              <th className="p-2 w-20">状态</th>
+            <tr className="text-fg3 text-left">
+              <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium w-14"></th>
+              <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium">文件名</th>
+              <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium">AI 标签</th>
+              <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium w-36">最高置信度</th>
+              <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium w-28">分类</th>
+              <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium w-20">状态</th>
             </tr>
           </thead>
           <tbody>
             {sorted.map((img, i) => {
               const selected = selection.has(img.id)
               const tags = Object.entries(img.tags || {}).filter(([, t]) => t && t.level !== 'low')
+              const isCurrent = scanning && !!currentName && img.filename === currentName
+              const conf = sortConf(img)
+              const rowBg = isCurrent ? 'bg-red-500/10' : selected ? 'bg-brand/20' : i % 2 ? 'bg-panel2/40' : ''
               return (
                 <tr
                   key={img.id}
-                  className={
-                    'cursor-pointer border-b border-line/60 ' + (selected ? 'bg-brand/20' : 'hover:bg-panel2')
-                  }
+                  className={'cursor-pointer hover:bg-panel2 ' + rowBg}
                   onClick={(e) => click(i, e)}
                   onDoubleClick={() => dbl(img)}
                 >
-                  <td className="p-1">
-                    <img src={img.thumb ? toSrc(img.thumb) : toSrc(img.path)} loading="lazy" className="w-16 h-16 object-cover rounded" alt="" draggable={false} />
+                  <td className={'border-b border-line/50 px-2 py-1 ' + (isCurrent ? 'border-l-2 border-l-red-500' : 'border-l-2 border-l-transparent')}>
+                    <img src={img.thumb ? toSrc(img.thumb) : toSrc(img.path)} loading="lazy" className="w-11 h-11 object-cover rounded-md ring-1 ring-line" alt="" draggable={false} />
                   </td>
-                  <td className="p-2 max-w-[280px] truncate" title={img.path}>{img.filename}</td>
-                  <td className="p-2">
+                  <td className="border-b border-line/50 px-2 py-1 max-w-[280px] align-middle">
+                    <div className="truncate font-mono text-fg2" title={img.path}>{img.filename}</div>
+                    {isCurrent && <div className="text-[10px] text-red-500">正在检测…</div>}
+                  </td>
+                  <td className="border-b border-line/50 px-2 py-1 align-middle">
                     <div className="flex flex-wrap gap-1">
                       {tags.map(([d, t]) => (
                         <DimTag key={d} dim={d} conf={t!.confidence} />
                       ))}
-                      {!tags.length && <span className="text-gray-600">—</span>}
+                      {!tags.length && <span className="text-fg3">—</span>}
                     </div>
                   </td>
-                  <td className="p-2 tabular-nums">{(sortConf(img) * 100).toFixed(0)}%</td>
-                  <td className="p-2 text-gray-400">{categoryLabelShort(img.category)}</td>
-                  <td className="p-2 text-gray-400">{img.status === 'done' ? '已筛' : img.status === 'pending' ? '待筛' : img.status === 'error' ? '失败' : '跳过'}</td>
+                  <td className="border-b border-line/50 px-2 py-1 align-middle">
+                    <div className="flex items-center gap-2">
+                      <span className="tabular-nums w-9 text-right text-fg2">{(conf * 100).toFixed(0)}%</span>
+                      <span className="h-1.5 flex-1 min-w-[48px] rounded-full bg-line overflow-hidden">
+                        <span className="block h-full rounded-full bg-brand" style={{ width: `${Math.round(conf * 100)}%` }} />
+                      </span>
+                    </div>
+                  </td>
+                  <td className="border-b border-line/50 px-2 py-1 align-middle">
+                    <span className="inline-flex items-center gap-1.5 text-fg2">
+                      <span className="w-2 h-2 rounded-full shrink-0" style={{ background: categoryDotColor(img.category) }} />
+                      {categoryLabelShort(img.category)}
+                    </span>
+                  </td>
+                  <td className="border-b border-line/50 px-2 py-1 align-middle">
+                    <StatusPill status={img.status} scanning={isCurrent} />
+                  </td>
                 </tr>
               )
             })}
@@ -467,15 +535,50 @@ function categoryLabelShort(cat: string): string {
   return DIMENSION_LABELS[cat as keyof typeof DIMENSION_LABELS] || cat
 }
 
+/** 分类小圆点颜色：与左侧分类树同色（成品=绿 待确认=黄 垃圾=灰 自定义=品牌色 其余走维度色） */
+function categoryDotColor(cat: string): string {
+  if (cat === CAT_LIBRARY) return 'rgb(var(--c-good))'
+  if (cat === CAT_REVIEW) return 'rgb(var(--c-warn))'
+  if (cat === CAT_TRASH) return '#6b7280'
+  if (cat.startsWith('custom:')) return 'rgb(var(--c-brand))'
+  return dimTagColor(cat)
+}
+
+/** 列表状态胶囊：检测中（蓝色闪烁）/ 已筛（绿）/ 待筛（灰）/ 失败（红）/ 跳过（黄） */
+function StatusPill({ status, scanning }: { status: string; scanning: boolean }): JSX.Element {
+  if (scanning) {
+    return (
+      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] font-medium bg-red-500/15 text-red-500 animate-pulse">
+        <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+        检测中
+      </span>
+    )
+  }
+  const map: Record<string, { t: string; c: string }> = {
+    done: { t: '已筛', c: 'bg-good/15 text-good' },
+    pending: { t: '待筛', c: 'bg-fg3/15 text-fg3' },
+    error: { t: '失败', c: 'bg-bad/15 text-bad' },
+    skip: { t: '跳过', c: 'bg-warn/15 text-warn' }
+  }
+  const s = map[status] || map.pending
+  return <span className={'inline-flex items-center px-1.5 py-0.5 rounded-full text-[11px] font-medium ' + s.c}>{s.t}</span>
+}
+
 function MasonryThumb(props: { img: ImageRecord; index: number; onClick: (i: number, e: React.MouseEvent) => void; onDoubleClick: (img: ImageRecord) => void; dragIds: number[] }): JSX.Element {
   const { img, index, onClick, onDoubleClick, dragIds } = props
   const selected = useStore((s) => s.selection.has(img.id))
+  const scanCurrent = useStore((s) => (s.scanProgress?.running ? s.scanProgress.current : ''))
+  const isScanning = !!scanCurrent && img.filename === scanCurrent
   const ratio = img.width && img.height ? img.width / img.height : 1
   return (
     <div
       className={
         'relative rounded-md overflow-hidden border cursor-pointer ' +
-        (selected ? 'border-brand ring-2 ring-brand shadow-[0_0_0_2px_rgba(59,130,246,0.45)]' : 'border-line hover:border-gray-500')
+        (isScanning
+          ? 'border-red-500 ring-[3px] ring-red-500 scale-105 z-20 '
+          : selected
+            ? 'border-brand ring-2 ring-brand shadow-[0_0_0_2px_rgba(59,130,246,0.45)]'
+            : 'border-line hover:border-gray-500')
       }
       draggable
       onDragStart={(e) => {
@@ -486,6 +589,7 @@ function MasonryThumb(props: { img: ImageRecord; index: number; onClick: (i: num
       onDoubleClick={() => onDoubleClick(img)}
     >
       <img src={img.thumb ? toSrc(img.thumb) : toSrc(img.path)} loading="lazy" className="w-full object-cover" style={{ aspectRatio: String(ratio) }} alt={img.filename} draggable={false} />
+      {isScanning && <span className="absolute left-1 top-1 z-10 px-1.5 py-0.5 rounded bg-red-500 text-white text-[10px] font-bold animate-pulse shadow">检测中</span>}
       <StatusRibbon img={img} />
       <TagChips img={img} />
     </div>

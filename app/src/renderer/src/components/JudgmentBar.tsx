@@ -95,12 +95,14 @@ export default function JudgmentBar({ img }: { img: ImageRecord }): JSX.Element 
       </button>
       <button
         className="btn bg-emerald-700 hover:bg-emerald-600 text-white border-transparent text-xs whitespace-nowrap"
+        title="AI 这次分类判对了：图片保持原位不移动，仅记录一条“判对”样本，用于累计后自动微调阈值（每维度累计 200 条修正记录后生效）"
         onClick={() => doCorrect('correct')}
       >
         此判定正确
       </button>
       <button
         className={'btn bg-orange-700 hover:bg-orange-600 text-white border-transparent text-xs whitespace-nowrap ' + (panel === 'wrong' ? 'ring-2 ring-orange-400' : '')}
+        title="AI 这次分类判错了：点开后选择正确的归属类别，图片会移动到该类别，并记为一条“修正样本”教 AI 调整阈值（误判多则少标，漏判多则更早召回）"
         onClick={() => setPanel((p) => (p === 'wrong' ? 'none' : 'wrong'))}
       >
         此判定错误

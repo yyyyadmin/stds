@@ -5,7 +5,7 @@
  */
 import { create } from 'zustand'
 import type { AppSettings, CategoryKey, ImageRecord, DimensionKey } from '../../shared/types'
-import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, DIMENSION_LABELS, BAD_DIMENSIONS, isBadDim, guessMidDim } from '../../shared/types'
+import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, DIMENSION_LABELS, BAD_DIMENSIONS, isBadDim, guessMidDim, SUPPORTED_EXTS } from '../../shared/types'
 import type { AuthState, BootstrapInfo, ConsumeResult, MoveRequest, UpdateInfo } from '../../shared/ipc'
 import type { ScanProgress } from '../../main/services/scanner'
 import type { ExportProgress } from '../../main/services/exporter'
@@ -583,6 +583,7 @@ export const useStore = create<StoreState>((set, get) => ({
     if (!confirm(`确定清空图库？将删除软件内 ${n} 条图片记录与全部修正记录（磁盘上的原始照片文件不会被删除），之后可重新导入。`)) return
     const r = await window.api.libraryClear()
     set({ selection: new Set(), previewId: null, scanProgress: null, largeIndex: 0, undoSnapshots: [] })
+    void get().saveSettings({ lastImportDir: null }) // 清空图库后不再显示“当前筛选目录”
     await get().openCategory(get().activeCategory)
     set({ toast: { msg: `已清空图库（原 ${r.cleared} 张），可重新导入照片了`, kind: 'success' } })
   },
@@ -620,10 +621,13 @@ export const useStore = create<StoreState>((set, get) => ({
 
   async importPaths(paths) {
     const r = await window.api.importPaths(paths)
+    // 判定本次是否“选择/拖入了整个目录”：路径不以已知图片扩展名结尾 → 视为目录，记为当前筛选目录（仅选照片时不改）
+    const dirPath = paths.find((p) => !SUPPORTED_EXTS.some((e) => p.toLowerCase().endsWith(e)))
+    if (dirPath && dirPath !== get().settings.lastImportDir) void get().saveSettings({ lastImportDir: dirPath })
     set({
       importProgress: null,
       toast: {
-        msg: `导入完成：新增 ${r.added} 张${r.existed ? `，已存在 ${r.existed} 张` : ''}${r.skipped ? `，无法解码 ${r.skipped} 张` : ''}`,
+        msg: `导入完成：新增 ${r.added} 张${r.existed ? `，已存在 ${r.existed} 张` : ''}${r.filtered ? `，已跳过 ${r.filtered} 个不支持的格式` : ''}${r.skipped ? `，无法解码 ${r.skipped} 张` : ''}`,
         kind: 'info'
       }
     })

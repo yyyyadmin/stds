@@ -58,7 +58,7 @@ export default function TopBar(): JSX.Element {
           {s.importProgress ? `导入中 ${s.importProgress.done}/${s.importProgress.total}` : '导入照片 ▾'}
         </button>
         {importMenu && (
-          <div className="absolute left-0 top-full mt-1 z-40 w-52 rounded-md border border-line bg-panel shadow-xl py-1">
+          <div className="absolute left-0 top-full mt-1 z-40 w-64 rounded-md border border-line bg-panel shadow-xl py-1">
             <button
               className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 transition-colors"
               onClick={() => {
@@ -79,6 +79,14 @@ export default function TopBar(): JSX.Element {
               选择文件夹…
               <span className="block text-[11px] text-fg3 mt-0.5">递归导入全部照片</span>
             </button>
+            {/* 格式推荐：按检测可靠性分三档（不支持的格式导入时会自动过滤，不入库） */}
+            <div className="mt-1 border-t border-line px-3 py-2 text-[11px] leading-relaxed">
+              <div className="text-good mb-0.5">✓ 推荐（检测最稳）</div>
+              <div className="text-fg2">JPG · JPEG · PNG · TIFF · BMP · WebP</div>
+              <div className="text-brand mt-1.5 mb-0.5">✓ 完整支持</div>
+              <div className="text-fg2">相机 RAW（CR2/CR3/NEF/ARW/DNG…）· iPhone HEIC · AVIF / JXL</div>
+              <div className="text-fg3 mt-1.5">设计/矢量/医疗格式（PSD·AI·SVG·ICO…）非照片，不支持，导入时自动跳过</div>
+            </div>
           </div>
         )}
       </div>
@@ -120,6 +128,17 @@ export default function TopBar(): JSX.Element {
       )}
       {!running && p?.message && !p.total && <span className="text-xs text-gray-500 truncate flex-1">{p.message}</span>}
       <div className="flex-1" />
+
+      {/* 当前筛选目录：仅当本次导入来自“选择/拖入目录”时显示（纯选照片不显示） */}
+      {s.settings.lastImportDir && (
+        <span
+          className="inline-flex items-center max-w-[280px] px-2 py-1 rounded-md text-xs bg-panel2 text-fg2 border border-line"
+          title={`当前筛选目录：${s.settings.lastImportDir}`}
+        >
+          <span className="shrink-0">📂 当前筛选目录：</span>
+          <span className="truncate min-w-0">{s.settings.lastImportDir}</span>
+        </span>
+      )}
 
       {/* 撤回移动：仅在有可撤回的移动操作时高亮可点 */}
       <button
@@ -198,7 +217,7 @@ export default function TopBar(): JSX.Element {
       <button className="btn" onClick={() => void useStore.setState({ showExport: true })} disabled={s.counts.all === 0}>
         导出交付
       </button>
-      <button className="btn-ghost" title="设置" onClick={() => void useStore.setState({ showSettings: true })}>
+      <button className="btn-ghost text-xl leading-none px-2" title="设置" onClick={() => void useStore.setState({ showSettings: true })}>
         ⚙️
       </button>
       <span
@@ -216,7 +235,7 @@ export default function TopBar(): JSX.Element {
 
       {/* 主题切换 */}
       <button
-        className="btn-ghost text-fg2"
+        className="btn-ghost text-fg2 text-xl leading-none px-2"
         title={dark ? '切换到简白主题' : '切换到暗夜主题'}
         onClick={() => void s.toggleTheme()}
       >
@@ -227,18 +246,18 @@ export default function TopBar(): JSX.Element {
       {auth.loggedIn ? (
         <button
           className={
-            'chip cursor-pointer border ' +
-            (isMember ? 'bg-warn/15 text-warn border-warn/40' : 'bg-panel2 text-fg2 border-line')
+            'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-base font-semibold cursor-pointer transition-colors ' +
+            (isMember ? 'bg-warn/15 text-warn border-warn/40' : 'bg-panel2 text-fg2 border-line hover:bg-line')
           }
           title="打开会员中心：查看积分、开通会员"
           onClick={() => useStore.setState({ showMember: true })}
         >
-          {isMember && <span>👑</span>}
+          {isMember && <span className="text-lg leading-none">👑</span>}
           <span className="tabular-nums">{balance}</span>
-          <span className="opacity-70">积分</span>
+          <span className="opacity-70 text-sm">积分</span>
         </button>
       ) : (
-        <button className="btn-primary text-xs py-1" onClick={() => useStore.setState({ showLogin: true })}>
+        <button className="btn-primary text-sm py-1.5" onClick={() => useStore.setState({ showLogin: true })}>
           登录 / 注册
         </button>
       )}

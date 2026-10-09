@@ -10,7 +10,7 @@ import { insertImage, imageExists, thumbDir, setImageMeta, setImageStatus, listP
 import { SUPPORTED_EXTS } from '../../shared/types'
 import { orientedSharp } from './rawPreview'
 
-function walk(dir: string, out: string[], depth = 0): void {
+function walk(dir: string, out: string[], stats: { filtered: number }, depth = 0): void {
   if (depth > 8) return
   let entries: ReturnType<typeof readdirSync> extends never ? never : import('fs').Dirent[]
   try {
@@ -21,8 +21,11 @@ function walk(dir: string, out: string[], depth = 0): void {
   for (const e of entries) {
     const p = join(dir, e.name)
     try {
-      if (e.isDirectory()) walk(p, out, depth + 1)
-      else if (e.isFile() && SUPPORTED_EXTS.includes(extname(e.name).toLowerCase())) out.push(p)
+      if (e.isDirectory()) walk(p, out, stats, depth + 1)
+      else if (e.isFile()) {
+        if (SUPPORTED_EXTS.includes(extname(e.name).toLowerCase())) out.push(p)
+        else stats.filtered++ // 非照片格式：不入库，计入“已跳过”反馈
+      }
     } catch {
       /* 忽略无权限项 */
     }
@@ -39,13 +42,17 @@ export async function importPaths(
   paths: string[],
   onProgress: (p: ImportProgress) => void,
   shouldStop: () => boolean
-): Promise<{ added: number; skipped: number; existed: number }> {
+): Promise<{ added: number; skipped: number; existed: number; filtered: number }> {
   const files: string[] = []
+  const stats = { filtered: 0 }
   for (const p of paths) {
     try {
       const st = statSync(p)
-      if (st.isDirectory()) walk(p, files)
-      else if (st.isFile() && SUPPORTED_EXTS.includes(extname(p).toLowerCase())) files.push(p)
+      if (st.isDirectory()) walk(p, files, stats)
+      else if (st.isFile()) {
+        if (SUPPORTED_EXTS.includes(extname(p).toLowerCase())) files.push(p)
+        else stats.filtered++ // 直接选/拖入的不支持文件：不入库，计入反馈
+      }
     } catch {
       /* ignore */
     }
@@ -87,7 +94,7 @@ export async function importPaths(
     }
   }
   onProgress({ done: files.length, total: files.length, current: '' })
-  return { added, skipped: 0, existed }
+  return { added, skipped: 0, existed, filtered: stats.filtered }
 }
 
 /** 单张图片：读尺寸 + 生成 256px 缩略图；RAW 解码失败时自动提取内嵌 JPEG 预览兜底；仍失败才标记 skip */
