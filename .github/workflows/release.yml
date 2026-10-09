@@ -60,7 +60,10 @@ jobs:
       - name: 引擎自检（验证 mediapipe 打包，失败仅告警不阻断 spike 记录）
         continue-on-error: true
         shell: bash
-        run: ./engine-dist/win/screener-engine.exe --selfcheck
+        run: |
+          mkdir -p engine-dist/win/tests/fixtures
+          cp ../ai-engine/tests/fixtures/*.jpg engine-dist/win/tests/fixtures/ 2>/dev/null || true
+          ./engine-dist/win/screener-engine.exe --selfcheck
       - name: 构建前端与主进程（electron-vite，产出 out/）
         run: npm run build
       - name: 打包 Windows 安装包
@@ -93,7 +96,10 @@ jobs:
         run: npm run build:engine
       - name: 引擎自检（mediapipe 打包）
         continue-on-error: true
-        run: ./engine-dist/mac/screener-engine --selfcheck
+        run: |
+          mkdir -p engine-dist/mac/tests/fixtures
+          cp ../ai-engine/tests/fixtures/*.jpg engine-dist/mac/tests/fixtures/ 2>/dev/null || true
+          ./engine-dist/mac/screener-engine --selfcheck
       - name: 构建前端与主进程（electron-vite，产出 out/）
         run: npm run build
       - name: 打包 macOS arm64 DMG
@@ -129,7 +135,10 @@ jobs:
         run: npm run build:engine
       - name: 引擎自检（mediapipe 打包）
         continue-on-error: true
-        run: ./engine-dist/mac/screener-engine --selfcheck
+        run: |
+          mkdir -p engine-dist/mac/tests/fixtures
+          cp ../ai-engine/tests/fixtures/*.jpg engine-dist/mac/tests/fixtures/ 2>/dev/null || true
+          ./engine-dist/mac/screener-engine --selfcheck
       - name: 构建前端与主进程（electron-vite，产出 out/）
         run: npm run build
       - name: 打包 macOS x64 DMG
