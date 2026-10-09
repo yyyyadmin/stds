@@ -15,22 +15,24 @@
 
 `ultralytics` 强依赖 **PyTorch（~200MB+）**，会把这个项目刚在 Phase 0-2 爬完的"三平台 PyInstaller 冻结引擎塞 ML 依赖"地狱重踩一遍，且 YOLOv8 权重是 **AGPL-3.0**（对分发的商业桌面软件有传染授权风险）。两者都不可接受。
 
-## 技术选型：人体检测模型
+## 技术选型：人体检测模型（实现裁决）
 
-- **首选：NanoDet-Plus-m-1.5x-416**（作者 RangiLyu，**Apache-2.0**）。单输入 `[1,3,416,416]`、单输出（3 个 stride 图 concat），COCO 80 类，`person = class 0`。ONNX 体集约 2-4MB，CPU 数十 ms。社区有成熟的 onnxruntime Python 解码实现（DFL/reg_max 解码）。
-- **备选：PP-PicoDet-S / LCNet 416**（PaddlePaddle，**Apache-2.0**），同样支持导出 ONNX，person 类过滤。
-- 决策：二者都 Apache-2.0、COCO 训练（含大量背身人体，对本场景召回远好于人脸）。**实现计划 Task 0 负责锁定并验证具体 ONNX 资产的可下载来源**（吸取历史教训：ONNX Model Zoo 死链曾让 CI 硬失败，故资产必须入库 + 构建硬校验，不依赖 CI 联网下载）。
+**首选落地：MediaPipe Tasks `ObjectDetector` + `efficientdet_lite0` COCO 模型（.tflite）**。
+
+- 理由（为何优于最初写的 onnxruntime+YOLO）：本环境本机无 Python、只能靠 CI 验证；`ObjectDetector` 复用 **Phase 0-2 已冻结跑通的同一 mediapipe 运行时**（`landmarks.py` 里 `mediapipe.tasks.python.vision` 已在用），**零新依赖、零手写解码、无 ORT 中文路径坑**——风险最低。EfficientDet-Lite0 系 COCO 预训练，`person` 类含大量背身/遮挡人体，召回远好于人脸。Apache-2.0（Google），模型走稳定 Google storage URL。
+- 封装：人体检测器实现于 `engine/person.py::PersonDetector`，对外只暴露 `available` 与 `count(bgr) -> (person_count, bodies)`。**接口隔离**：若真实照校准发现 Lite 召回不足，将来只需改这一个文件切到 ONNX(NanoDet-Plus/PicoDet，均 Apache-2.0) 走 onnxruntime，**接入点与分类分支不动**。
+- 备选（将来可能切换）：NanoDet-Plus-m-1.5x-416 / PP-PicoDet-S（均 Apache-2.0，需导出/获取 ONNX + 手写 ORT 字节流解码）。
 - 类别过滤：只保留 COCO `person`（class 0）框，其余忽略。
 
 ## 依赖与打包
 
-- **零新增 Python 依赖**：复用 `onnxruntime`（requirements.txt 已有，engine.spec 已作为 hiddenimport 收集）。
-- 权重文件（如 `models/person_nanodet*.onnx`）**提交进仓库**（`git add -f`），并在 `build-engine.mjs` 复制 models 后加**硬校验**：人体权重缺失则 `process.exit(1)`——完全对齐 yunet 那次的修复模式，绝不打残缺包。
-- `models.py` 新增 `person_path()`（`find_model("person_*.onnx", "nanodet*.onnx", "picodet*.onnx")` 之类）。
+- **零新增 Python 依赖**：复用已冻结的 `mediapipe` 运行时（ObjectDetector 与 FaceLandmarker 同一模块）。
+- 模型文件（`models/efficientdet_lite0.tflite`，或重命名 `person_*.tflite`）**提交进仓库**（`git add -f`），并在 `build-engine.mjs` 复制 models 后加**硬校验**：人体模型缺失则 `process.exit(1)`——完全对齐 yunet/face_landmarker 那次的修复模式，绝不打残缺包。
+- `models.py` 新增 `person_model_path()`（`find_model("efficientdet*.tflite", "person_*.tflite")`）。
 
-### 中文安装目录坑（必须规避）
+### 中文安装目录坑（已规避）
 
-`OnnxSession` 目前按**路径** `ort.InferenceSession(self.path, ...)` 加载——yunet 那次证明：非 ASCII 安装目录（`D:\软件安装\...`）下 OpenCV/ORT 按路径读会失败。人体检测器**必须按字节流加载**：`with open(path,"rb") as f: ort.InferenceSession(f.read(), providers=...)`，绕开路径。实现为 `engine/person.py` 自带加载逻辑（不复用 `OnnxSession.run`，因 NanoDet 单输出解码与现有封装假设不同）。
+mediapipe `ObjectDetector` 用 `BaseOptions(model_asset_path=...)` 加载，与 `face_landmarker` 同机制——**必须走已验证的 `_ascii_model_path(task)` 转 ASCII 路径**（`landmarks.py:45` 已这么用）。若将来切 ONNX，则需字节流加载（`ort.InferenceSession(f.read(), ...)`）以绕开非 ASCII 安装目录。
 
 ## 集成点（`engine/__init__.py::detect`）
 
@@ -100,7 +102,7 @@
 
 ## 交付顺序（供 writing-plans 展开）
 
-1. Task 0：锁定并入库人体 ONNX 资产（验证来源/体积/授权），build 硬校验。
+1. Task 0：锁定并入库人体模型资产（efficientdet_lite0.tflite，验证来源/体积/授权），build 硬校验。
 2. Task 1：`engine/person.py` PersonDetector（字节流加载 + 预处理 + 解码 + 背景过滤 + count()），available 降级。
 3. Task 2：`engine/__init__.py` 接入（`self.person`；人数三分类按 available 走新分级/回落）；`capabilities()` 加 person 字段。
 4. Task 3：`selfcheck.py` 人体冒烟 + 新 fixture；CI 三平台字段核对。
