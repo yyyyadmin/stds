@@ -48,7 +48,7 @@ try:
     datas += collect_data_files("mediapipe")
     binaries += collect_dynamic_libs("mediapipe")
 except Exception as _e:  # noqa: BLE001
-    print(f"[engine.spec] mediapipe 未收集（将回落 yunet）：{_e}")
+    print(f"[engine.spec] mediapipe not collected, fallback to yunet: {_e}")
 
 hiddenimports = [
     "numpy",

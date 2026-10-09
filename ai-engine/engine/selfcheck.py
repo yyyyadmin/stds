@@ -2,7 +2,6 @@
 """Spike 自检：验证 mediapipe 能否在（冻结）引擎内 import + 加载 .task + 跑一次 detect。
 不触碰检测业务逻辑；仅证明打包链路可用。输出单行 JSON 供 CI 解析。"""
 import json
-import os
 import sys
 
 import numpy as np
