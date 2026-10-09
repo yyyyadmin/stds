@@ -57,6 +57,10 @@ jobs:
         run: npm run fetch-models
       - name: 构建自带 Python AI 引擎（PyInstaller）
         run: npm run build:engine
+      - name: 引擎自检（验证 mediapipe 打包，失败仅告警不阻断 spike 记录）
+        continue-on-error: true
+        shell: bash
+        run: ./engine-dist/win/screener-engine.exe --selfcheck
       - name: 构建前端与主进程（electron-vite，产出 out/）
         run: npm run build
       - name: 打包 Windows 安装包
@@ -87,6 +91,9 @@ jobs:
         run: npm run fetch-models
       - name: 构建自带 Python AI 引擎（PyInstaller, arm64）
         run: npm run build:engine
+      - name: 引擎自检（mediapipe 打包）
+        continue-on-error: true
+        run: ./engine-dist/mac/screener-engine --selfcheck
       - name: 构建前端与主进程（electron-vite，产出 out/）
         run: npm run build
       - name: 打包 macOS arm64 DMG
@@ -120,6 +127,9 @@ jobs:
         run: npm run fetch-models
       - name: 构建自带 Python AI 引擎（PyInstaller, x64）
         run: npm run build:engine
+      - name: 引擎自检（mediapipe 打包）
+        continue-on-error: true
+        run: ./engine-dist/mac/screener-engine --selfcheck
       - name: 构建前端与主进程（electron-vite，产出 out/）
         run: npm run build
       - name: 打包 macOS x64 DMG
