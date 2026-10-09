@@ -10,6 +10,60 @@ from .models import OnnxSession
 from .face import eye_rois
 
 
+# MediaPipe FaceLandmarker 478 点：左右眼各 6 点（Soukupova & Cech EAR 变体，索引对应 FaceLandmarker 拓扑）
+_EYE_L = [33, 160, 158, 133, 153, 144]
+_EYE_R = [362, 385, 387, 263, 374, 380]
+_EAR_CLOSED = 0.18    # EAR 低于此视为几何全闭（spec 起点，待真实照校准）
+_BLINK_CLOSED = 0.60  # eyeBlink blendshape 概率达到此视为闭合
+
+
+def _dist(a, b):
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def _eye_ear(lms, idx):
+    """6 点 EAR = (|p1-p5| + |p2-p4|) / (2|p0-p3|)。像素坐标即可（比值尺度无关）。异常/点不足返回 None。"""
+    try:
+        p = [lms[i] for i in idx]
+    except Exception:  # noqa: BLE001
+        return None
+    h = _dist(p[0], p[3])
+    if h <= 1e-6:
+        return None
+    return (_dist(p[1], p[5]) + _dist(p[2], p[4])) / (2.0 * h)
+
+
+def _mp_closed_prob(face):
+    """有 mp 时返回 (闭合概率, 诊断串)；无 mp / 数据不足返回 None（交调用方回落启发式）。
+    单眼闭合度 = max(EAR 几何闭合度, eyeBlink blendshape 概率)；取两眼较大——任一闭合即计，偏召回。"""
+    mpd = face.get("mp")
+    if not mpd:
+        return None
+    lms = mpd.get("landmarks")
+    blend = mpd.get("blend") or {}
+    if not lms or len(lms) < 478:
+        return None
+    best = None
+    diag = []
+    for idx, blink_key in ((_EYE_L, "eyeBlinkLeft"), (_EYE_R, "eyeBlinkRight")):
+        ear = _eye_ear(lms, idx)
+        p_ear = None if ear is None else max(0.0, min(1.0, 1.0 - ear / _EAR_CLOSED))
+        blink = blend.get(blink_key)
+        p_blink = None if blink is None else max(0.0, min(1.0, float(blink) / _BLINK_CLOSED))
+        cand = [x for x in (p_ear, p_blink) if x is not None]
+        if not cand:
+            continue
+        pe = max(cand)
+        best = pe if best is None else max(best, pe)
+        diag.append("%s(ear=%s blink=%s)" % (
+            "L" if blink_key.endswith("Left") else "R",
+            ("%.3f" % ear) if ear is not None else "NA",
+            ("%.2f" % blink) if blink is not None else "NA"))
+    if best is None:
+        return None
+    return float(best), "mp:%.2f[%s]" % (best, " ".join(diag))
+
+
 def _eye_stats(bgr, roi):
     """单个眼 ROI 的开启度统计：返回 (open_score 0~1, iris_offset -1~1 or None, detail)"""
     side, x, y, w, h, cx, cy = roi
@@ -83,21 +137,29 @@ class EyesAnalyzer:
         worst = 0.0
         worst_detail = None
         parts = []
+        used_mp = False
         for face in faces[:6]:
+            mp = _mp_closed_prob(face)
+            if mp is not None:
+                prob, d = mp
+                used_mp = True
+                parts.append(d)
+                worst = max(worst, prob)
+                continue
             for roi in eye_rois(face, bgr):
                 side, x, y, w, h, _, _ = roi
                 patch = bgr[y:y + h, x:x + w]
                 prob = self._ocec_prob(patch) if self.ocec.available else None
                 if prob is None:
-                    open_score, _, d = _eye_stats(bgr, roi)
+                    open_score, _, dd = _eye_stats(bgr, roi)
                     prob = 1.0 - open_score
                     parts.append("%s:%.2f" % (side, prob))
                     if prob >= worst:
-                        worst_detail = d
+                        worst_detail = dd
                 else:
                     parts.append("%s:ocec%.2f" % (side, prob))
                 worst = max(worst, prob)
-        method = "ocec" if self.ocec.available else "heuristic"
+        method = "mediapipe" if used_mp else ("ocec" if self.ocec.available else "heuristic")
         reason = "眼闭合度 %.2f (%s) [%s]" % (worst, ", ".join(parts), method)
         if worst_detail:
             reason += " vv=%.0f dyn=%.0f rp=%.1f" % (
