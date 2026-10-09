@@ -22,8 +22,11 @@ const REPO_DIR = resolve(__dirname, '..', '..')
 const MODELS_DIR = join(REPO_DIR, 'ai-engine', 'models')
 
 /**
- * 默认清单：当前仅 YuNet（人脸检测）。它是精度收益最大、体积最小(~228KB)、许可最干净(MIT)、
- * URL 最稳定(opencv_zoo 官方)的一个；且引擎 face.py 的 yunet_path() 直接匹配 face_detection_yunet*。
+ * 默认清单：YuNet（人脸检测）+ EfficientDet-Lite0（人体检测）。YuNet 是精度收益最大、体积最小(~228KB)、许可最干净(MIT)、
+ * URL 最稳定(opencv_zoo 官方)的人脸权重；引擎 face.py 的 yunet_path() 直接匹配 face_detection_yunet*。
+ * EfficientDet-Lite0(Apache-2.0, ~4.6MB int8) 供 engine/person.py ObjectDetector 数人体，人数分类从数脸升级为数体。
+ * 两者 URL 均为官方稳定存储（opencv_zoo / Google storage），非已停用的 ONNX Model Zoo LFS。
+ *
  * 人脸框精度是 半截头/双人/闭眼/斜眼/狰狞 全部维度的上游，换掉 Haar 即整体跃升。
  *
  * 其余维度（OCEC 闭眼 / MobileGaze 视线 / FER 表情 / ArcFace embedding）的开源 ONNX 缺乏

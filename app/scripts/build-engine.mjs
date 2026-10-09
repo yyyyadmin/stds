@@ -157,7 +157,7 @@ if (!hasPerson) {
   console.error(
     `\n❌ 引擎缺少人体检测模型（efficientdet*.tflite），实际 models/ 内容：` +
       `${existsSync(outModels) ? readdirSync(outModels).join(', ') : '(目录不存在)'}\n` +
-      '该文件已随仓库提交，若仍缺失请确认已下载并入库 ai-engine/models/efficientdet_lite0.tflite。拒绝打包残缺引擎。'
+      '该文件由 `npm run fetch-models` 从 Google storage 自动下载（未随仓库提交）；若缺失请先跑 fetch-models（或用 npm run build:engine:ai 一步拉取+打包）。拒绝打包残缺引擎。'
   )
   process.exit(1)
 }

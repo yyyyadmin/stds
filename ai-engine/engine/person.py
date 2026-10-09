@@ -38,7 +38,7 @@ class PersonDetector:
                 base_options=mp_python.BaseOptions(model_asset_path=ascii_model),
                 running_mode=vision.RunningMode.IMAGE,
                 score_threshold=_SCORE_MIN,
-                max_results=0,  # 0 = 返回全部（内部已 NMS）
+                max_results=-1,  # 官方文档定义：-1 = 返回全部结果（内部已 NMS）；0 为未定义行为，可能静默截断为 0
             )
             self._mp = mp
             self._det = vision.ObjectDetector.create_from_options(opts)
