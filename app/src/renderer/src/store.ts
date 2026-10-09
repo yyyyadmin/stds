@@ -63,7 +63,7 @@ interface StoreState {
   showUpdate: boolean
   updateInfo: UpdateInfo | null
   auth: AuthState
-  toast: { msg: string; kind: 'info' | 'error' | 'success' } | null
+  toast: { msg: string; kind: 'info' | 'error' | 'success'; duration?: number } | null
   engineBusy: boolean
   appVersion: string
 
@@ -405,7 +405,7 @@ export const useStore = create<StoreState>((set, get) => ({
     set({ selection: new Set() })
     await get().refreshImages()
     await get().refreshCounts()
-    set({ toast: { msg: `已移动 ${ids.length} 张 → ${catLabel(cat, get().customCategories)}`, kind: 'success' } })
+    set({ toast: { msg: `已移动 ${ids.length} 张 → ${catLabel(cat, get().customCategories)}`, kind: 'success', duration: 1000 } })
   },
 
   async moveToTrash() {
@@ -416,11 +416,13 @@ export const useStore = create<StoreState>((set, get) => ({
     // 从垃圾桶移出 = 判定错误修正，回成品库
     const { selection } = get()
     if (!selection.size) return
-    get().pushUndo([...selection], CAT_LIBRARY)
-    await window.api.moveImages({ ids: [...selection], category: CAT_LIBRARY, clearBadTags: true })
+    const ids = [...selection]
+    get().pushUndo(ids, CAT_LIBRARY)
+    await window.api.moveImages({ ids, category: CAT_LIBRARY, clearBadTags: true })
     set({ selection: new Set() })
     await get().refreshImages()
     await get().refreshCounts()
+    set({ toast: { msg: `已还原 ${ids.length} 张 → 成品库`, kind: 'success', duration: 1000 } })
   },
 
   async moveIds(ids, cat) {
@@ -434,6 +436,8 @@ export const useStore = create<StoreState>((set, get) => ({
     })
     await get().refreshImages()
     await get().refreshCounts()
+    // 大图模式判定栏（垃圾桶/移动到）同样给用户即时反馈，1 秒自动消失
+    set({ toast: { msg: `已移动 ${ids.length} 张 → ${catLabel(cat, get().customCategories)}`, kind: 'success', duration: 1000 } })
   },
 
   /** 手动拖拽排序：按新顺序持久化 sort_order，并切回默认（自定义）序展示 */

@@ -89,10 +89,10 @@ export default function App(): JSX.Element {
     return () => window.removeEventListener('keydown', onKey)
   }, [previewId, showExport, showSettings, showLogin, showMember, showUpdate, viewMode, setViewMode, stepPreview, stepLarge, closePreview])
 
-  // toast 自动消失
+  // toast 自动消失：移动类即时反馈 1 秒自收（调用方传 duration），其余默认 6 秒供读完错误信息
   useEffect(() => {
     if (toast) {
-      const t = setTimeout(dismissToast, 6000)
+      const t = setTimeout(dismissToast, toast.duration ?? 6000)
       return () => clearTimeout(t)
     }
   }, [toast, dismissToast])
