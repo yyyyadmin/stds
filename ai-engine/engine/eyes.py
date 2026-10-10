@@ -13,8 +13,17 @@ from .face import eye_rois
 # MediaPipe FaceLandmarker 478 点：左右眼各 6 点（Soukupova & Cech EAR 变体，索引对应 FaceLandmarker 拓扑）
 _EYE_L = [33, 160, 158, 133, 153, 144]
 _EYE_R = [362, 385, 387, 263, 374, 380]
-_EAR_CLOSED = 0.18    # EAR 低于此视为几何全闭（spec 起点，待真实照校准）
-_BLINK_CLOSED = 0.60  # eyeBlink blendshape 概率达到此视为闭合
+# 严格"完全闭合"标定（v2.0.62 真实 3190 张婚礼照分布）：眯眼 blink 0.49~0.59 / ear 0.20~0.26
+# 必须打 0 分，完全闭眼/眯成一条线 ear≤0.06、blink≥0.85 打满分；CI fixture 闭眼(0.014,0.71)仍 ~1.0。
+_EAR_FULL = 0.06    # EAR 低于此满分（全闭/眯成一条线）
+_EAR_OPEN = 0.20    # EAR 高于此零分（睁眼或轻微眯眼）
+_BLINK_ZERO = 0.52  # eyeBlink 低于此零分（实测眯眼误判全部 ≤0.59）
+_BLINK_FULL = 0.85  # eyeBlink 高于此满分（真实全闭 p95≈0.86）
+_CONFLICT_CAP = 0.82  # 单信号拉满但另一信号近乎相反(<0.15)：疑似误检，封顶只进待确认
+
+
+def _clip01(v):
+    return max(0.0, min(1.0, v))
 
 
 def _dist(a, b):
@@ -35,7 +44,9 @@ def _eye_ear(lms, idx):
 
 def _mp_closed_prob(face):
     """有 mp 时返回 (闭合概率, 诊断串)；无 mp / 数据不足返回 None（交调用方回落启发式）。
-    单眼闭合度 = max(EAR 几何闭合度, eyeBlink blendshape 概率)；取两眼较大——任一闭合即计，偏召回。"""
+    只认完全闭合：EAR/blink 两信号各自按严格标定映射，双信号互证才给拉满；
+    单信号强但另一信号明显相反（睁）→ 封顶 _CONFLICT_CAP 只进待确认。
+    任一眼完全闭合即算闭眼（用户口径：单眼闭、眯成一条线都算）。"""
     mpd = face.get("mp")
     if not mpd:
         return None
@@ -47,13 +58,18 @@ def _mp_closed_prob(face):
     diag = []
     for idx, blink_key in ((_EYE_L, "eyeBlinkLeft"), (_EYE_R, "eyeBlinkRight")):
         ear = _eye_ear(lms, idx)
-        p_ear = None if ear is None else max(0.0, min(1.0, 1.0 - ear / _EAR_CLOSED))
+        p_ear = None if ear is None else _clip01((_EAR_OPEN - ear) / (_EAR_OPEN - _EAR_FULL))
         blink = blend.get(blink_key)
-        p_blink = None if blink is None else max(0.0, min(1.0, float(blink) / _BLINK_CLOSED))
+        p_blink = None if blink is None else _clip01((float(blink) - _BLINK_ZERO) / (_BLINK_FULL - _BLINK_ZERO))
         cand = [x for x in (p_ear, p_blink) if x is not None]
         if not cand:
             continue
         pe = max(cand)
+        if p_ear is not None and p_blink is not None:
+            if min(p_ear, p_blink) >= 0.5:  # 双信号互证：真实全闭，叠加拉满
+                pe = min(1.0, pe + 0.30 * min(p_ear, p_blink))
+            elif pe >= 0.85 and min(p_ear, p_blink) < 0.15:  # 另一信号明确说"睁"：只进待确认
+                pe = _CONFLICT_CAP
         best = pe if best is None else max(best, pe)
         diag.append("%s(ear=%s blink=%s)" % (
             "L" if blink_key.endswith("Left") else "R",
@@ -155,6 +171,9 @@ class EyesAnalyzer:
                 if prob is None:
                     open_score, _, dd = _eye_stats(bgr, roi)
                     prob = 1.0 - open_score
+                    # 启发式只当粗筛：纹理法分不开"全闭"与"低对比眯眼"，封顶 0.82 只进待确认，
+                    # 不再直接标成闭眼分类（打包版主路径是 mediapipe，不受影响）。
+                    prob = min(prob, 0.82)
                     parts.append("%s:%.2f" % (side, prob))
                     if prob >= worst:
                         worst_detail = dd

@@ -5,7 +5,7 @@ from .face import FaceDetector
 from .eyes import EyesAnalyzer
 from .expression import ExpressionAnalyzer
 from .landmarks import FaceLandmarkEnhancer
-from .person import PersonDetector
+from .person import PersonDetector, merge_overlaps
 from . import quality as Q
 from .models import detect_device, _HAS_ORT
 
@@ -101,29 +101,41 @@ class DetectEngine:
         hh_conf, hh_reason = Q.half_head_score(bgr.shape, faces, upper, scale)
         dims["half_head"] = {"confidence": round(hh_conf, 4), "reason": hh_reason, "method": "box+body"}
 
-        # --- 人数分类（Phase 3：人体计数为唯一权威；模型缺失或漏检安全网时逐字回落人脸计数，零回归）---
-        # 权威切换：婚礼背对/侧脸/面纱会漏检人脸导致 undercount（多人→无人物、两人→单人）。
-        # 人体框召回远好于人脸，故以 PersonDetector 数人体作为 single/group/no_person 判定依据。
-        # 安全网：人体判 0 但人脸/躯干存在时，多半是人体模型漏检（紧贴/裁切），逐字回落 face-count，
-        # 绝不因换了权威反而把"有人"判成"无人"。人脸维度（闭眼/斜眼/半截头/狰狞）不受此分支影响。
+        # --- 人数分类（人体计数权威 + 人脸交叉校验；模型缺失时逐字回落人脸计数，零回归）---
+        # v2.0.62 实测三组结构性误判的修法（用户口径：单人=有且只有一人；无人物=零人物证据）：
+        # - 人脸数是硬下限：检到≥2张脸就绝不是单人照（修 245 张"互动照人体漏检→单人"）
+        # - 人体框先重叠/包含合并再计数（修 211 张"同一人拆 2 框→多人"）
+        # - 远景小框也算人：只要检出任何人体框就不是无人物，≥2 直接判多人合照（修全景照误判无人物）
         person_count, bodies = self.person.count(bgr)
-        use_body = person_count is not None and not (person_count == 0 and (face_count or upper))
-        if use_body:
-            if person_count == 0:
-                if bright < 25:
-                    # 暗光安全网：画面整体偏暗时人体同样易漏检，不拉满，降为中置信并标注可能漏检。
+        if person_count is not None:
+            main = merge_overlaps([b for b in bodies if b.get("filtered", True)])
+            n_eff = max(len(main), face_count)
+            if n_eff >= 2:
+                avg_score = sum(b["score"] for b in main) / len(main) if main else 0.5
+                conf = min(0.98, 0.88 + avg_score * 0.1)
+                dims["group_photo"] = {"confidence": round(conf, 4), "reason": "检出 %d 人（人体 %d、人脸 %d）" % (n_eff, len(main), face_count), "method": "body-count"}
+            elif n_eff == 1:
+                if main:
+                    b0 = main[0]
+                    conf = min(0.99, 0.88 + b0["h_ratio"] * 0.4 + b0["score"] * 0.05)
+                    why = "检出 1 人体（占图高%.0f%%），人脸 %d" % (b0["h_ratio"] * 100.0, face_count)
+                else:
+                    # 人体零检出但检到 1 脸：逐字沿用旧 face-count 单人判据
+                    conf, why = 0.985, "检出 1 张人脸（人体未检出）"
+                dims["single_person"] = {"confidence": round(conf, 4), "reason": why, "method": "body-count"}
+            else:
+                raw_n = len(bodies)
+                if raw_n >= 2:
+                    dims["group_photo"] = {"confidence": 0.86, "reason": "检出 %d 个远景/小尺寸人影" % raw_n, "method": "body-count"}
+                elif raw_n == 1:
+                    dims["single_person"] = {"confidence": 0.83, "reason": "检出 1 个远景/小尺寸人影", "method": "body-count"}
+                elif upper:
+                    dims["group_photo"] = {"confidence": 0.80, "reason": "检出 %d 个躯干但无完整人体/人脸，近景边缘人物" % len(upper), "method": "body-count"}
+                elif bright < 25:
+                    # 暗光安全网：画面整体偏暗时人体/人脸同样易漏检，不拉满，降为中置信并标注可能漏检。
                     dims["no_person"] = {"confidence": 0.70, "reason": "未检出人体，但画面偏暗(亮度%.0f)，可能漏检" % bright, "method": "body-count"}
                 else:
-                    dims["no_person"] = {"confidence": 0.95, "reason": "未检出人体", "method": "body-count"}
-            elif person_count == 1:
-                b0 = bodies[0]
-                conf = min(0.99, 0.88 + b0["h_ratio"] * 0.4 + b0["score"] * 0.05)
-                dims["single_person"] = {"confidence": round(conf, 4), "reason": "检出 1 人体（占图高%.0f%%）" % (b0["h_ratio"] * 100.0), "method": "body-count"}
-            else:
-                avg_score = sum(b["score"] for b in bodies) / len(bodies)
-                conf = min(0.98, 0.88 + avg_score * 0.1)
-                # >=2 人统一归多人合照（"双人照"类型已按产品决策并入多人）
-                dims["group_photo"] = {"confidence": round(conf, 4), "reason": "检出 %d 人体" % person_count, "method": "body-count"}
+                    dims["no_person"] = {"confidence": 0.95, "reason": "人体/人脸/躯干零检出", "method": "body-count"}
         elif face_count == 0:
             if bright < 25:
                 # 暗光安全网：画面整体偏暗时人脸极易漏检，不把 no_person 拉满，

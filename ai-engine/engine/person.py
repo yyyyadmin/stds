@@ -50,8 +50,11 @@ class PersonDetector:
             self.log("person off (%s: %s)" % (type(e).__name__, e))
 
     def count(self, bgr):
-        """返回 (过滤后人体数, 人体框详情)。不可用/异常返回 (None, []) 让调用方回落。
-        bodies[i] = {"box":[x,y,w,h], "score":float, "h_ratio":float, "area_ratio":float}"""
+        """返回 (过滤后人体数, 全部人体框)。不可用/异常返回 (None, []) 让调用方逐字回落人脸计数。
+        bodies[i] = {"box":[x,y,w,h], "score":float, "h_ratio":float, "area_ratio":float, "filtered":bool}
+        filtered=False 的远景小框不参与单/多人计数，但仍作为"画面里有人"的证据供无人物判定使用
+        ——v2.0.62 实测：旧版把小框直接丢弃后零检出→全景婚礼照 80% 被误判无人物（用户口径：
+        只要检出任何人体框就不是无人物）。"""
         if not self.available or self._det is None:
             return None, []
         try:
@@ -69,15 +72,42 @@ class PersonDetector:
                 bw, bh = float(bb.width), float(bb.height)
                 h_ratio = bh / H
                 area_ratio = (bw * bh) / area
-                if h_ratio < _BODY_MIN_H_RATIO or area_ratio < _BODY_MIN_AREA_RATIO:
-                    continue  # 背景路人/碎框
                 bodies.append({
                     "box": [int(bb.origin_x), int(bb.origin_y), int(bw), int(bh)],
                     "score": round(float(cats[0].score), 3),
                     "h_ratio": round(h_ratio, 3),
                     "area_ratio": round(area_ratio, 4),
+                    "filtered": not (h_ratio < _BODY_MIN_H_RATIO or area_ratio < _BODY_MIN_AREA_RATIO),
                 })
-            return len(bodies), bodies
+            return sum(1 for b in bodies if b["filtered"]), bodies
         except Exception as e:  # noqa: BLE001
             self.log("person detect failed (%s)" % e)
             return None, []
+
+
+def _box_inter(a, b):
+    ix = max(0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]))
+    iy = max(0, min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1]))
+    return ix * iy
+
+
+def merge_overlaps(bodies):
+    """把同一个人被拆开的框合并（礼服/局部遮挡/上下半身双框）：IoU≥0.4 或
+    包含度（交集/较小框面积）≥0.65 视为同一人，贪心保留大框。
+    v2.0.62 实测：211 张 group 高置信但 YuNet 仅≤1脸，即拆框致"单人判多人"。
+    不合并互不重叠的真实多人（两人紧贴但框体分离仍数 2）。"""
+    kept = []
+    for b in sorted(bodies, key=lambda x: -x["box"][2] * x["box"][3]):
+        dup = False
+        for k in kept:
+            inter = _box_inter(b["box"], k["box"])
+            if inter <= 0:
+                continue
+            small = min(b["box"][2] * b["box"][3], k["box"][2] * k["box"][3])
+            union = b["box"][2] * b["box"][3] + k["box"][2] * k["box"][3] - inter
+            if (inter / union if union > 0 else 0) >= 0.4 or (inter / small if small > 0 else 1) >= 0.65:
+                dup = True
+                break
+        if not dup:
+            kept.append(b)
+    return kept

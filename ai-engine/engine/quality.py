@@ -21,7 +21,9 @@ def _sigmoid(z):
 # ---------- 画面模糊 ----------
 
 def blur_score(bgr, faces):
-    """返回 (confidence 模糊成立的可信度, reason)。偏向召回：低阈值多标"""
+    """返回 (confidence 模糊成立的可信度, reason)。只认严重模糊（用户口径：大面积糊/
+    看不清人脸/严重虚化才算）——v2.0.62 真实 3190 张中旧曲线在方差 30~60 灰区就给 0.6~0.85，
+    741 张不糊的片被标进模糊视图；新曲线拐点下推：脸区最差方差 <15 才进高置信，>35 不标。"""
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
     if max(h, w) > 900:
@@ -41,10 +43,10 @@ def blur_score(bgr, faces):
     else:
         ref = full_var
         mode = "full"
-    # 二次验证：高频能量占比（FFT 上半区能量）
+    # 二次验证：高频能量占比（FFT 上半区能量），降为辅助权重
     hp = _highpass_ratio(gray)
-    # 标定：方差 <30 明显糊，30-80 灰区，>120 清晰
-    conf = _sigmoid((60.0 - ref) / 22.0) * 0.7 + _sigmoid((0.012 - hp) / 0.006) * 0.3
+    # 标定：方差 <10 严重糊→0.85+；15~25 中度→待确认；>35 清晰→不标
+    conf = 0.88 * _sigmoid((24.0 - ref) / 7.0) + 0.12 * _sigmoid((0.010 - hp) / 0.004)
     conf = float(np.clip(conf, 0, 0.99))
     return conf, "清晰度方差 %.0f(%s) 高频占比 %.4f" % (ref, mode, hp)
 
@@ -64,15 +66,21 @@ def _highpass_ratio(gray):
 # ---------- 曝光异常 ----------
 
 def exposure_score(bgr):
+    """只判严重曝光异常（用户口径：灯光/太阳/光晕大面积影响整幅画面感才算）。
+    v2.0.62 真实分布：旧规则"画面偏暗→欠曝"在婚礼暗环境里高置信 682 张中 452 张被用户
+    判掉（TP/FP 亮度分布完全重叠不可分），本版彻底删掉"偏暗即曝光"：
+    - 过曝：高光爆掉面积 ≥~30% 且整体极亮（光晕洗白全图）才起高分
+    - 欠曝：只认死黑丢细节（均值≤~6 且暗部占比≥~90%），普通夜景/室内暗光不标
+    - 对比度塌缩：封顶 0.5，永不直接进分类"""
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
     L = lab[:, :, 0].astype(np.float32) * (100.0 / 255.0)
     mean = float(L.mean())
     std = float(L.std())
     hi_ratio = float((L >= 96).mean())
     lo_ratio = float((L <= 6).mean())
-    over = _sigmoid((hi_ratio - 0.14) / 0.05) * _sigmoid((mean - 74) / 8)
-    under = _sigmoid((lo_ratio - 0.22) / 0.07) * _sigmoid((32 - mean) / 8)
-    flat = _sigmoid((8.5 - std) / 3.0) * 0.6  # 对比度塌缩
+    over = _sigmoid((hi_ratio - 0.30) / 0.07) * _sigmoid((mean - 80) / 6)
+    under = _sigmoid((6.0 - mean) / 1.8) * _sigmoid((lo_ratio - 0.88) / 0.05)
+    flat = _sigmoid((6.5 - std) / 2.0) * 0.5  # 对比度塌缩只作参考，封顶 0.5 低于各档 mid 阈值附近
     conf = float(np.clip(max(over, under, flat), 0, 0.99))
     direction = "过曝" if over == max(over, under, flat) else ("欠曝" if under == max(over, under, flat) else "对比度异常")
     return conf, "亮度均值 %.1f std %.1f 高光 %.2f 暗部 %.2f -> %s" % (mean, std, hi_ratio, lo_ratio, direction)

@@ -48,9 +48,9 @@ function sigmoid(z: number): number {
   return 1 / (1 + Math.exp(-z))
 }
 
-/** 模糊：Laplacian 方差映射置信度（与 Python 引擎同一标定） */
+/** 模糊：Laplacian 方差映射置信度（与 Python 引擎同一标定：只认严重模糊，方差>35 不标） */
 function blurConf(variance: number): number {
-  return Math.min(0.99, Math.max(0, sigmoid((60 - variance) / 22)))
+  return Math.min(0.99, 0.88 * sigmoid((24 - variance) / 7))
 }
 
 async function statsRgb(path: string): Promise<{ rgb: RawImage }> {
@@ -87,8 +87,9 @@ function exposureConf(rgb: RawImage): { conf: number; reason: string } {
   const std = Math.sqrt(Math.max(0, sum2 / n - mean * mean))
   const hiRatio = hi / n
   const loRatio = lo / n
-  const over = sigmoid((hiRatio - 0.14) / 0.05) * sigmoid((mean - 74) / 8)
-  const under = sigmoid((loRatio - 0.22) / 0.07) * sigmoid((32 - mean) / 8)
+  // 与 Python 引擎同步：只判严重曝光异常，普通暗图/局部灯光不标（高光≥~30%且极亮，或死黑丢细节）
+  const over = sigmoid((hiRatio - 0.3) / 0.07) * sigmoid((mean - 80) / 6)
+  const under = sigmoid((6 - mean) / 1.8) * sigmoid((loRatio - 0.88) / 0.05)
   const conf = Math.min(0.99, Math.max(over, under))
   const dir = over >= under ? '过曝' : '欠曝'
   return { conf, reason: `亮度均值 ${mean.toFixed(1)} 高光 ${(hiRatio * 100).toFixed(1)}% 暗部 ${(loRatio * 100).toFixed(1)}% -> ${dir}` }
