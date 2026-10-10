@@ -5,7 +5,7 @@
  */
 import { create } from 'zustand'
 import type { AppSettings, CategoryKey, ImageRecord, DimensionKey } from '../../shared/types'
-import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, DIMENSION_LABELS, BAD_DIMENSIONS, isBadDim, guessMidDim, SUPPORTED_EXTS } from '../../shared/types'
+import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, DIMENSION_LABELS, isBadDim, isTrashLike, NEUTRAL_DIMENSIONS, guessMidDim, SUPPORTED_EXTS } from '../../shared/types'
 import type { AuthState, BootstrapInfo, ConsumeResult, MoveRequest, UpdateInfo } from '../../shared/ipc'
 import type { ScanProgress } from '../../main/services/scanner'
 import type { ExportProgress } from '../../main/services/exporter'
@@ -19,6 +19,41 @@ export interface UndoSnapshot {
   /** 本次移动的目标分类（提示用） */
   toCat: CategoryKey
   recs: ImageRecord[]
+}
+
+/**
+ * 状态分类 = 成品库 / 待确认 / 自定义（不含维度分类与垃圾桶）。
+ * 移动到状态分类 = 人工担保这张图，一并清掉全部坏维度/人数标签，让它从各坏图并集视图消失；
+ * 移动到维度分类只补目标标签（其它维度证据保留），移入垃圾桶保留全部标签作为废弃原因。
+ */
+function isStatusCat(cat: CategoryKey): boolean {
+  return !isTrashLike(cat) && !isBadDim(cat) && !(NEUTRAL_DIMENSIONS as string[]).includes(cat)
+}
+
+/** 人数三维度互斥（与主进程 applyPersonTag 同口径） */
+const PERSON_DIMS: DimensionKey[] = ['single_person', 'group_photo', 'no_person']
+
+/**
+ * 标签增删的本地乐观更新：先把 store.images 里的记录改到位，界面立即变（芯片秒加/秒删），
+ * 不等主进程写完再重拉整个分类列表（几千张时那才是“点了半天没反应”的根源）。
+ * 主分类连带移出规则与后端 removeDimTag 一致：取剩余最高置信坏维度，没有则回成品库。
+ */
+function patchTagLocal(img: ImageRecord, dim: DimensionKey, add: boolean): ImageRecord {
+  const tags = { ...img.tags }
+  let category = img.category
+  if (!add) {
+    delete tags[dim]
+    if (category === dim) {
+      const rest = (Object.entries(tags) as Array<[DimensionKey, ImageRecord['tags'][DimensionKey]]>)
+        .filter(([d, v]) => v && v.level !== 'low' && isBadDim(d))
+        .sort((a, b) => (b[1]?.confidence || 0) - (a[1]?.confidence || 0))
+      category = rest.length ? rest[0][0] : CAT_LIBRARY
+    }
+    return { ...img, tags, category }
+  }
+  if (PERSON_DIMS.includes(dim)) for (const d of PERSON_DIMS) if (d !== dim) delete tags[d]
+  tags[dim] = { confidence: 1, level: 'high', reason: '用户手动添加', method: 'user' }
+  return { ...img, tags, catChangedAt: Date.now() }
 }
 
 /** 分类键 → 中文名（撤回提示用） */
@@ -44,6 +79,9 @@ interface StoreState {
   images: ImageRecord[]
   viewMode: 'grid' | 'list' | 'masonry' | 'large'
   sortKey: SortKey
+  /** 当前视图的展示顺序（id 序列，由 ImageView 在排序后同步）：点击索引必须按它映射，
+   * 否则非默认排序下会选错图（选中样式“消失”） */
+  displayIds: number[]
   selection: Set<number>
   anchorIndex: number
   previewId: number | null
@@ -65,6 +103,8 @@ interface StoreState {
   updateInfo: UpdateInfo | null
   auth: AuthState
   toast: { msg: string; kind: 'info' | 'error' | 'success'; duration?: number } | null
+  /** 多选（≥2 张）移入垃圾桶的确认弹窗（单选直接移，不弹；null = 不显示） */
+  trashAsk: { physical: boolean } | null
   engineBusy: boolean
   appVersion: string
 
@@ -84,6 +124,8 @@ interface StoreState {
   refreshCounts(): Promise<void>
   refreshImages(): Promise<void>
   setSort(k: SortKey): void
+  /** 视图层排序完成后同步展示序（内容未变时不重 set，避免渲染循环） */
+  setDisplayIds(ids: number[]): void
   setViewMode(m: 'grid' | 'list' | 'masonry' | 'large'): Promise<void>
   handleClickSelect(index: number, e: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }): void
   toggleSelect(id: number): void
@@ -96,9 +138,23 @@ interface StoreState {
   reorder(ids: number[]): Promise<void>
   undoMove(): Promise<void>
   moveToTrash(): Promise<void>
+  /** 垃圾桶入口：单选直接移；多选（≥2）弹确认框（与大图模式垃圾桶确认同语义） */
+  askTrash(physical?: boolean): void
+  confirmTrashAsk(): void
+  dismissTrashAsk(): void
   restoreFromTrash(): Promise<void>
   correct(req: { imageId?: number; action: 'correct' | 'wrong'; origDim: string | null; origConfidence: number | null; targetCategory?: CategoryKey }): Promise<void>
   correctBatch(ids: number[], action: 'correct' | 'wrong', targetCategory?: CategoryKey): Promise<void>
+  /** 删除标签（可批量）：只删该标签并记入误判学习；若图的主分类就是该维度，同时移出该分类 */
+  removeTag(ids: number[], dim: DimensionKey): Promise<void>
+  /** 添加标签（可批量）：图同时出现在该维度分类并排第一（不是移动），记入漏检学习 */
+  addTag(ids: number[], dim: DimensionKey): Promise<void>
+  /** 标签写入进行中的提示文案（null = 空闲）：卡片上的反馈 */
+  tagBusy: string | null
+  /** 标签管理器：非大图视图下对单/多选图增删标签（null=关闭） */
+  tagManagerIds: number[] | null
+  openTagManager(ids: number[]): void
+  closeTagManager(): void
   openPreview(id: number): void
   closePreview(): void
   togglePreviewOverlay(): void
@@ -165,10 +221,14 @@ export const useStore = create<StoreState>((set, get) => ({
   activeCategory: null,
   images: [],
   viewMode: 'grid',
-  sortKey: 'default',
+  // 默认按导入时间倒序：每次新导入/全量筛选后，新增图片排在每个分类最前面，方便优先复查新一批
+  sortKey: 'time',
+  displayIds: [],
   selection: new Set<number>(),
   anchorIndex: -1,
   previewId: null,
+  tagManagerIds: null,
+  tagBusy: null,
   previewOverlay: true,
   largeIndex: 0,
   scanProgress: null,
@@ -182,6 +242,7 @@ export const useStore = create<StoreState>((set, get) => ({
   showMember: false,
   auth: { loggedIn: false, token: null, user: null },
   toast: null,
+  trashAsk: null,
   engineBusy: false,
   appVersion: '',
   showUpdate: false,
@@ -267,11 +328,18 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   bindEvents() {
+    // 筛选结束事件也会被标签/移动等操作的收尾 send 重复触发：若每个事件都立刻重拉全量列表，
+    // 一次点标签就是两三千行 JSON 重解析（用户看到的“反应本该很快却很慢”）。防抖合并成一次。
+    let settleTimer: ReturnType<typeof setTimeout> | null = null
     window.api.onScanProgress((p) => {
       set({ scanProgress: p })
       if (!p.running && (p.phase === 'done' || p.phase === 'stopped')) {
-        void get().refreshCounts()
-        void get().refreshImages()
+        if (settleTimer) clearTimeout(settleTimer)
+        settleTimer = setTimeout(() => {
+          settleTimer = null
+          void get().refreshCounts()
+          void get().refreshImages()
+        }, 260)
       }
     })
     window.api.onScanImage((img) => {
@@ -342,27 +410,32 @@ export const useStore = create<StoreState>((set, get) => ({
     set({ sortKey: k })
   },
 
+  setDisplayIds(ids) {
+    const cur = get().displayIds
+    if (cur.length === ids.length && cur.every((v, i) => v === ids[i])) return
+    set({ displayIds: ids })
+  },
+
   async setViewMode(m) {
     set({ viewMode: m })
     await window.api.saveSettings({ viewMode: m })
   },
 
   handleClickSelect(index, e) {
-    const { images, selection, anchorIndex } = get()
+    const { images, selection, anchorIndex, displayIds } = get()
+    // index 是“当前展示序”的下标（视图层按时间/置信度/文件名重排过），必须经 displayIds
+    // 映射回 id；直接用 images[index] 会在非默认排序下选错图（选中样式“消失”）。
+    const order = displayIds.length === images.length ? displayIds : images.map((i) => i.id)
+    const id = order[index]
+    if (id == null) return
     const sel = new Set(selection)
-    const img = images[index]
-    if (!img) return
     if (e.shiftKey && anchorIndex >= 0) {
       const [a, b] = [Math.min(anchorIndex, index), Math.max(anchorIndex, index)]
-      for (let i = a; i <= b; i++) sel.add(images[i].id)
-    } else if (e.ctrlKey || e.metaKey) {
-      if (sel.has(img.id)) sel.delete(img.id)
-      else sel.add(img.id)
-      set({ anchorIndex: index })
+      for (let i = a; i <= b; i++) sel.add(order[i])
     } else {
       // 单击即多选：每次点击都加入选中，再点一次取消（不清掉其他已选）
-      if (sel.has(img.id)) sel.delete(img.id)
-      else sel.add(img.id)
+      if (sel.has(id)) sel.delete(id)
+      else sel.add(id)
       set({ anchorIndex: index })
     }
     set({ selection: sel })
@@ -400,7 +473,7 @@ export const useStore = create<StoreState>((set, get) => ({
       ids,
       category: cat,
       physical,
-      clearBadTags: cat === CAT_LIBRARY || !BAD_DIMENSIONS.includes(cat as never)
+      clearBadTags: isStatusCat(cat)
     }
     await window.api.moveImages(req)
     set({ selection: new Set() })
@@ -411,6 +484,22 @@ export const useStore = create<StoreState>((set, get) => ({
 
   async moveToTrash() {
     await get().moveTo(CAT_TRASH)
+  },
+
+  askTrash(physical = false) {
+    const { selection } = get()
+    if (!selection.size) return
+    // 单选（含大图/列表）直接移；多选必须确认，防止批量误废
+    if (selection.size >= 2) set({ trashAsk: { physical } })
+    else void get().moveTo(CAT_TRASH, physical)
+  },
+  confirmTrashAsk() {
+    const ask = get().trashAsk
+    set({ trashAsk: null })
+    void get().moveTo(CAT_TRASH, ask?.physical ?? false)
+  },
+  dismissTrashAsk() {
+    set({ trashAsk: null })
   },
 
   async restoreFromTrash() {
@@ -433,7 +522,7 @@ export const useStore = create<StoreState>((set, get) => ({
       ids,
       category: cat,
       physical: false,
-      clearBadTags: cat === CAT_LIBRARY || !BAD_DIMENSIONS.includes(cat as never)
+      clearBadTags: isStatusCat(cat)
     })
     await get().refreshImages()
     await get().refreshCounts()
@@ -500,6 +589,62 @@ export const useStore = create<StoreState>((set, get) => ({
       // 预览层不关闭，自动看下一张（5.2）
       get().stepPreview(1)
     }
+  },
+
+  /** 删除标签（可批量）：本地先改到位（芯片秒删）→ 写库→后台校准列表与计数 */
+  async removeTag(ids, dim) {
+    if (!ids.length) return
+    const label = DIMENSION_LABELS[dim]
+    const idSet = new Set(ids)
+    set({
+      tagBusy: `正在移除「${label}」标签…`,
+      images: get().images.map((i) => (idSet.has(i.id) ? patchTagLocal(i, dim, false) : i))
+    })
+    try {
+      await window.api.removeDimTag(ids, dim)
+    } catch (e) {
+      // IPC 报错必须让用户看见，并回滚乐观结果，否则“提示成功但界面不变”无从判断哪里出错
+      set({ tagBusy: null, toast: { msg: `移除「${label}」失败：${String(e).slice(0, 180)}`, kind: 'error' } })
+      void get().refreshImages()
+      return
+    }
+    set({
+      tagBusy: null,
+      toast: { msg: `已从 ${ids.length} 张图移除「${label}」标签（记为误判，已喂 AI 学习）`, kind: 'success', duration: 1400 }
+    })
+    // 重拉列表与计数并行且不阻塞反馈：主分类连带移出等结果在后台对账
+    void Promise.all([get().refreshImages(), get().refreshCounts()])
+  },
+
+  /** 添加标签（可批量）：本地先长出来（芯片秒加）→ 写库→后台把图排到目标分类第一并校准计数 */
+  async addTag(ids, dim) {
+    if (!ids.length) return
+    const label = DIMENSION_LABELS[dim]
+    const idSet = new Set(ids)
+    set({
+      tagBusy: `正在标记「${label}」，请稍候…`,
+      images: get().images.map((i) => (idSet.has(i.id) ? patchTagLocal(i, dim, true) : i))
+    })
+    try {
+      await window.api.addDimTag(ids, dim)
+    } catch (e) {
+      set({ tagBusy: null, toast: { msg: `添加「${label}」标签失败：${String(e).slice(0, 180)}`, kind: 'error' } })
+      void get().refreshImages()
+      return
+    }
+    set({
+      tagBusy: null,
+      toast: { msg: `已为 ${ids.length} 张图添加「${label}」标签，已出现在该分类第一张（记为漏检，已喂 AI 学习）`, kind: 'success', duration: 1600 }
+    })
+    void Promise.all([get().refreshImages(), get().refreshCounts()])
+  },
+
+  openTagManager(ids) {
+    if (!ids.length) return
+    set({ tagManagerIds: ids })
+  },
+  closeTagManager() {
+    set({ tagManagerIds: null })
   },
 
   /** 批量判定（多选工具条用）：对每张选中图按当前 AI 判定记录修正学习 */

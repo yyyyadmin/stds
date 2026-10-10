@@ -16,6 +16,7 @@ import { pruneMissing } from './services/importer'
 import { getSettings } from './db'
 import { setupErrorLogger, getLogRoot, logRendererError } from './logger'
 import { dumpCalibration } from './services/calib'
+import { harmonizePersonCountOnce } from './services/personHarmony'
 
 // 尽早安装错误日志（捕获启动期异常），在所有逻辑之前
 setupErrorLogger()
@@ -53,6 +54,13 @@ if (!gotLock) {
 
     await initDbAsync()
     pruneMissing()
+
+    // 老库无需重跑 AI：按版本号补跑一次连拍人数一致化（幂等），让渲染层首屏读到的就是修正后的分类
+    try {
+      harmonizePersonCountOnce()
+    } catch (e) {
+      console.error('person harmony on startup failed', e)
+    }
 
     const iconCandidates = [
       join(process.resourcesPath || '', 'build', 'icon.ico'),

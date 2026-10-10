@@ -16,6 +16,9 @@ _BODY_MIN_H_RATIO = 0.10      # 人体框高 / 图高 下限
 _BODY_MIN_AREA_RATIO = 0.006  # 人体框面积 / 图面积 下限
 _SCORE_MIN = 0.35             # ObjectDetector 置信下限
 _PERSON_LABEL = "person"      # COCO class 0
+# 合并护栏（v2.0.64）：两个框横向中心距 / 较小框宽 的上限。同一个人被拆开的框必然同列，
+# 不同的人（并排/拥抱/前后景站位）必然分列。
+_MERGE_MAX_DX_RATIO = 0.35
 
 
 class PersonDetector:
@@ -95,7 +98,13 @@ def merge_overlaps(bodies):
     """把同一个人被拆开的框合并（礼服/局部遮挡/上下半身双框）：IoU≥0.4 或
     包含度（交集/较小框面积）≥0.65 视为同一人，贪心保留大框。
     v2.0.62 实测：211 张 group 高置信但 YuNet 仅≤1脸，即拆框致"单人判多人"。
-    不合并互不重叠的真实多人（两人紧贴但框体分离仍数 2）。"""
+
+    垂直对齐护栏（v2.0.64）：光看重叠度会把两个人合成一个人——新人拥抱、亲子前后站位、
+    一排伴娘侧身相接时，矮个子的框能整体落进高个子的框里，包含度轻松过 0.65，合并后
+    len(main)==1 而人脸又只拍到 1 张（其余侧脸/背身），于是“多人合照”被判成置信度
+    0.9+ 的“单人照”——用户头号抱怨。因此再加一条：只有两框 x 中心几乎同列
+    （|dx| ≤ 0.35×较小框宽）才允许合并；不同列就是两个人，重叠再多也不合。
+    被护栏挡住不合并不会影响原本的拆框修复（上下半身/礼服拆框天然同列）。"""
     kept = []
     for b in sorted(bodies, key=lambda x: -x["box"][2] * x["box"][3]):
         dup = False
@@ -105,9 +114,16 @@ def merge_overlaps(bodies):
                 continue
             small = min(b["box"][2] * b["box"][3], k["box"][2] * k["box"][3])
             union = b["box"][2] * b["box"][3] + k["box"][2] * k["box"][3] - inter
-            if (inter / union if union > 0 else 0) >= 0.4 or (inter / small if small > 0 else 1) >= 0.65:
-                dup = True
-                break
+            if not ((inter / union if union > 0 else 0) >= 0.4 or (inter / small if small > 0 else 1) >= 0.65):
+                continue
+            # 同列护栏：拆框（上半身/下半身/礼服）x 中心基本对齐，并排/拥抱的两人必然分列
+            bx, bw = float(b["box"][0]), float(b["box"][2])
+            kx, kw = float(k["box"][0]), float(k["box"][2])
+            dx = abs((bx + bw / 2.0) - (kx + kw / 2.0))
+            if dx > _MERGE_MAX_DX_RATIO * min(bw, kw):
+                continue
+            dup = True
+            break
         if not dup:
             kept.append(b)
     return kept

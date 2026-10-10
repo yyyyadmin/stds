@@ -108,17 +108,29 @@ class DetectEngine:
         # - 远景小框也算人：只要检出任何人体框就不是无人物，≥2 直接判多人合照（修全景照误判无人物）
         person_count, bodies = self.person.count(bgr)
         if person_count is not None:
-            main = merge_overlaps([b for b in bodies if b.get("filtered", True)])
+            full_bodies = [b for b in bodies if b.get("filtered", True)]
+            main = merge_overlaps(full_bodies)
+            # 把“合并发生了几个框”写进 reason：下一轮校准能直接量化拆框频率与护栏是否过紧/过松
+            merge_note = (
+                "，人体 %d 框同列合并为 %d 人" % (len(full_bodies), len(main))
+                if len(full_bodies) - len(main) > 0
+                else ""
+            )
             n_eff = max(len(main), face_count)
             if n_eff >= 2:
                 avg_score = sum(b["score"] for b in main) / len(main) if main else 0.5
                 conf = min(0.98, 0.88 + avg_score * 0.1)
-                dims["group_photo"] = {"confidence": round(conf, 4), "reason": "检出 %d 人（人体 %d、人脸 %d）" % (n_eff, len(main), face_count), "method": "body-count"}
+                dims["group_photo"] = {"confidence": round(conf, 4), "reason": "检出 %d 人（人体 %d、人脸 %d）%s" % (n_eff, len(main), face_count, merge_note), "method": "body-count"}
             elif n_eff == 1:
                 if main:
                     b0 = main[0]
                     conf = min(0.99, 0.88 + b0["h_ratio"] * 0.4 + b0["score"] * 0.05)
-                    why = "检出 1 人体（占图高%.0f%%），人脸 %d" % (b0["h_ratio"] * 100.0, face_count)
+                    # 附带人体框宽高比：抱在一起/并肩的两常被检成一个大框，旧 reason 里看不到
+                    # 这个形状信号，下轮校准无法量化“一个框装两个人”。本版本只做观测不改判。
+                    bw0, bh0 = float(b0["box"][2]), float(b0["box"][3]) or 1.0
+                    why = "检出 1 人体（占图高%.0f%%、框宽高比%.2f），人脸 %d%s" % (
+                        b0["h_ratio"] * 100.0, bw0 / bh0, face_count, merge_note
+                    )
                 else:
                     # 人体零检出但检到 1 脸：逐字沿用旧 face-count 单人判据
                     conf, why = 0.985, "检出 1 张人脸（人体未检出）"
@@ -135,14 +147,29 @@ class DetectEngine:
                     # 暗光安全网：画面整体偏暗时人体/人脸同样易漏检，不拉满，降为中置信并标注可能漏检。
                     dims["no_person"] = {"confidence": 0.70, "reason": "未检出人体，但画面偏暗(亮度%.0f)，可能漏检" % bright, "method": "body-count"}
                 else:
-                    dims["no_person"] = {"confidence": 0.95, "reason": "人体/人脸/躯干零检出", "method": "body-count"}
+                    # 肤色连通块兜底：模型零检出不等于画面里没有人（背身/侧脸/近景局部会让
+                    # 人体与人脸同时失效）。取到“像人的一块皮肤”证据时不再拉满 0.95，
+                    # 降为 0.62（中置信 → 待确认），把自信的错误变成看得见的可疑。
+                    has_skin, skin_why = Q.skin_person_score(bgr)
+                    if has_skin:
+                        dims["no_person"] = {"confidence": 0.62, "reason": "人体/人脸/躯干零检出，但%s，可能漏检" % skin_why, "method": "body-count+skin"}
+                    else:
+                        dims["no_person"] = {"confidence": 0.95, "reason": "人体/人脸/躯干零检出（%s）" % skin_why, "method": "body-count"}
         elif face_count == 0:
             if bright < 25:
                 # 暗光安全网：画面整体偏暗时人脸极易漏检，不把 no_person 拉满，
                 # 降为中置信（待确认）并标注可能漏检，避免暗部人像被误判为无人物。
                 dims["no_person"] = {"confidence": 0.55, "reason": "未检出人脸（检出 %d 躯干），但画面偏暗(亮度%.0f)，可能漏检" % (len(upper), bright), "method": "face-count"}
             else:
-                dims["no_person"] = {"confidence": 0.97 if not upper else 0.80, "reason": "未检出人脸（检出 %d 躯干）" % len(upper), "method": "face-count"}
+                if upper:
+                    dims["no_person"] = {"confidence": 0.80, "reason": "未检出人脸（检出 %d 躯干）" % len(upper), "method": "face-count"}
+                else:
+                    # 人体模型不可用时的同一兜底：零人脸 + 有肤色块 = 可能漏检，不拉满
+                    skin_ok, skin_why = Q.skin_person_score(bgr)
+                    if skin_ok:
+                        dims["no_person"] = {"confidence": 0.62, "reason": "未检出人脸，但%s，可能漏检" % skin_why, "method": "face-count+skin"}
+                    else:
+                        dims["no_person"] = {"confidence": 0.97, "reason": "未检出人脸（检出 0 躯干）", "method": "face-count"}
         elif face_count == 1:
             dims["single_person"] = {"confidence": 0.985, "reason": "检出 1 张人脸", "method": "face-count"}
         else:

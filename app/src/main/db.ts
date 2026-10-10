@@ -83,6 +83,13 @@ export async function initDbAsync(): Promise<void> {
     /* 列已存在，忽略 */
   }
   db.exec(`UPDATE images SET sort_order = id WHERE sort_order IS NULL`)
+  // 一次性迁移：“进入当前分类”的时间戳（导入/AI 归入/手动移动/判定错误时刷新），
+  // 支撑“最新在前”排序：刚移动进闭眼分类的图立即排在分类第一张。
+  try {
+    db.exec(`ALTER TABLE images ADD COLUMN cat_changed_at INTEGER`)
+  } catch {
+    /* 列已存在，忽略 */
+  }
   // 一次性迁移：产品决策取消“双人照”类型，2 人并入“多人合照”。老库中归在 two_person 桶的图片迁到 group_photo，
   // 避免出现无对应 tab 的孤儿图片。（tags 里残留的 two_person 键被 classify 忽略，重扫即覆盖，无需单独处理）
   db.exec(`UPDATE images SET category = 'group_photo' WHERE category = 'two_person'`)
@@ -119,6 +126,7 @@ function rowToImage(r: Record<string, unknown>): ImageRecord {
     dupGroup: (r.dup_group as string) || null,
     scene: (r.scene as string) || null,
     addedAt: r.added_at as number,
+    catChangedAt: (r.cat_changed_at as number) ?? null,
     scannedAt: (r.scanned_at as number) || null,
     categoryBy: (r.category_by as ImageRecord['categoryBy']) || null
   }
@@ -228,14 +236,19 @@ export function updateDetectResult(
   categoryBy: ImageRecord['categoryBy'],
   status: ImageRecord['status']
 ): void {
+  // 分类真正变化才算“刚进入这个分类”（刷新 cat_changed_at）；同分类重扫保留旧值，
+  // 避免每次改阈值/重扫把全库排序时戳刷成同一时刻。
+  const prev = (db.prepare('SELECT category FROM images WHERE id = ?').get(id) as { category: string } | undefined)?.category
   db.prepare(`
-    UPDATE images SET tags = ?, details = ?, dup_group = ?, category = ?, category_by = ?, status = ?, scanned_at = ?
+    UPDATE images SET tags = ?, details = ?, dup_group = ?, category = ?, category_by = ?, status = ?, scanned_at = ?,
+      cat_changed_at = COALESCE(?, cat_changed_at)
     WHERE id = ?
-  `).run(JSON.stringify(tags), JSON.stringify(details), dupGroup, category, categoryBy, status, Date.now(), id)
+  `).run(JSON.stringify(tags), JSON.stringify(details), dupGroup, category, categoryBy, status, Date.now(), prev === category ? null : Date.now(), id)
 }
 
 export function setCategory(id: number, category: CategoryKey, categoryBy: 'ai' | 'user' | null): void {
-  db.prepare('UPDATE images SET category = ?, category_by = ? WHERE id = ?').run(category, categoryBy, id)
+  // 任何显式设分类（移动到/判定错误）都刷新“进入分类时间”，图立刻排到目标分类第一张
+  db.prepare('UPDATE images SET category = ?, category_by = ?, cat_changed_at = ? WHERE id = ?').run(category, categoryBy, Date.now(), id)
 }
 
 /**
@@ -430,6 +443,35 @@ export function saveSettings(s: Partial<AppSettings>): void {
 /** 更新一张图的最大坏/中性标签置信度后重新分桶 */
 export function getImageIdsByDupGroup(g: string): number[] {
   return (db.prepare('SELECT id FROM images WHERE dup_group = ?').all(g) as Array<{ id: number }>).map((r) => r.id)
+}
+
+/**
+ * 按 dup_group 批量取整组全部成员（含不在当前分类的“第一张”保留帧）。
+ * 重复/连拍分组视图必须看到完整组：聚类时每组第一张留在原分类（成品库），
+ * 只按当前分类列表分组会让“2 张的组”只剩 1 张可见，退化成无意义的孤帧。
+ * IN 列表按 500 个一组分块，避免撞 SQLite 预处理语句变量数上限。
+ */
+export function listImagesByDupGroups(gids: string[]): ImageRecord[] {
+  const out: ImageRecord[] = []
+  const seen = new Set<number>()
+  for (let i = 0; i < gids.length; i += 500) {
+    const chunk = gids.slice(i, i + 500)
+    const params: Record<string, string> = {}
+    chunk.forEach((g, j) => {
+      params[`g${j}`] = g
+    })
+    const ph = chunk.map((_, j) => `@g${j}`).join(',')
+    const rows = db.prepare(`SELECT * FROM images WHERE dup_group IN (${ph}) ORDER BY id`).all(params) as Array<
+      Record<string, unknown>
+    >
+    for (const r of rows) {
+      const rec = rowToImage(r)
+      if (seen.has(rec.id)) continue
+      seen.add(rec.id)
+      out.push(rec)
+    }
+  }
+  return out
 }
 
 export function _helpers_for_test_only() {

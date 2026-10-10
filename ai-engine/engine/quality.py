@@ -92,6 +92,46 @@ def mean_brightness(bgr):
     return float(lab[:, :, 0].astype(np.float32).mean() * (100.0 / 255.0))
 
 
+# ---------- 肤色连通块（"无人物"零检出兜底） ----------
+
+_SKIN_MIN_BLOB = 0.02   # 最大肤色连通块 ≥2% 图面积，才算"那块地方站着个人"
+_SKIN_MAX_BLOB = 0.45   # 超过 45% 是木地板/米色墙/桌布这类大面积同色背景，不是人
+_SKIN_MIN_EXTENT = 0.45  # 块面积 / 外接矩形面积：脸+颈+手是实心团块，散碎纹理达不到
+
+
+def skin_person_score(bgr):
+    """YCrCb 肤色阈值 → 开/闭运算 → 连通块统计，返回 (是否有人肤色证据, 说明)。
+
+    为什么需要：v2.0.62 取证 157 张 no_person 高置信里大量实为漏检——背身/侧脸/近景只拍到
+    身体局部时，人体框与人脸会同时零检出，旧分支直接给 0.95 把图钉死在"无人物场景"相册。
+    肤色块是比神经网络更"笨"但更难被骗的证据。用途被严格限制：只把自信的 0.95 降为
+    0.62（中置信 → 待确认），永不反向断言"这里有人"，也不参与人数判定。"""
+    try:
+        h, w = bgr.shape[:2]
+        if h <= 0 or w <= 0:
+            return False, "图像尺寸异常"
+        s = 320.0 / max(h, w)
+        small = cv2.resize(bgr, (max(2, int(w * s)), max(2, int(h * s)))) if s < 1.0 else bgr
+        ycrcb = cv2.cvtColor(small, cv2.COLOR_BGR2YCrCb)
+        mask = cv2.inRange(ycrcb, (0, 133, 77), (255, 173, 127))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+        num, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        tot = float(small.shape[0] * small.shape[1]) or 1.0
+        if num <= 1:
+            return False, "无肤色块"
+        areas = stats[1:, cv2.CC_STAT_AREA].astype(np.float32)
+        i = int(np.argmax(areas))
+        ratio = float(areas[i]) / tot
+        box_area = float(stats[1 + i, cv2.CC_STAT_WIDTH] * stats[1 + i, cv2.CC_STAT_HEIGHT]) or 1.0
+        extent = float(areas[i]) / box_area
+        if ratio < _SKIN_MIN_BLOB or ratio > _SKIN_MAX_BLOB or extent < _SKIN_MIN_EXTENT:
+            return False, "肤色块 %.1f%%/紧实度 %.2f 不成形" % (ratio * 100.0, extent)
+        return True, "肤色连通块占图 %.1f%%（紧实度 %.2f）" % (ratio * 100.0, extent)
+    except Exception as e:  # noqa: BLE001
+        return False, "肤色检测不可用(%s)" % type(e).__name__
+
+
 # ---------- 黑白照 ----------
 
 def black_white_score(bgr):

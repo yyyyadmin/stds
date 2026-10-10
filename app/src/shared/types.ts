@@ -187,6 +187,8 @@ export interface ImageRecord {
   dupGroup: string | null
   scene: string | null
   addedAt: number
+  /** 最近一次“进入当前分类”的时间（导入/AI 归入/手动移动/判定错误），用于“最新在前”排序；旧数据无值时回退 addedAt */
+  catChangedAt?: number | null
   scannedAt: number | null
   /** 'ai' = AI 判定；'user' = 用户手动放置（AI 不再覆盖） */
   categoryBy: 'ai' | 'user' | null
@@ -227,6 +229,19 @@ export interface AppSettings {
   scene: string
   enginePreference: 'auto' | 'python' | 'node' // AI 引擎偏好
   devicePreference: 'auto' | 'cpu' | 'cuda' // GPU/CPU 模式
+  /** 重复/连拍分组弹窗的选图模式（记忆用户习惯）：drop=点选要丢弃的（默认） / keep=点选要保留的 */
+  dupPickMode?: 'drop' | 'keep'
+  /** 重复/连拍选图模式的首次使用引导是否已看过 */
+  dupGuideSeen?: boolean
+  /** 重复/连拍分组弹窗宫格密度（记忆）：false=每排 4 张（默认）/ true=每排 2 张大图 */
+  dupGridBig?: boolean
+  /** 重复/连拍页顶部的“这一页怎么看”说明是否已点过已阅（点过以后默认收起） */
+  dupBannerSeen?: boolean
+  /**
+   * 连拍组人数一致化的规则版本（主进程启动时按版本补跑一次，老库不必重跑 AI）。
+   * 改判规则升级时把代码里的 HARMONY_VERSION +1 即可让全库重算一遍。
+   */
+  personHarmony?: number
   /** 修正记录积累后的自动阈值微调 */
   autoTune: boolean
   /** 按维度的阈值微调覆盖（由修正记录学习得到） */

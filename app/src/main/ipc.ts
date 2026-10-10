@@ -8,6 +8,7 @@ import { basename, join } from 'path'
 import { CH, type BootstrapInfo, type CorrectRequest, type MoveRequest } from '../shared/ipc'
 import {
   listByCategory,
+  listImagesByDupGroups,
   getImage,
   categoryCounts,
   setCategory,
@@ -35,6 +36,18 @@ import { authManager } from './services/auth'
 import { engineManager } from './engine'
 import { autoTune, resetTuned, TUNE_MIN_CORRECTIONS } from './services/tuner'
 import { CAT_LIBRARY, isBadDim, isTrashLike, BAD_DIMENSIONS, SUPPORTED_EXTS, type DimensionKey, type ImageRecord } from '../shared/types'
+
+/**
+ * 人数维度互斥：一张图只能属于 单人照/多人合照/无人物场景 之一。
+ * 用户把图归入某个人数分类（判定错误/移动到）时：清掉另外两个互斥标签并写入目标标签，
+ * 否则旧标签会让图片继续出现在错误分类的并集视图里（“改了分类但旧标签还在”）。
+ */
+const PERSON_DIMS: DimensionKey[] = ['single_person', 'group_photo', 'no_person']
+function applyPersonTag(id: number, target: string): void {
+  if (!(PERSON_DIMS as string[]).includes(target)) return
+  for (const d of PERSON_DIMS) if (d !== target) setDimTag(id, d, null)
+  setDimTag(id, target as DimensionKey, { confidence: 1, level: 'high', reason: '用户修正指定', method: 'user' })
+}
 
 export function registerIpc(win: BrowserWindow): void {
   const send = (ch: string, ...args: unknown[]) => {
@@ -114,6 +127,9 @@ export function registerIpc(win: BrowserWindow): void {
 
   ipcMain.handle(CH.imageGet, (_e, id: number) => getImage(id))
 
+  // 整组重复/连拍成员：分组视图要把留在成品库的“第一张”也显示出来，否则短组退化成孤帧
+  ipcMain.handle(CH.listImagesByGroups, (_e, gids: string[]) => listImagesByDupGroups(gids))
+
   ipcMain.handle(CH.categoryCounts, () => categoryCounts())
 
   // 移动（逻辑/物理），9.3
@@ -138,15 +154,18 @@ export function registerIpc(win: BrowserWindow): void {
           /* 物理移动失败退回逻辑移动 */
         }
       }
-      // 移动到 = 纯手动归类（单一归属）：不记修正样本、不喂阈值学习（那是“此判定错误”的职责）。
-      // 先清掉来源的所有坏维度标签，让图片立刻从旧坏维度并集视图消失；
-      // 若目标本身是坏维度，再补一个用户高置信标签，使其出现在目标视图。
-      for (const dim of Object.keys(rec.tags)) {
-        if (isBadDim(dim)) setDimTag(id, dim as DimensionKey, null)
+      // 移动到 = 手动归类。先按 clearBadTags 决定是否清掉坏维度/人数标签（移入成品库/待确认
+      // 等于人工担保这张干净，应同时从各坏图并集视图消失；垃圾桶保留标签作为废弃原因），
+      // 若目标是坏维度/人数维度，再补一个用户高置信标签，使其出现在目标视图。
+      if (req.clearBadTags !== false) {
+        for (const dim of Object.keys(rec.tags)) {
+          if (isBadDim(dim) || (PERSON_DIMS as string[]).includes(dim)) setDimTag(id, dim as DimensionKey, null)
+        }
       }
       if (isBadDim(req.category)) {
         setDimTag(id, req.category as DimensionKey, { confidence: 1, level: 'high', reason: '用户手动放置', method: 'user' })
       }
+      applyPersonTag(id, req.category)
       setCategory(id, req.category, 'user')
     }
     send(CH.E_scanProgress, scanner.getProgress())
@@ -156,8 +175,8 @@ export function registerIpc(win: BrowserWindow): void {
   ipcMain.handle(CH.restoreImages, (_e, snapshots: ImageRecord[]) => {
     for (const rec of snapshots) {
       getDb()
-        .prepare('UPDATE images SET category = ?, category_by = ?, tags = ?, status = ? WHERE id = ?')
-        .run(rec.category, rec.categoryBy, JSON.stringify(rec.tags), rec.status, rec.id)
+        .prepare('UPDATE images SET category = ?, category_by = ?, tags = ?, status = ?, cat_changed_at = ? WHERE id = ?')
+        .run(rec.category, rec.categoryBy, JSON.stringify(rec.tags), rec.status, Date.now(), rec.id)
     }
   })
 
@@ -190,6 +209,9 @@ export function registerIpc(win: BrowserWindow): void {
       } else if (req.origDim && isBadDim(req.origDim)) {
         setDimTag(rec.id, req.origDim as DimensionKey, null)
       }
+      // 目标是人数维度（单人照/多人合照/无人物）：写目标标签 + 清互斥人数标签，
+      // 一次修正即可把“闭眼+多人合照”的误判图彻底改判成干净的“单人照”。
+      applyPersonTag(rec.id, target)
       setCategory(rec.id, target, 'user')
     } else if (req.origDim && isBadDim(req.origDim)) {
       setDimTag(rec.id, req.origDim as DimensionKey, null)
@@ -205,6 +227,66 @@ export function registerIpc(win: BrowserWindow): void {
     })
     send(CH.E_scanProgress, scanner.getProgress())
     return getImage(rec.id)
+  })
+
+  // 删除标签（可多选批量）：一张图带多个标签时只删其中某一个，其它标签不变。
+  // 边界：图的主分类就是该维度（AI 归入或之前移动过），必须连带把主分类挪走——
+  // 否则并集视图仍靠主分类命中，在用户看来就是“删了没反应”。挪向：剩余最高置信坏维度 → 否则成品库。
+  ipcMain.handle(CH.removeDimTag, (_e, ids: number[], dim: DimensionKey) => {
+    for (const id of ids) {
+      const rec = getImage(id)
+      if (!rec) continue
+      const conf = rec.tags[dim]?.confidence ?? 1
+      setDimTag(id, dim, null)
+      let newCat = rec.category
+      if (rec.category === dim) {
+        const rest = Object.entries({ ...rec.tags })
+          .filter(([d, v]) => d !== dim && v && v.level !== 'low' && isBadDim(d))
+          .sort((a, b) => (b[1]?.confidence || 0) - (a[1]?.confidence || 0))
+        newCat = rest.length ? rest[0][0] : CAT_LIBRARY
+        setCategory(id, newCat, 'user')
+      }
+      addCorrection({
+        imageId: id,
+        origDim: dim,
+        origConfidence: conf,
+        newCategory: newCat,
+        action: 'wrong',
+        timestamp: Date.now()
+      })
+    }
+    send(CH.E_scanProgress, scanner.getProgress())
+  })
+
+  // 添加标签（可多选批量）：用户认为 AI 漏了某个维度——写一个用户高置信标签，
+  // 图立即出现在该维度分类（并集视图）并排到第一张；主分类不变（不是移动）。
+  // 学习信号：origDim 置 null 只计入“漏检”（下调召回阈值），不污染误检率。
+  ipcMain.handle(CH.addDimTag, (_e, ids: number[], dim: DimensionKey) => {
+    for (const id of ids) {
+      const rec = getImage(id)
+      if (!rec) continue
+      // 只有“已经作为可见标签展示”的维度才跳过；低置信度标签在视图/管理器里本来就看不到，
+      // 用户点添加就必须覆盖成用户高置信，否则就是“点了没反应也没报错”。
+      const cur = rec.tags[dim]
+      if (cur && cur.level !== 'low') continue
+      if ((PERSON_DIMS as string[]).includes(dim)) {
+        // 人数三维度互斥：清掉另外两个，否则图会同时出现在两个互斥分类
+        applyPersonTag(id, dim)
+      } else {
+        setDimTag(id, dim, { confidence: 1, level: 'high', reason: '用户手动添加', method: 'user' })
+      }
+      // 刷新“进入分类时间”：不改变主分类，但让它在目标维度分类排第一
+      getDb().prepare('UPDATE images SET cat_changed_at = ? WHERE id = ?').run(Date.now(), id)
+      addCorrection({
+        imageId: id,
+        origDim: null,
+        origConfidence: null,
+        newCategory: dim,
+        action: 'wrong',
+        timestamp: Date.now()
+      })
+    }
+    send(CH.E_scanProgress, scanner.getProgress())
   })
 
   ipcMain.handle(CH.customList, () => listCustomCategories())

@@ -84,6 +84,13 @@ def run():
         "person_count_empty": None,
         "e2e_person_dim": None,
         "e2e_person_method": None,
+        "e2e_person_conf": None,
+        "merge_guard_ok": False,
+        "merge_detail": "",
+        "skin_run_ok": False,
+        "skin_gray_ok": False,
+        "skin_blob_ok": False,
+        "skin_detail": "",
         "error": None,
     }
     # --- yunet 共存冒烟（独立 try，先跑）：证明 cv2 与 mediapipe 在同一冻结引擎里都能用（Phase1 头号风险）---
@@ -232,12 +239,49 @@ def run():
                 if dim in dd:
                     out["e2e_person_dim"] = dim
                     out["e2e_person_method"] = (dd[dim] or {}).get("method")
+                    out["e2e_person_conf"] = round(float((dd[dim] or {}).get("confidence") or 0), 4)
                     break
         except Exception as _e2:  # noqa: BLE001
             out["error"] = (out["error"] or "") + " |person-e2e: %s: %s" % (type(_e2).__name__, _e2)
     except Exception as _pe:  # noqa: BLE001
         out["person_count_run_ok"] = False
         out["error"] = (out["error"] or "") + " |person: %s: %s" % (type(_pe).__name__, _pe)
+    # --- v2.0.64 人数误判两处修复的无模型单测（纯几何 / 纯颜色，不依赖 fixture 与网络）---
+    # 1) 合并同列护栏：拦下"两人框重叠被合成一个人"（多人照→单人照头号成因），同时保证
+    #    真正的上下半身拆框仍能合并（否则反向新增"单人照→多人"）。
+    try:
+        from .person import merge_overlaps
+        # 同一人拆框：小框整体落进大框（包含度 1.0）且同列（cx 均为 100）→ 应合为 1
+        split_pair = [
+            {"box": [0, 40, 200, 300], "score": 0.7, "h_ratio": 0.9, "area_ratio": 0.26},
+            {"box": [45, 120, 110, 200], "score": 0.6, "h_ratio": 0.6, "area_ratio": 0.11},
+        ]
+        kept_split = len(merge_overlaps(split_pair))
+        # 两个人：小框同样被大框包住（包含度 0.9），但横向分列（cx 差 55 > 0.35×110）→ 必须不合
+        two_people = [
+            {"box": [0, 40, 200, 300], "score": 0.7, "h_ratio": 0.9, "area_ratio": 0.26},
+            {"box": [100, 120, 110, 200], "score": 0.6, "h_ratio": 0.6, "area_ratio": 0.11},
+        ]
+        kept_two = len(merge_overlaps(two_people))
+        out["merge_detail"] = "split->%d two->%d" % (kept_split, kept_two)
+        out["merge_guard_ok"] = bool(kept_split == 1 and kept_two == 2)
+    except Exception as _mg:  # noqa: BLE001
+        out["error"] = (out["error"] or "") + " |merge: %s: %s" % (type(_mg).__name__, _mg)
+    # 2) 肤色连通块：灰图必须不触发（否则全库无人物都将被拉进待确认），
+    #    人工皮肤色椭圆必须触发（证明兜底链路真的在工作）。
+    try:
+        import cv2
+        from . import quality as Q2
+        gray_ok, gray_why = Q2.skin_person_score(np.full((320, 320, 3), 120, dtype=np.uint8))
+        blob = np.full((320, 320, 3), 120, dtype=np.uint8)
+        cv2.ellipse(blob, (160, 160), (60, 80), 0, 0, 360, (130, 160, 200), -1)  # BGR≈RGB(200,160,130) 典型肤色
+        blob_ok, blob_why = Q2.skin_person_score(blob)
+        out["skin_run_ok"] = True
+        out["skin_gray_ok"] = bool(not gray_ok)
+        out["skin_blob_ok"] = bool(blob_ok)
+        out["skin_detail"] = "gray:%s blob:%s" % ((gray_why or "")[:40], (blob_why or "")[:40])
+    except Exception as _sk:  # noqa: BLE001
+        out["error"] = (out["error"] or "") + " |skin: %s: %s" % (type(_sk).__name__, _sk)
     return out
 
 

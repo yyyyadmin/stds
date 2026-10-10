@@ -1,20 +1,21 @@
 /**
  * 多选浮动操作栏（第九章 9.3）：选中后底部浮出
- * - "已选中 N 张" + 取消选择 / 反选
- * - 移动到：成品库 / 待确认 / 坏维度 / 中性 / 自定义 / 垃圾桶（下拉面板）
- * - 待确认区快捷操作："确认好图"（进成品库）/ "确认坏图"（移垃圾桶）
+ * - "已选中 N 张" + 取消选择 / 反选 / 全选
+ * - 移动到：只负责状态分类（成品库/待确认/自定义/垃圾桶），维度归类交给🏷 标签管理器
+ * - 垃圾桶：单选（1 张）直接移；多选（≥2 张）弹确认框（与大图模式同语义），防批量误废
+ * - 🏷 标签：对全部选中图批量增删标签（加标签=同时出现在该维度分类，不是移动）
+ * - 待确认区快捷操作："确认好图"（进成品库）/ "确认坏图"（移入命中的维度/垃圾桶）
  * - 物理移动开关 + 快捷键提示
  */
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store'
+import { useOutsideClose } from './useOutsideClose'
 import {
   BAD_DIMENSIONS,
   CAT_LIBRARY,
   CAT_REVIEW,
   CAT_TRASH,
-  DIMENSION_LABELS,
-  NEUTRAL_DIMENSIONS,
-  type CategoryKey
+  DIMENSION_LABELS
 } from '../../../shared/types'
 
 export default function SelectionBar(): JSX.Element | null {
@@ -25,13 +26,28 @@ export default function SelectionBar(): JSX.Element | null {
   const images = useStore((s) => s.images)
   const customCategories = useStore((s) => s.customCategories)
   const moveTo = useStore((s) => s.moveTo)
+  const trashAsk = useStore((s) => s.trashAsk)
+  const askTrash = useStore((s) => s.askTrash)
+  const confirmTrashAsk = useStore((s) => s.confirmTrashAsk)
+  const dismissTrashAsk = useStore((s) => s.dismissTrashAsk)
   const correctBatch = useStore((s) => s.correctBatch)
+  const openTagManager = useStore((s) => s.openTagManager)
   const selectNone = useStore((s) => s.selectNone)
   const invertSelection = useStore((s) => s.invertSelection)
   const selectAll = useStore((s) => s.selectAll)
   const [panel, setPanel] = useState(false)
-  const [wrongPanel, setWrongPanel] = useState(false)
   const [physical, setPhysical] = useState(false)
+  const moveWrapRef = useRef<HTMLDivElement>(null)
+  const trashWrapRef = useRef<HTMLDivElement>(null)
+  const trashPanelRef = useRef<HTMLDivElement>(null)
+  // 点“移动到”面板以外的任何地方（选图、点其它按钮）自然收起
+  useOutsideClose(panel, () => setPanel(false), moveWrapRef)
+  // 确认框同样点外即关（取消）
+  useOutsideClose(trashAsk != null, () => dismissTrashAsk(), trashWrapRef, trashPanelRef)
+  // 选中数掉回 1 张以下（Esc/清空选择）时，残留的确认框自动关闭
+  useEffect(() => {
+    if (trashAsk && selection.size < 2) dismissTrashAsk()
+  }, [trashAsk, selection.size, dismissTrashAsk])
 
   // 大图模式／放大弹窗自带判定工具栏，不重复显示此浮动条
   if (!selection.size || viewMode === 'large' || previewId != null) return null
@@ -70,9 +86,28 @@ export default function SelectionBar(): JSX.Element | null {
             ♻️ 还原
           </button>
         ) : (
-          <button className="btn-danger" onClick={() => void moveTo(CAT_TRASH)} title="移入垃圾桶（Delete）">
-            🗑 垃圾桶
-          </button>
+          <div className="relative" ref={trashWrapRef}>
+            <button
+              className={'btn-danger' + (trashAsk ? ' ring-2 ring-bad' : '')}
+              onClick={() => askTrash(false)}
+              title="移入垃圾桶（Delete）：单选直接移，多选弹确认"
+            >
+              🗑 垃圾桶
+            </button>
+            {/* 多选确认框：向上升起在工具栏上方，文案与大图模式垃圾桶确认一致 */}
+            {trashAsk && (
+              <div ref={trashPanelRef} className="absolute bottom-full mb-2 left-0 w-[340px] bg-panel border border-line rounded-lg shadow-2xl p-3 z-40 fade-in">
+                <div className="text-sm font-bold text-fg mb-1.5">确定把这 {selection.size} 张图移入垃圾桶？</div>
+                <div className="text-xs text-fg2 leading-relaxed mb-2.5">
+                  标签全部保留作为废弃原因；图会从成品库/待确认/自定义和所有维度分类视图消失，只出现在垃圾桶里，可随时还原。
+                </div>
+                <div className="flex gap-2">
+                  <button className="btn-danger flex-1 text-xs" onClick={confirmTrashAsk}>确认移入垃圾桶</button>
+                  <button className="btn text-xs text-fg2" onClick={dismissTrashAsk}>取消</button>
+                </div>
+              </div>
+            )}
+          </div>
         )}
 
         {inReview && (
@@ -98,36 +133,28 @@ export default function SelectionBar(): JSX.Element | null {
           </>
         )}
 
-        <div className="relative">
+        <div className="relative" ref={moveWrapRef}>
           <button className="btn-primary" onClick={() => setPanel((v) => !v)}>
             移动到 ▾
           </button>
           {panel && (
             <div className="absolute bottom-full mb-2 right-0 w-80 max-h-[70vh] overflow-y-auto bg-panel border border-line rounded-lg shadow-2xl p-2 grid grid-cols-3 gap-1 text-xs fade-in z-40">
+              <div className="col-span-3 text-gray-500">状态分类（维度归类请用🏷 标签）：</div>
               <button className="btn col-span-3 bg-good/20 border-good/50 text-good" onClick={() => { void moveTo(CAT_LIBRARY, physical); setPanel(false) }}>
-                成品库（正常图片）
+                成品库（正常图片，同时清除所有坏维度标签）
               </button>
               <button className="btn col-span-3 bg-warn/20 border-warn/50 text-warn" onClick={() => { void moveTo(CAT_REVIEW, physical); setPanel(false) }}>
-                待确认
+                待确认（同时清除所有坏维度标签）
               </button>
-              <div className="col-span-3 text-gray-500 mt-1">坏维度：</div>
-              {BAD_DIMENSIONS.filter((d) => d !== 'duplicate').map((d) => (
-                <button key={d} className="btn py-1" onClick={() => { void moveTo(d, physical); setPanel(false) }}>
-                  {DIMENSION_LABELS[d]}
-                </button>
-              ))}
-              <div className="col-span-3 text-gray-500 mt-1">中性：</div>
-              {NEUTRAL_DIMENSIONS.map((d) => (
-                <button key={d} className="btn py-1" onClick={() => { void moveTo(d, physical); setPanel(false) }}>
-                  {DIMENSION_LABELS[d]}
-                </button>
-              ))}
               {customCategories.length > 0 && <div className="col-span-3 text-gray-500 mt-1">自定义：</div>}
               {customCategories.map((c) => (
                 <button key={c.id} className="btn py-1" onClick={() => { void moveTo(`custom:${c.id}`, physical); setPanel(false) }}>
                   {c.name}
                 </button>
               ))}
+              <button className="btn col-span-3 mt-1 bg-bad/20 border-bad/50 text-bad" onClick={() => { setPanel(false); askTrash(physical) }}>
+                垃圾桶（保留标签作为废弃原因）
+              </button>
               <div className="col-span-3 mt-1">
                 <label className="flex items-center gap-1.5 text-gray-400 cursor-pointer">
                   <input type="checkbox" checked={physical} onChange={(e) => setPhysical(e.target.checked)} />
@@ -147,30 +174,12 @@ export default function SelectionBar(): JSX.Element | null {
           此判定正确
         </button>
         <button
-          className={'btn bg-orange-700 hover:bg-orange-600 text-white border-transparent text-xs whitespace-nowrap ' + (wrongPanel ? 'ring-2 ring-orange-400' : '')}
-          onClick={() => setWrongPanel((v) => !v)}
-          title="选中图的判定有误 → 选择正确归属，记入修正学习"
+          className="btn bg-orange-500 hover:bg-orange-600 text-white border-transparent text-xs whitespace-nowrap font-medium"
+          onClick={() => openTagManager([...selection])}
+          title="标签管理器：对选中的全部图删除标错的标签 / 补上 AI 漏检的标签（添加后图同时出现在该维度分类并排第一，不是移动）"
         >
-          此判定错误 ▾
+          {selection.size > 1 ? '批量标签管理' : '标签管理'}
         </button>
-        {wrongPanel && (
-          <div className="absolute bottom-full right-0 mb-2 bg-panel border border-line rounded-lg p-3 w-96 max-h-[70vh] overflow-y-auto text-xs fade-in shadow-xl z-40">
-            <div className="text-fg3 mb-2">选择正确归属（对全部 {n} 张记入修正学习并移动）：</div>
-            <div className="grid grid-cols-3 gap-1.5">
-              <button className="btn col-span-3 bg-good/20 border-good/50 text-good py-1 text-xs" onClick={() => { void correctBatch([...selection], 'wrong', CAT_LIBRARY); setWrongPanel(false) }}>成品库（正常图片）</button>
-              <button className="btn col-span-3 bg-warn/20 border-warn/50 text-warn py-1 text-xs" onClick={() => { void correctBatch([...selection], 'wrong', CAT_REVIEW); setWrongPanel(false) }}>移入待确认</button>
-              <div className="col-span-3 text-fg3 mt-1">坏维度 / 中性分类：</div>
-              {[...BAD_DIMENSIONS, ...NEUTRAL_DIMENSIONS].filter((d) => d !== 'duplicate').map((d) => (
-                <button key={d} className="btn py-1 text-xs" onClick={() => { void correctBatch([...selection], 'wrong', d as CategoryKey); setWrongPanel(false) }}>{DIMENSION_LABELS[d]}</button>
-              ))}
-              {customCategories.map((c) => (
-                <button key={c.id} className="btn py-1 text-xs" onClick={() => { void correctBatch([...selection], 'wrong', `custom:${c.id}`); setWrongPanel(false) }}>{c.name}</button>
-              ))}
-              <button className="btn py-1 text-xs col-span-3 bg-bad/20 border-bad/50 text-bad" onClick={() => { void correctBatch([...selection], 'wrong', CAT_TRASH); setWrongPanel(false) }}>移入垃圾桶（永不导出）</button>
-            </div>
-            <button className="btn-ghost text-fg3 text-xs mt-2" onClick={() => setWrongPanel(false)}>✕ 收起</button>
-          </div>
-        )}
 
         <span className="text-[10px] text-gray-600 hidden md:inline whitespace-nowrap">
           也可直接拖拽缩略图到左侧分类

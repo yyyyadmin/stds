@@ -19,6 +19,7 @@ import { gradeDims, computeCategory } from '../classify'
 import { engineManager } from '../engine'
 import { logError } from '../logger'
 import { dumpCalibration } from './calib'
+import { harmonizePersonCount } from './personHarmony'
 import { ensureNormalizedJpeg } from './rawPreview'
 import type { DetectResult, DimensionKey, ImageRecord } from '../../shared/types'
 import { CAT_TRASH, isTrashLike } from '../../shared/types'
@@ -135,6 +136,14 @@ class Scanner extends EventEmitter {
         await this.clusterDuplicates()
       } catch (e) {
         console.error('dup cluster failed', e)
+      }
+      // 连拍组人数一致化：同一个瞬间不可能既是单人照又是多人合照，组内看到过的最多脸数就是现场人数下界
+      try {
+        const fixed = harmonizePersonCount()
+        for (const id of fixed) this.emit('image', getImage(id))
+        if (fixed.length) console.log(`[person-harmony] 本轮连拍人数一致化修正 ${fixed.length} 张`)
+      } catch (e) {
+        console.error('person harmony failed', e)
       }
       // 补跑聚类阶段新产生 pending 的图（导入时未解码后补等场景保险）
     }

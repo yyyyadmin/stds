@@ -8,6 +8,7 @@ import JudgmentBar from './JudgmentBar'
 import DuplicateGroupsView from './DuplicateGroupsView'
 import { toSrc, useBigSrc, Spinner } from './imageSrc'
 import type { ImageRecord } from '../../../shared/types'
+import type { DimensionKey } from '../../../shared/types'
 import { BAD_DIMENSIONS, CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, DIMENSION_LABELS } from '../../../shared/types'
 import { dimTagColor } from './Sidebar'
 
@@ -84,12 +85,44 @@ function BusyBanner(): JSX.Element | null {
   )
 }
 
+/**
+ * 卡片上的标签管理器入口（网格/列表/瀑布流共用）：不必进大图也能删标错的标签、
+ * 补 AI 漏检的标签。多选状态下打开即对全部选中图批量生效。
+ * 默认隐藏，鼠标经过/停在图片上才浮现（hover 胶囊，无描边无图标，只留「标签」两字）。
+ * 橙色实底：与左下角维度芯片（蓝/红/紫）拉开区分度。
+ * stopPropagation 避免误触单击选中 / 双击放大 / 拖拽排序。
+ */
+function TagBtn({ img, variant = 'hover' }: { img: ImageRecord; variant?: 'hover' | 'plain' }): JSX.Element {
+  const openTagManager = useStore((s) => s.openTagManager)
+  const selection = useStore((s) => s.selection)
+  const multi = selection.has(img.id) && selection.size > 1
+  return (
+    <button
+      className={
+        'inline-flex items-center justify-center rounded-md bg-orange-500 text-white font-medium leading-none cursor-pointer whitespace-nowrap ' +
+        (variant === 'hover'
+          ? 'absolute right-1 bottom-1 z-20 h-6 px-2 text-[11px] opacity-0 pointer-events-none transition-all duration-150 group-hover:opacity-100 group-hover:pointer-events-auto group-hover:hover:bg-orange-600 group-hover:active:scale-95'
+          : 'h-6 px-2 text-[11px] hover:bg-orange-600 active:scale-95 transition-colors')
+      }
+      title={multi ? `标签管理（批量）：对选中的 ${selection.size} 张图增删标签` : '标签管理：删除标错的标签 / 补上 AI 漏检的标签（添加后图同时出现在该分类第一张）'}
+      draggable={false}
+      onClick={(e) => {
+        e.stopPropagation()
+        openTagManager(multi ? [...selection] : [img.id])
+      }}
+      onDoubleClick={(e) => e.stopPropagation()}
+    >
+      标签管理
+    </button>
+  )
+}
+
 function TagChips({ img }: { img: ImageRecord }): JSX.Element | null {
   const entries = Object.entries(img.tags || {}).filter(([, t]) => t && t.level !== 'low')
   if (!entries.length) return null
   const sorted = entries.sort((a, b) => (b[1]?.confidence || 0) - (a[1]?.confidence || 0))
   return (
-    <div className="absolute left-1 bottom-1 right-1 flex flex-wrap gap-1 pointer-events-none">
+    <div className="absolute left-1 bottom-1 right-16 flex flex-wrap gap-1 pointer-events-none">
       {sorted.slice(0, 3).map(([dim, t]) => (
         <DimTag key={dim} dim={dim} conf={t!.confidence} />
       ))}
@@ -158,6 +191,7 @@ function Thumb({ img, size, index, onClick, onDoubleClick, dragIds, dragging, on
       {isScanning && <span className="absolute left-1 top-1 z-10 px-1.5 py-0.5 rounded bg-red-500 text-white text-[10px] font-bold animate-pulse shadow">检测中</span>}
       <StatusRibbon img={img} />
       <TagChips img={img} />
+      <TagBtn img={img} />
     </div>
   )
 }
@@ -310,13 +344,21 @@ export default function ImageView(): JSX.Element {
         arr.sort((a, b) => sortConf(b) - sortConf(a))
         break
       case 'time':
-        arr.sort((a, b) => b.addedAt - a.addedAt)
+        // “最新在前”：按进入当前分类的时间（导入/AI 归入/手动移动/判定错误都会刷新），
+        // 刚移动到本分类的图立刻排第一；旧数据无时戳回退导入时间
+        arr.sort((a, b) => (b.catChangedAt ?? b.addedAt) - (a.catChangedAt ?? a.addedAt))
         break
       default:
         break
     }
     return arr
   }, [images, sortKey])
+
+  // 把展示序（排序后的 id 序列）同步给 store：点击/Shift 连选按它映射回真实图片
+  const setDisplayIds = useStore((s) => s.setDisplayIds)
+  useEffect(() => {
+    setDisplayIds(sorted.map((i) => i.id))
+  }, [sorted, setDisplayIds])
 
   const dragIds = useMemo(() => [...selection], [selection])
   const click = (index: number, e: React.MouseEvent): void => handleClickSelect(index, e)
@@ -424,6 +466,7 @@ export default function ImageView(): JSX.Element {
               <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium w-36">最高置信度</th>
               <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium w-28">分类</th>
               <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium w-20">状态</th>
+              <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium w-14">标签</th>
             </tr>
           </thead>
           <tbody>
@@ -471,6 +514,9 @@ export default function ImageView(): JSX.Element {
                   </td>
                   <td className="border-b border-line/50 px-2 py-1 align-middle">
                     <StatusPill status={img.status} scanning={isCurrent} />
+                  </td>
+                  <td className="border-b border-line/50 px-2 py-1 align-middle">
+                    <TagBtn img={img} variant="plain" />
                   </td>
                 </tr>
               )
@@ -546,7 +592,7 @@ function MasonryThumb(props: { img: ImageRecord; index: number; onClick: (i: num
   return (
     <div
       className={
-        'relative rounded-md overflow-hidden border cursor-pointer ' +
+        'relative rounded-md overflow-hidden border cursor-pointer group ' +
         (isScanning
           ? 'border-red-500 ring-[3px] ring-red-500 scale-105 z-20 '
           : selected
@@ -565,6 +611,7 @@ function MasonryThumb(props: { img: ImageRecord; index: number; onClick: (i: num
       {isScanning && <span className="absolute left-1 top-1 z-10 px-1.5 py-0.5 rounded bg-red-500 text-white text-[10px] font-bold animate-pulse shadow">检测中</span>}
       <StatusRibbon img={img} />
       <TagChips img={img} />
+      <TagBtn img={img} />
     </div>
   )
 }
@@ -696,13 +743,35 @@ function LargeView({ sorted, click, dbl }: {
   )
 }
 
+/**
+ * 大图底栏的可交互标签芯片：每个标签带 ✕——“这标签不对”只删这一个并记入修正学习，
+ * 其它标签与主分类不受影响（多标签图逐标修正的入口）。
+ */
 function TagChipsFixed({ img }: { img: ImageRecord }): JSX.Element | null {
+  const removeTag = useStore((s) => s.removeTag)
   const entries = Object.entries(img.tags || {}).filter(([, t]) => t && t.level !== 'low')
   if (!entries.length) return null
   return (
-    <div className="flex gap-1 flex-wrap justify-center pointer-events-none">
+    <div className="flex gap-1 flex-wrap justify-center items-center">
       {entries.map(([d, t]) => (
-        <DimTag key={d} dim={d} conf={t!.confidence} />
+        <span
+          key={d}
+          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[5px] text-[11px] leading-none font-medium text-white shadow-[0_1px_3px_rgba(0,0,0,0.65)]"
+          style={{ background: dimTagColor(d) }}
+        >
+          {DIMENSION_LABELS[d as DimensionKey]}
+          <span className="opacity-80 tabular-nums">{(t!.confidence * 100).toFixed(0)}</span>
+          <button
+            className="w-3.5 h-3.5 leading-none rounded-full bg-black/25 hover:bg-black/60 text-white text-[10px] cursor-pointer"
+            title={`这标签不对：移除「${DIMENSION_LABELS[d as DimensionKey]}」并记入 AI 学习（不影响其它标签）`}
+            onClick={(e) => {
+              e.stopPropagation()
+              void removeTag([img.id], d as DimensionKey)
+            }}
+          >
+            ✕
+          </button>
+        </span>
       ))}
     </div>
   )

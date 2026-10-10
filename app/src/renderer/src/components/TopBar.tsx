@@ -250,7 +250,7 @@ export default function TopBar(): JSX.Element {
         <option value="name-desc">文件名倒序</option>
         <option value="conf-asc">置信度↑（优先抽查）</option>
         <option value="conf-desc">置信度↓</option>
-        <option value="time">按导入时间</option>
+        <option value="time">最新在前（移动/导入）</option>
       </select>
 
       <div className="flex items-center border border-line rounded-md overflow-hidden">

@@ -1,7 +1,7 @@
 /**
  * IPC 通道与渲染层 API 契约（preload <-> renderer 共享）
  */
-import type { AppSettings, CategoryKey, ImageRecord } from './types'
+import type { AppSettings, CategoryKey, DimensionKey, ImageRecord } from './types'
 import type { ScanProgress } from '../main/services/scanner'
 import type { ExportOptions, ExportProgress } from '../main/services/exporter'
 import type { EngineStatus } from '../main/engine'
@@ -72,13 +72,16 @@ export const CH = {
   pickFolder: 'dialog:pick-folder',
   pickImages: 'dialog:pick-images',
   listImages: 'images:list',
+  listImagesByGroups: 'images:by-groups', // 按 dup_group 取整组成员（重复/连拍分组视图补全“第一张”）
   imageGet: 'images:get',
   categoryCounts: 'images:counts',
   moveImages: 'images:move',
   restoreImages: 'images:restore', // 撤回移动：按快照还原分类与标签
   reorderImages: 'images:reorder', // 手动拖拽排序：按传入 id 顺序写入 sort_order
   deleteImages: 'images:delete',
-  correctImage: 'images:correct', // 一键修正（判定正确/错误）
+  correctImage: 'images:correct', // 一键修正（判定正确）
+  removeDimTag: 'images:removeDimTag', // 删除标签：从该维度分类视图消失（支持多选批量），记一条误判样本
+  addDimTag: 'images:addDimTag', // 添加标签：图同时出现在该维度分类并排第一（不是移动），记一条漏检样本
   customList: 'custom:list',
   customAdd: 'custom:add',
   customRemove: 'custom:remove',
@@ -169,6 +172,8 @@ export interface RendererApi {
   importPaths(paths: string[]): Promise<{ added: number; skipped: number; existed: number; filtered: number }>
   importCancel(): Promise<void>
   listImages(filter: { category?: CategoryKey; status?: string }): Promise<ImageRecord[]>
+  /** 按 dup_group 批量取整组全部成员（含不在当前分类的保留帧），供重复/连拍分组视图补全整组 */
+  listImagesByGroups(gids: string[]): Promise<ImageRecord[]>
   getImage(id: number): Promise<ImageRecord | null>
   categoryCounts(): Promise<Record<string, number>>
   moveImages(req: MoveRequest): Promise<void>
@@ -178,6 +183,10 @@ export interface RendererApi {
   reorderImages(ids: number[]): Promise<void>
   deleteImages(ids: number[]): Promise<void>
   correctImage(req: CorrectRequest): Promise<ImageRecord | null>
+  /** 删除标签（可批量）：只删该维度标签并记为误判样本；若图的主分类就是该维度，同时移出该分类 */
+  removeDimTag(ids: number[], dim: DimensionKey): Promise<void>
+  /** 添加标签（可批量）：写用户高置信标签，图同时出现在该维度分类并排第一；人数维度自动互斥 */
+  addDimTag(ids: number[], dim: DimensionKey): Promise<void>
   customList(): Promise<Array<{ id: number; name: string }>>
   customAdd(name: string): Promise<{ id: number; name: string }>
   customRemove(id: number): Promise<void>

@@ -78,6 +78,10 @@ body {
   .btn-danger {
     @apply px-3 py-1.5 rounded-md text-sm bg-bad hover:bg-red-600 text-white transition-colors cursor-pointer border border-transparent;
   }
+  /* 绿色确认按钮（重复/连拍「保留」等主动作）：hover 必须自带深绿，否则被基类 .btn 的 hover:bg-line 盖成灰白底看不见字 */
+  .btn-good {
+    @apply px-3 py-1.5 rounded-md text-sm bg-good hover:bg-[#15803d] text-white transition-colors cursor-pointer border border-transparent;
+  }
   .btn-ghost {
     @apply px-2 py-1 rounded-md text-sm hover:bg-panel2 transition-colors cursor-pointer border border-transparent;
   }

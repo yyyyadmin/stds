@@ -8,6 +8,7 @@ import Sidebar from './components/Sidebar'
 import TopBar from './components/TopBar'
 import ImageView, { BusyOverlay } from './components/ImageView'
 import PreviewModal from './components/PreviewModal'
+import { TagManagerModal } from './components/TagEditor'
 import SelectionBar from './components/SelectionBar'
 import ExportDialog from './components/ExportDialog'
 import SettingsDialog from './components/SettingsDialog'
@@ -25,6 +26,9 @@ export default function App(): JSX.Element {
   const showLogin = useStore((s) => s.showLogin)
   const showMember = useStore((s) => s.showMember)
   const showUpdate = useStore((s) => s.showUpdate)
+  const tagManagerIds = useStore((s) => s.tagManagerIds)
+  const closeTagManager = useStore((s) => s.closeTagManager)
+  const tagBusy = useStore((s) => s.tagBusy)
   const viewMode = useStore((s) => s.viewMode)
   const toast = useStore((s) => s.toast)
   const dismissToast = useStore((s) => s.dismissToast)
@@ -43,6 +47,14 @@ export default function App(): JSX.Element {
     const onKey = (e: KeyboardEvent): void => {
       const target = e.target as HTMLElement
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return
+      // 标签管理器浮层优先：Esc 只关浮层，不改动底下的选中/视图
+      if (tagManagerIds != null) {
+        if (e.key === 'Escape') {
+          e.stopPropagation()
+          closeTagManager()
+        }
+        return
+      }
       const dialogOpen = showExport || showSettings || showLogin || showMember || showUpdate
       if (!previewId && !dialogOpen) {
         if (e.key === '1') void setViewMode('grid')
@@ -51,7 +63,16 @@ export default function App(): JSX.Element {
         if (e.key === '4') void setViewMode('large')
         if (e.key === 'Delete') {
           const s = useStore.getState()
-          if (s.selection.size) void (s.activeCategory === 'trash' ? s.restoreFromTrash() : s.moveToTrash())
+          if (s.selection.size) {
+            if (s.activeCategory === 'trash') void s.restoreFromTrash()
+            else if (s.viewMode === 'large' || s.previewId != null) {
+              // 大图/弹窗下 SelectionBar 不渲染，确认框无处显示，保持直接移动
+              void s.moveToTrash()
+            } else {
+              // 单选直接移入垃圾桶；多选（≥2）走 SelectionBar 的确认框（与按钮行为一致）
+              s.askTrash()
+            }
+          }
         }
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
           e.preventDefault()
@@ -87,7 +108,7 @@ export default function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [previewId, showExport, showSettings, showLogin, showMember, showUpdate, viewMode, setViewMode, stepPreview, stepLarge, closePreview])
+  }, [previewId, showExport, showSettings, showLogin, showMember, showUpdate, tagManagerIds, closeTagManager, viewMode, setViewMode, stepPreview, stepLarge, closePreview])
 
   // toast 自动消失：移动类即时反馈 1 秒自收（调用方传 duration），其余默认 6 秒供读完错误信息
   useEffect(() => {
@@ -151,11 +172,21 @@ export default function App(): JSX.Element {
           </div>
           <SelectionBar />
           {previewId != null && <PreviewModal />}
+          {tagManagerIds != null && <TagManagerModal />}
           {showExport && <ExportDialog />}
           {showSettings && <SettingsDialog />}
           {showLogin && <LoginDialog />}
           {showMember && <MemberCenterDialog />}
           {showUpdate && <UpdateDialog />}
+          {/* 标签写入中：不阻断操作的进度胶囊（乐观更新已先改好界面，这里只说明“正在喂 AI”） */}
+          {tagBusy && (
+            <div className="fixed inset-x-0 bottom-0 z-[60] flex justify-center pointer-events-none pb-3">
+              <div className="pointer-events-auto flex items-center gap-2.5 px-4 py-2.5 rounded-lg bg-panel border border-brand/60 text-sm text-fg shadow-2xl">
+                <span className="inline-block w-4 h-4 rounded-full border-2 border-brand border-t-transparent animate-spin shrink-0" />
+                {tagBusy}
+              </div>
+            </div>
+          )}
           {toast && (
             <div className="fixed inset-x-0 bottom-0 z-50 pl-56 pb-16 flex justify-center pointer-events-none">
               <div
