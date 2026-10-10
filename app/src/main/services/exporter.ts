@@ -15,6 +15,8 @@ import {
   CAT_LIBRARY,
   CAT_REVIEW,
   CAT_TRASH,
+  CAT_DUP_TRASH,
+  isTrashLike,
   DIMENSION_LABELS,
   NEUTRAL_DIMENSIONS
 } from '../../shared/types'
@@ -44,38 +46,69 @@ class Exporter extends EventEmitter {
   private cancelRequested = false
   private running = false
 
-  /** 构建待导出文件清单（第六章 6.5 SQL 查询） */
+  /** 构建待导出文件清单（第六章 6.5）
+   *  关键：包含/排除式对"维度分类"采用与侧栏一致的标签并集口径——一张图只要带了该维度
+   *  的中/高置信标签就算命中该分类（即使它的主 category 是别的），使"分类里多少张就导多少张"。
+   *  一图命中多个勾选分类时，按分类各产出一条 → 各自进对应子目录（多分类=多目录+各自真实数量）。 */
   buildList(opts: ExportOptions): Array<{ id: number; path: string; category: CategoryKey; filename: string }> {
     const rows = getDb()
-      .prepare(`SELECT id, path, category, filename FROM images WHERE category != 'trash' AND status != 'skip'`)
-      .all() as Array<{ id: number; path: string; category: string; filename: string }>
+      .prepare(`SELECT id, path, category, filename, tags, status FROM images WHERE category NOT IN ('trash','dup_trash') AND status != 'skip'`)
+      .all() as Array<{ id: number; path: string; category: string; filename: string; tags: string | null; status: string }>
     const selected = new Set(opts.categories)
-    return rows.filter((r) => {
-      if (r.category === CAT_TRASH) return false // 双保险
-      if (!opts.includeReview && r.category === CAT_REVIEW) return false
+    const out: Array<{ id: number; path: string; category: CategoryKey; filename: string }> = []
+    for (const r of rows) {
+      if (isTrashLike(r.category)) continue // 双保险：垃圾桶/重复废弃桶永不导出
+      if (!opts.includeReview && r.category === CAT_REVIEW) continue
+      const tags = this.parseTags(r)
+      const mk = (cat: CategoryKey) => out.push({ id: r.id, path: r.path, category: cat, filename: r.filename })
       switch (opts.mode) {
         case 'library':
-          return this.isLibrary(r.category)
+          if (this.isLibrary(r.category)) mk(r.category)
+          break
         case 'all':
-          return true
-        case 'include': {
-          if (selected.has(CAT_LIBRARY) && this.isLibrary(r.category)) return true
-          return selected.has(r.category)
-        }
+          mk(r.category)
+          break
+        case 'include':
+          for (const c of selected) if (this.matchesCat(r, tags, c)) mk(c)
+          break
         case 'exclude': {
-          if (selected.has(CAT_LIBRARY) && this.isLibrary(r.category)) return false
-          return !selected.has(r.category)
+          let excluded = false
+          for (const c of selected) if (this.matchesCat(r, tags, c)) { excluded = true; break }
+          if (!excluded) mk(r.category)
+          break
         }
       }
-    })
+    }
+    return out
+  }
+
+  private parseTags(r: { tags: string | null; status: string }): Record<string, { level?: string }> {
+    if (r.status !== 'done' || !r.tags) return {}
+    try {
+      return JSON.parse(r.tags) as Record<string, { level?: string }>
+    } catch {
+      return {}
+    }
+  }
+
+  /** 图片是否属于分类 cat（复刻 listByCategory 的并集视图语义，垃圾桶除外） */
+  private matchesCat(r: { category: string; status: string }, tags: Record<string, { level?: string }>, cat: CategoryKey): boolean {
+    if (isTrashLike(cat) || isTrashLike(r.category)) return false
+    if (cat === CAT_REVIEW) return r.category === CAT_REVIEW
+    if (cat === CAT_LIBRARY) return this.isLibrary(r.category)
+    if ((BAD_DIMENSIONS as string[]).includes(cat) || (NEUTRAL_DIMENSIONS as string[]).includes(cat)) {
+      const t = tags[cat]
+      return r.category === cat || (!!t && t.level !== 'low')
+    }
+    return r.category === cat // 自定义分类等按归属
   }
 
   private isLibrary(cat: string): boolean {
-    return !(BAD_DIMENSIONS as string[]).includes(cat) && cat !== CAT_REVIEW && cat !== CAT_TRASH
+    return !(BAD_DIMENSIONS as string[]).includes(cat) && cat !== CAT_REVIEW && !isTrashLike(cat)
   }
 
   previewCount(opts: ExportOptions): { will: number; total: number } {
-    const total = (getDb().prepare(`SELECT COUNT(*) c FROM images WHERE category != 'trash' AND status != 'skip'`).get() as { c: number }).c
+    const total = (getDb().prepare(`SELECT COUNT(*) c FROM images WHERE category NOT IN ('trash','dup_trash') AND status != 'skip'`).get() as { c: number }).c
     return { will: this.buildList(opts).length, total }
   }
 
@@ -180,6 +213,7 @@ class Exporter extends EventEmitter {
     if (cat === CAT_LIBRARY) return '成品库'
     if (cat === CAT_REVIEW) return '待确认'
     if (cat === CAT_TRASH) return '垃圾桶'
+    if (cat === CAT_DUP_TRASH) return '重复废弃'
     if (cat.startsWith('custom:')) {
       const row = getDb().prepare('SELECT name FROM custom_categories WHERE id = ?').get(Number(cat.slice(7))) as { name: string } | undefined
       return row?.name || '自定义'

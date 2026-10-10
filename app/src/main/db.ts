@@ -20,6 +20,8 @@ import {
   CAT_LIBRARY,
   CAT_REVIEW,
   CAT_TRASH,
+  CAT_DUP_TRASH,
+  isTrashLike,
   DEFAULT_SETTINGS
 } from '../shared/types'
 
@@ -181,10 +183,10 @@ export function listImages(filter: { category?: CategoryKey; status?: string; di
 function virtualCategorySql(cat: CategoryKey): string {
   if (cat === 'all') return '1=1'
   if (cat === CAT_LIBRARY) {
-    const bads = [...BAD_DIMENSIONS, CAT_REVIEW, CAT_TRASH].map((b) => `'${b}'`).join(',')
+    const bads = [...BAD_DIMENSIONS, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH].map((b) => `'${b}'`).join(',')
     return `category NOT IN (${bads})`
   }
-  if (cat === CAT_REVIEW || cat === CAT_TRASH) {
+  if (cat === CAT_REVIEW || cat === CAT_TRASH || cat === CAT_DUP_TRASH) {
     return `category = '${cat}'`
   }
   return `category = @cat_${cat.replace(/[^a-z0-9]/gi, '')}`
@@ -199,7 +201,7 @@ export function categoryParams(cat: CategoryKey, params: Record<string, unknown>
 export function listByCategory(cat: CategoryKey): ImageRecord[] {
   const where = virtualCategorySql(cat)
   const params: Record<string, unknown> = {}
-  if (cat !== 'all' && cat !== CAT_LIBRARY && cat !== CAT_REVIEW && cat !== CAT_TRASH) {
+  if (cat !== 'all' && cat !== CAT_LIBRARY && cat !== CAT_REVIEW && cat !== CAT_TRASH && cat !== CAT_DUP_TRASH) {
     params[`cat_${cat.replace(/[^a-z0-9]/gi, '')}`] = cat
   }
   const tagLike = '%"' + cat + '":{%'
@@ -208,9 +210,9 @@ export function listByCategory(cat: CategoryKey): ImageRecord[] {
   // 坏/中性维度分类是"标签并集视图"：一张图同时模糊+斜眼时两个分类都该看到它，
   // 但仅当该标签达到高/中置信度（未被过滤）才展示，且垃圾桶内的图不在其它视图出现
   if (isDimCat(cat)) {
-    return out.filter((r) => r.category === cat || (r.category !== CAT_TRASH && r.tags[cat as DimensionKey] && r.tags[cat as DimensionKey]!.level !== 'low'))
+    return out.filter((r) => r.category === cat || (!isTrashLike(r.category) && r.tags[cat as DimensionKey] && r.tags[cat as DimensionKey]!.level !== 'low'))
   }
-  return out.filter((r) => r.category !== CAT_TRASH || cat === CAT_TRASH || cat === 'all')
+  return out.filter((r) => !isTrashLike(r.category) || cat === CAT_TRASH || cat === CAT_DUP_TRASH || cat === 'all')
 }
 
 function isDimCat(cat: CategoryKey): boolean {
@@ -322,12 +324,12 @@ export function categoryCounts(): Record<string, number> {
   for (const r of rows) {
     map[r.category] = (map[r.category] || 0) + 1
     const isBad = (BAD_DIMENSIONS as string[]).includes(r.category)
-    if (!isBad && r.category !== CAT_LIBRARY && r.category !== CAT_REVIEW && r.category !== CAT_TRASH) {
-      // 中性/自定义分类同样属于成品库
+    if (!isBad && r.category !== CAT_LIBRARY && r.category !== CAT_REVIEW && !isTrashLike(r.category)) {
+      // 中性/自定义分类同样属于成品库（垃圾桶与重复废弃桶除外）
       library += 1
     }
-    // 维度分类徒章 = 标签并集计数（与 listByCategory 视图一致，垃圾桶除外）
-    if (r.status === 'done' && r.tags && r.category !== CAT_TRASH) {
+    // 维度分类徒章 = 标签并集计数（与 listByCategory 视图一致，垃圾桶/废弃桶除外）
+    if (r.status === 'done' && r.tags && !isTrashLike(r.category)) {
       try {
         const tags = JSON.parse(r.tags) as Record<string, { level?: string }>
         for (const [d, t] of Object.entries(tags)) {

@@ -5,8 +5,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useStore, sortConf } from '../store'
 import JudgmentBar from './JudgmentBar'
+import DuplicateGroupsView from './DuplicateGroupsView'
 import type { ImageRecord } from '../../../shared/types'
-import { BAD_DIMENSIONS, CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, DIMENSION_LABELS } from '../../../shared/types'
+import { BAD_DIMENSIONS, CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, DIMENSION_LABELS } from '../../../shared/types'
 import { dimTagColor } from './Sidebar'
 
 /**
@@ -322,6 +323,7 @@ function GridView(props: {
 
 export default function ImageView(): JSX.Element {
   const images = useStore((s) => s.images)
+  const activeCategory = useStore((s) => s.activeCategory)
   const viewMode = useStore((s) => s.viewMode)
   const sortKey = useStore((s) => s.sortKey)
   const handleClickSelect = useStore((s) => s.handleClickSelect)
@@ -380,6 +382,11 @@ export default function ImageView(): JSX.Element {
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
   }, [viewMode])
+
+  // 重复/连拍与废弃桶：走专用叠卡分组视图（放在所有 hooks 之后，不违反 Hook 规则）
+  if (activeCategory === 'duplicate' || activeCategory === CAT_DUP_TRASH) {
+    return <DuplicateGroupsView images={sorted} mode={activeCategory === CAT_DUP_TRASH ? 'trash' : 'keep'} />
+  }
 
   if (!sorted.length) {
     return (

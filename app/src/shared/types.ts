@@ -17,11 +17,11 @@ export type DimensionKey =
   | 'no_person' // 无人物场景
   | 'black_white' // 黑白照
 
-/** 坏维度：被标记后进入待修正区或垃圾桶 */
+/** 坏维度：被标记后进入待修正区或垃圾桶
+ *  注：斜眼(eyes_side)、面部狰狞(face_ugly) 已下线——引擎仍会计算，但 gradeDims 在入库阶段
+ *  按本数组过滤，二者不再产生标签/分类/侧栏/导出项（仅界面隐藏，零 CI 风险）。 */
 export const BAD_DIMENSIONS: DimensionKey[] = [
   'eyes_closed',
-  'eyes_side',
-  'face_ugly',
   'blur',
   'exposure',
   'half_head',
@@ -93,6 +93,13 @@ export const DIMENSION_BIAS: Record<DimensionKey, DimBias> = {
 export const CAT_LIBRARY = 'library' // 成品库（导出用）
 export const CAT_REVIEW = 'review' // 待确认
 export const CAT_TRASH = 'trash' // 垃圾桶（永不导出）
+/** 重复/连拍专用废弃桶：从重复分组里被丢弃的图，像垃圾桶一样永不导出、不可被拖入，仅可移出 */
+export const CAT_DUP_TRASH = 'dup_trash'
+
+/** 垃圾桶类（永不导出、不出现在其它并集视图）：普通垃圾桶 + 重复废弃桶 */
+export function isTrashLike(cat: string): boolean {
+  return cat === CAT_TRASH || cat === CAT_DUP_TRASH
+}
 
 /** 分类桶 key = 'library' | 'review' | 'trash' | DimensionKey | 'custom:<id>' */
 export type CategoryKey = string
@@ -206,8 +213,8 @@ export interface ScenePreset {
 
 export const SCENE_PRESETS: ScenePreset[] = [
   { key: 'wedding', label: '婚礼跟拍', overrides: { eyes_closed: [0.6, 0.85], blur: [0.6, 0.85], duplicate: [0.6, 0.9] } },
-  { key: 'studio', label: '棚拍写真', overrides: { face_ugly: [0.75, 0.92], exposure: [0.65, 0.88] } },
-  { key: 'kids', label: '儿童抓拍', overrides: { eyes_closed: [0.55, 0.8], blur: [0.62, 0.86], face_ugly: [0.72, 0.92] } },
+  { key: 'studio', label: '棚拍写真', overrides: { exposure: [0.65, 0.88] } },
+  { key: 'kids', label: '儿童抓拍', overrides: { eyes_closed: [0.55, 0.8], blur: [0.62, 0.86] } },
   { key: 'default', label: '通用', overrides: {} }
 ]
 

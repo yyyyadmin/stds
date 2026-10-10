@@ -21,7 +21,7 @@ import { logError } from '../logger'
 import { dumpCalibration } from './calib'
 import { ensureNormalizedJpeg } from './rawPreview'
 import type { DetectResult, DimensionKey, ImageRecord } from '../../shared/types'
-import { CAT_TRASH } from '../../shared/types'
+import { CAT_TRASH, isTrashLike } from '../../shared/types'
 
 export interface ScanProgress {
   running: boolean
@@ -30,6 +30,10 @@ export interface ScanProgress {
   current: string
   phase: 'init' | 'scanning' | 'dup-cluster' | 'done' | 'stopped' | 'error'
   message?: string
+  /** 本轮筛选开始时间戳（ms），用于整体速率估算 */
+  startedAt?: number
+  /** 当前阶段进入时间戳（ms），用于阶段倒计时 */
+  phaseStartedAt?: number
 }
 
 export interface DetectDimsRaw {
@@ -68,7 +72,7 @@ class Scanner extends EventEmitter {
       if (!total) return { started: false, message: '请先导入照片' }
       return { started: false, message: '所有照片已完成筛选' }
     }
-    this.progress = { running: true, done: 0, total: pending.length, current: '', phase: 'init', message: '正在启动 AI 引擎...' }
+    this.progress = { running: true, done: 0, total: pending.length, current: '', phase: 'init', message: '正在启动 AI 引擎...', startedAt: Date.now(), phaseStartedAt: Date.now() }
     this.emit('progress', this.progress)
     this.running = true
     this.stopRequested = false
@@ -114,7 +118,7 @@ class Scanner extends EventEmitter {
   private async run(pending: ImageRecord[]): Promise<void> {
     this.queue = pending.map((p) => p.id)
     const concurrency = Math.max(1, Math.min(engineManager.getStatus().workers || 1, 4))
-    this.progress = { ...this.progress, phase: 'scanning' }
+    this.progress = { ...this.progress, phase: 'scanning', phaseStartedAt: Date.now() }
     this.emit('progress', this.progress)
 
     const workers: Promise<void>[] = []
@@ -125,7 +129,7 @@ class Scanner extends EventEmitter {
 
     if (!this.stopRequested) {
       // 重复/连拍后置聚类
-      this.progress = { ...this.progress, phase: 'dup-cluster', message: '正在进行重复/连拍聚类...' }
+      this.progress = { ...this.progress, phase: 'dup-cluster', message: '重复/连拍 聚类整理中...', phaseStartedAt: Date.now() }
       this.emit('progress', this.progress)
       try {
         await this.clusterDuplicates()
@@ -197,10 +201,10 @@ class Scanner extends EventEmitter {
     const settings = getSettings()
     const { tags } = gradeDims(raw.dims as DetectDimsRaw, settings)
     if (raw.phash) this.hashes.set(rec.id, raw.phash)
-    // 垃圾桶中的图片：标签更新但不改分类
+    // 垃圾桶/重复废弃桶中的图片：标签更新但不改分类
     let category: string = rec.category
-    if (rec.category === CAT_TRASH) {
-      category = CAT_TRASH
+    if (isTrashLike(rec.category)) {
+      category = rec.category
     } else {
       category = computeCategory(tags, settings, rec)
     }
@@ -210,7 +214,7 @@ class Scanner extends EventEmitter {
       engine: engineManager.getStatus().type,
       phash: raw.phash
     }
-    updateDetectResult(rec.id, tags, details, null, category, rec.category === CAT_TRASH ? 'user' : 'ai', 'done')
+    updateDetectResult(rec.id, tags, details, null, category, isTrashLike(rec.category) ? 'user' : 'ai', 'done')
     const updated = getImage(rec.id)
     this.emit('image', updated)
   }
@@ -333,7 +337,7 @@ export function reclassifyAll(): void {
   const setCat = getDb().prepare('UPDATE images SET category = ? WHERE id = ?')
   for (const img of images) {
     if (img.status !== 'done') continue
-    if (img.category === CAT_TRASH) continue
+    if (isTrashLike(img.category)) continue
     if (img.categoryBy === 'user' && img.category.startsWith('custom:')) continue
     const cat = computeCategory(img.tags, settings, img)
     setCat.run(cat, img.id)

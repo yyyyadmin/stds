@@ -48,7 +48,7 @@ export default function JudgmentBar({ img }: { img: ImageRecord }): JSX.Element 
         移入待确认
       </button>
       <div className="col-span-3 text-fg3 mt-1">坏维度 / 中性分类：</div>
-      {[...BAD_DIMENSIONS, ...NEUTRAL_DIMENSIONS].map((d) => (
+      {[...BAD_DIMENSIONS, ...NEUTRAL_DIMENSIONS].filter((d) => d !== 'duplicate').map((d) => (
         <button key={d} className="btn py-1 text-xs" onClick={() => onPick(d)}>
           {DIMENSION_LABELS[d]}
         </button>

@@ -111,7 +111,7 @@ export default function SelectionBar(): JSX.Element | null {
                 待确认
               </button>
               <div className="col-span-3 text-gray-500 mt-1">坏维度：</div>
-              {BAD_DIMENSIONS.map((d) => (
+              {BAD_DIMENSIONS.filter((d) => d !== 'duplicate').map((d) => (
                 <button key={d} className="btn py-1" onClick={() => { void moveTo(d, physical); setPanel(false) }}>
                   {DIMENSION_LABELS[d]}
                 </button>
@@ -160,7 +160,7 @@ export default function SelectionBar(): JSX.Element | null {
               <button className="btn col-span-3 bg-good/20 border-good/50 text-good py-1 text-xs" onClick={() => { void correctBatch([...selection], 'wrong', CAT_LIBRARY); setWrongPanel(false) }}>成品库（正常图片）</button>
               <button className="btn col-span-3 bg-warn/20 border-warn/50 text-warn py-1 text-xs" onClick={() => { void correctBatch([...selection], 'wrong', CAT_REVIEW); setWrongPanel(false) }}>移入待确认</button>
               <div className="col-span-3 text-fg3 mt-1">坏维度 / 中性分类：</div>
-              {[...BAD_DIMENSIONS, ...NEUTRAL_DIMENSIONS].map((d) => (
+              {[...BAD_DIMENSIONS, ...NEUTRAL_DIMENSIONS].filter((d) => d !== 'duplicate').map((d) => (
                 <button key={d} className="btn py-1 text-xs" onClick={() => { void correctBatch([...selection], 'wrong', d as CategoryKey); setWrongPanel(false) }}>{DIMENSION_LABELS[d]}</button>
               ))}
               {customCategories.map((c) => (

@@ -13,6 +13,13 @@ const VIEWS: Array<{ m: 'grid' | 'list' | 'masonry' | 'large'; label: string; ke
   { m: 'large', label: '大图', key: '4' }
 ]
 
+/** 把剩余秒数格式化为“预计还需 ~X”文案 */
+function fmtRemain(sec: number): string {
+  if (!isFinite(sec) || sec <= 0) return '即将完成…'
+  if (sec < 60) return `预计还需 ~${Math.ceil(sec)} 秒`
+  return `预计还需 ~${Math.round(sec / 60)} 分钟`
+}
+
 export default function TopBar(): JSX.Element {
   const s = useStore()
   const p = s.scanProgress
@@ -20,6 +27,26 @@ export default function TopBar(): JSX.Element {
   const pct = p && p.total > 0 ? Math.round((p.done / p.total) * 100) : 0
   const isInit = p?.phase === 'init'
   const isIndeterminate = isInit || p?.phase === 'dup-cluster'
+  // 每秒重渲染一次，驱动倒计时刷新（仅运行中计时，停止即停）
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!running) return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [running])
+  // 扫描阶段：按已完成速率估算剩余时间
+  const scanEta =
+    p && p.phase === 'scanning' && p.startedAt && p.done > 0
+      ? fmtRemain(((now - p.startedAt) / 1000 / p.done) * (p.total - p.done))
+      : ''
+  // 聚类阶段：无确定百分比，按图量粗估一个倒计时（实际完成即停）
+  const dupEta =
+    p && p.phase === 'dup-cluster' && p.phaseStartedAt
+      ? (() => {
+          const est = Math.min(240, Math.max(8, (p.total || 0) * 0.04))
+          return fmtRemain(est - (now - p.phaseStartedAt!) / 1000)
+        })()
+      : ''
   const sceneLabels: Record<string, string> = { wedding: '婚礼跟拍', studio: '棚拍写真', kids: '儿童抓拍', default: '通用' }
   const auth = s.auth
   const user = auth.user
@@ -117,7 +144,8 @@ export default function TopBar(): JSX.Element {
             <>
               {/* 无确定百分比的阶段（引擎启动/加载模型、重复聚类）：spinner + 可见文案 + 左右滑动不确定进度条，避免停在 0%/100% 像卡死 */}
               <span className="inline-block w-3.5 h-3.5 shrink-0 rounded-full border-2 border-brand border-t-transparent animate-spin" />
-              <span className="text-xs text-fg2 whitespace-nowrap">{isInit ? p?.message || '正在启动 AI 引擎…' : '重复聚类中…'}</span>
+              <span className="text-xs text-fg2 whitespace-nowrap">{isInit ? p?.message || '正在启动 AI 引擎…' : '重复/连拍 聚类整理中…'}</span>
+              {!isInit && dupEta && <span className="text-xs text-fg3 whitespace-nowrap tabular-nums">{dupEta}</span>}
               <div className="flex-1 h-2 bg-panel2 rounded-full overflow-hidden min-w-24">
                 <div className="h-full w-1/4 rounded-full bg-brand bar-indeterminate" />
               </div>
@@ -136,6 +164,7 @@ export default function TopBar(): JSX.Element {
               <span className="text-xs text-gray-400 whitespace-nowrap tabular-nums">
                 {`${pct}% · ${p?.done || 0}/${p?.total || 0}`}
               </span>
+              {scanEta && <span className="text-xs text-brand whitespace-nowrap tabular-nums hidden md:inline">{scanEta}</span>}
               <span className="text-xs text-gray-500 truncate hidden lg:inline">{p?.current}</span>
             </>
           )}

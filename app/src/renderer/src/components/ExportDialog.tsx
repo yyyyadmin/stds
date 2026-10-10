@@ -1,5 +1,5 @@
 /**
- * 导出交付对话框（第六章）
+ * 导出交付对话框
  * - 六种导出方式：成品库导出 / 包含式 / 排除式 / 全部（+待确认开关，垃圾桶永远排除）
  * - 快捷预设：只导成品库 / 排除坏图导其余 / 全部不含垃圾桶
  * - 选项：目标目录、格式、按分类子文件夹、保留原文件名、物理移动、重名处理
@@ -13,6 +13,7 @@ import {
   CAT_LIBRARY,
   CAT_REVIEW,
   CAT_TRASH,
+  CAT_DUP_TRASH,
   DIMENSION_LABELS,
   NEUTRAL_DIMENSIONS,
   type CategoryKey
@@ -86,7 +87,7 @@ export default function ExportDialog(): JSX.Element {
     <div className="fixed inset-0 z-40 bg-black/70 flex items-center justify-center p-4" onClick={(e) => e.target === e.currentTarget && close()}>
       <div className="bg-panel border border-line rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto fade-in">
         <div className="px-5 py-3 border-b border-line flex items-center justify-between sticky top-0 bg-panel z-10">
-          <h2 className="text-fg font-bold">导出交付（第六章）</h2>
+          <h2 className="text-fg font-bold">导出交付</h2>
           <button className="btn-ghost text-gray-400" onClick={close}>✕</button>
         </div>
 
@@ -147,9 +148,13 @@ export default function ExportDialog(): JSX.Element {
                   <input type="checkbox" checked disabled title="垃圾桶永不导出（6.3 双保险）" />
                   垃圾桶（{counts[CAT_TRASH] || 0}）—— 永不导出
                 </span>
+                <span className="col-span-4 text-gray-600 flex items-center gap-1.5">
+                  <input type="checkbox" checked disabled title="重复/连拍-废弃永不导出（专放重复分组里丢弃的多余图）" />
+                  重复/连拍-废弃（{counts[CAT_DUP_TRASH] || 0}）—— 永不导出
+                </span>
               </div>
             )}
-            <label className="flex items-center gap-1.5 text-gray-300 mt-2 cursor-pointer text-xs">
+            <label className="flex items-center gap-1.5 text-red-400 font-medium mt-2 cursor-pointer text-xs">
               <input type="checkbox" checked={includeReview} onChange={(e) => setIncludeReview(e.target.checked)} />
               包含"待确认"图片（{counts[CAT_REVIEW] || 0} 张）—— 默认不导出，防止误交付
             </label>

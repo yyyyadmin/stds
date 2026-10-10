@@ -9,6 +9,7 @@ import {
   CAT_LIBRARY,
   CAT_REVIEW,
   CAT_TRASH,
+  CAT_DUP_TRASH,
   DIMENSION_LABELS,
   NEUTRAL_DIMENSIONS,
   PRECISION_TIERS,
@@ -51,6 +52,7 @@ function Row(props: {
   count?: number
   dot?: string
   tip?: string
+  noDrop?: boolean
   onDelete?: () => void
 }): JSX.Element {
   const active = useStore((s) => s.activeCategory === props.cat)
@@ -67,6 +69,7 @@ function Row(props: {
       }
       onClick={() => void openCategory(props.cat)}
       onDragOver={(e) => {
+        if (props.noDrop) return
         if (props.cat && e.dataTransfer.types.includes('application/x-image-ids')) {
           e.preventDefault()
           setHover(true)
@@ -76,7 +79,7 @@ function Row(props: {
       onDrop={(e) => {
         e.preventDefault()
         setHover(false)
-        if (!props.cat) return
+        if (!props.cat || props.noDrop) return
         const raw = e.dataTransfer.getData('application/x-image-ids')
         if (raw) {
           const ids = JSON.parse(raw) as number[]
@@ -132,7 +135,7 @@ export default function Sidebar(): JSX.Element {
 
       <div className="px-4 pt-6 pb-2 text-gray-500 text-xs">坏维度（{PRECISION_TIERS.ref.label}参考）</div>
       {BAD_DIMENSIONS.map((d) => (
-        <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} dot={lit(counts[d], BAD_DOT_COLORS[d] ?? '#ef4444')} tip={`${DIMENSION_LABELS[d]} · 精度档位：${PRECISION_TIERS[dimTier(d)].tip}（灰 = 暂无图片）`} />
+        <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} dot={lit(counts[d], BAD_DOT_COLORS[d] ?? '#ef4444')} noDrop={d === 'duplicate'} tip={d === 'duplicate' ? '重复/连拍：由聚类自动分组，不可拖入；点入用分组视图选留/废' : `${DIMENSION_LABELS[d]} · 精度档位：${PRECISION_TIERS[dimTier(d)].tip}（灰 = 暂无图片）`} />
       ))}
 
       <div className="px-4 pt-6 pb-2 text-gray-500 text-xs">中性分类</div>
@@ -142,6 +145,7 @@ export default function Sidebar(): JSX.Element {
 
       <div className="px-4 pt-6 pb-2 text-gray-500 text-xs">回收</div>
       <Row label="垃圾桶" cat={CAT_TRASH} count={counts[CAT_TRASH]} dot={lit(counts[CAT_TRASH], '#e11d48')} tip="用户手动标记的废片，永远不可能被导出" />
+      <Row label="重复/连拍-废弃" cat={CAT_DUP_TRASH} count={counts[CAT_DUP_TRASH]} dot={lit(counts[CAT_DUP_TRASH], '#9333ea')} noDrop tip="重复分组里被你丢弃的多余图；永不导出、不可拖入，可点入分组视图恢复到重复/连拍" />
 
       <div className="px-4 pt-6 pb-2 text-gray-500 text-xs flex items-center justify-between">
         <span>自定义分类</span>

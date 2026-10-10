@@ -5,7 +5,7 @@
  */
 import { create } from 'zustand'
 import type { AppSettings, CategoryKey, ImageRecord, DimensionKey } from '../../shared/types'
-import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, DIMENSION_LABELS, BAD_DIMENSIONS, isBadDim, guessMidDim, SUPPORTED_EXTS } from '../../shared/types'
+import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, DIMENSION_LABELS, BAD_DIMENSIONS, isBadDim, guessMidDim, SUPPORTED_EXTS } from '../../shared/types'
 import type { AuthState, BootstrapInfo, ConsumeResult, MoveRequest, UpdateInfo } from '../../shared/ipc'
 import type { ScanProgress } from '../../main/services/scanner'
 import type { ExportProgress } from '../../main/services/exporter'
@@ -26,6 +26,7 @@ function catLabel(cat: CategoryKey, customs: Array<{ id: number; name: string }>
   if (cat === CAT_LIBRARY) return '成品库'
   if (cat === CAT_REVIEW) return '待确认'
   if (cat === CAT_TRASH) return '垃圾桶'
+  if (cat === CAT_DUP_TRASH) return '重复/连拍-废弃'
   const s = cat as string
   if (s.startsWith('custom:')) {
     const c = customs.find((x) => x.id === Number(s.slice(7)))
@@ -670,4 +671,4 @@ export const useStore = create<StoreState>((set, get) => ({
   }
 }))
 
-export { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, DIMENSION_LABELS, sortConf }
+export { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, DIMENSION_LABELS, sortConf }

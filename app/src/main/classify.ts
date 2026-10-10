@@ -5,7 +5,7 @@
  * - 用户手动放置（categoryBy = 'user'）优先，AI 不覆盖
  */
 import type { AppSettings, CategoryKey, DimResult, DimensionKey, ImageRecord } from '../shared/types'
-import { BAD_DIMENSIONS, NEUTRAL_DIMENSIONS, CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, levelOf, SCENE_PRESETS } from '../shared/types'
+import { BAD_DIMENSIONS, NEUTRAL_DIMENSIONS, CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, isTrashLike, levelOf, SCENE_PRESETS } from '../shared/types'
 
 /** 取某维度生效阈值：全局 > 微调 > 场景预设 */
 export function effectiveThresholds(dim: DimensionKey, s: AppSettings): [number, number] {
@@ -45,8 +45,8 @@ export function gradeDims(
 
 /** 依据 tags 计算 AI 归属分类桶（坏维度优先，取置信度最高者） */
 export function computeCategory(tags: ImageRecord['tags'], settings: AppSettings, current?: ImageRecord): CategoryKey {
-  // 垃圾桶与用户手动放置具有最高优先
-  if (current?.categoryBy === 'user' && current.category === CAT_TRASH) return CAT_TRASH
+  // 垃圾桶/重复废弃桶与用户手动放置具有最高优先（AI 不拉回）
+  if (current?.categoryBy === 'user' && (current.category === CAT_TRASH || current.category === CAT_DUP_TRASH)) return current.category
   if (current?.categoryBy === 'user' && current.category.startsWith('custom:')) return current.category
 
   let bestBad: { dim: DimensionKey; conf: number } | null = null
@@ -87,5 +87,5 @@ export function isNeutralCategory(cat: string): boolean {
 
 /** 是否属于成品库视图（导出"只导出成品库"的判定） */
 export function inLibrary(cat: string): boolean {
-  return !isBadCategory(cat) && cat !== CAT_REVIEW && cat !== CAT_TRASH
+  return !isBadCategory(cat) && cat !== CAT_REVIEW && !isTrashLike(cat)
 }

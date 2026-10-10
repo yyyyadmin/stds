@@ -34,7 +34,7 @@ import { clearEngineInputCache } from './services/rawPreview'
 import { authManager } from './services/auth'
 import { engineManager } from './engine'
 import { autoTune, resetTuned, TUNE_MIN_CORRECTIONS } from './services/tuner'
-import { CAT_LIBRARY, CAT_TRASH, isBadDim, BAD_DIMENSIONS, SUPPORTED_EXTS, type DimensionKey, type ImageRecord } from '../shared/types'
+import { CAT_LIBRARY, isBadDim, isTrashLike, BAD_DIMENSIONS, SUPPORTED_EXTS, type DimensionKey, type ImageRecord } from '../shared/types'
 
 export function registerIpc(win: BrowserWindow): void {
   const send = (ch: string, ...args: unknown[]) => {
@@ -123,7 +123,7 @@ export function registerIpc(win: BrowserWindow): void {
     for (const id of req.ids) {
       const rec = getImage(id)
       if (!rec) continue
-      if (req.physical && req.category !== CAT_TRASH) {
+      if (req.physical && !isTrashLike(req.category)) {
         // 物理移动：移动到 <原目录>/筛图结果/<分类名>/
         try {
           const label = exporter.categoryLabel(req.category)
@@ -138,21 +138,16 @@ export function registerIpc(win: BrowserWindow): void {
           /* 物理移动失败退回逻辑移动 */
         }
       }
-      // 移入成品库/中性分类时可清除对应坏标签；移入坏维度分类时补一个高置信用户标签
-      if (req.clearBadTags) {
-        for (const dim of Object.keys(rec.tags)) {
-          if (isBadDim(dim)) setDimTag(id, dim as DimensionKey, null)
-        }
+      // 移动到 = 纯手动归类（单一归属）：不记修正样本、不喂阈值学习（那是“此判定错误”的职责）。
+      // 先清掉来源的所有坏维度标签，让图片立刻从旧坏维度并集视图消失；
+      // 若目标本身是坏维度，再补一个用户高置信标签，使其出现在目标视图。
+      for (const dim of Object.keys(rec.tags)) {
+        if (isBadDim(dim)) setDimTag(id, dim as DimensionKey, null)
+      }
+      if (isBadDim(req.category)) {
+        setDimTag(id, req.category as DimensionKey, { confidence: 1, level: 'high', reason: '用户手动放置', method: 'user' })
       }
       setCategory(id, req.category, 'user')
-      addCorrection({
-        imageId: id,
-        origDim: isBadDim(rec.category) ? rec.category : null,
-        origConfidence: isBadDim(rec.category) ? rec.tags[rec.category as DimensionKey]?.confidence ?? null : null,
-        newCategory: req.category,
-        action: 'wrong',
-        timestamp: Date.now()
-      })
     }
     send(CH.E_scanProgress, scanner.getProgress())
   })
