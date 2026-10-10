@@ -58,7 +58,10 @@ class Exporter extends EventEmitter {
     const out: Array<{ id: number; path: string; category: CategoryKey; filename: string }> = []
     for (const r of rows) {
       if (isTrashLike(r.category)) continue // 双保险：垃圾桶/重复废弃桶永不导出
-      if (!opts.includeReview && r.category === CAT_REVIEW) continue
+      // 待确认门槛只作用于“泛取”模式（all/exclude/library 会顺带扫进主分类为待确认的图）。
+      // include（只导出勾选分类）模式下用户已显式选中该分类，其标签并集成员里主分类恰为
+      // 待确认的图必须一并导出，否则导出数会小于侧栏徽章数（“数量对不上”）。
+      if (!opts.includeReview && opts.mode !== 'include' && r.category === CAT_REVIEW) continue
       const tags = this.parseTags(r)
       const mk = (cat: CategoryKey) => out.push({ id: r.id, path: r.path, category: cat, filename: r.filename })
       switch (opts.mode) {

@@ -6,7 +6,7 @@ import { useEffect, useState } from 'react'
 import { useStore } from './store'
 import Sidebar from './components/Sidebar'
 import TopBar from './components/TopBar'
-import ImageView from './components/ImageView'
+import ImageView, { BusyOverlay } from './components/ImageView'
 import PreviewModal from './components/PreviewModal'
 import SelectionBar from './components/SelectionBar'
 import ExportDialog from './components/ExportDialog'
@@ -145,6 +145,8 @@ export default function App(): JSX.Element {
             <main className="flex-1 min-w-0 relative">
               <ImageView />
               <DropZone />
+              {/* 导入/缩略图生成期间盖住内容区，吸收点击（开始筛选按钮在 TopBar 同步禁用） */}
+              <BusyOverlay />
             </main>
           </div>
           <SelectionBar />

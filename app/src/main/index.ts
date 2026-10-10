@@ -61,10 +61,10 @@ if (!gotLock) {
     ]
     const winIcon = iconCandidates.find((p) => p && existsSync(p))
 
-    // 默认窗口：屏幕居中，占工作区 80%（小屏不低于最小尺寸，大屏不超工作区）
+    // 默认窗口：屏幕居中，占工作区 90%（小屏不低于最小尺寸，大屏不超工作区）
     const wa = screen.getPrimaryDisplay().workAreaSize
-    const winW = Math.max(1024, Math.min(Math.round(wa.width * 0.8), wa.width))
-    const winH = Math.max(680, Math.min(Math.round(wa.height * 0.8), wa.height))
+    const winW = Math.max(1024, Math.min(Math.round(wa.width * 0.9), wa.width))
+    const winH = Math.max(680, Math.min(Math.round(wa.height * 0.9), wa.height))
 
     mainWindow = new BrowserWindow({
       width: winW,

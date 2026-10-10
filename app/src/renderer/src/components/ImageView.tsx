@@ -2,10 +2,11 @@
  * 多视图（9.2）：网格(160px 4-6列自适应) / 列表(80px) / 瀑布流(保留比例) / 大图(主区+底部缩略条)
  * 缩略图带 AI 标签 + 置信度分数；单击选中 / Shift 连选 / Ctrl 加选 / 双击放大预览
  */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useStore, sortConf } from '../store'
 import JudgmentBar from './JudgmentBar'
 import DuplicateGroupsView from './DuplicateGroupsView'
+import { toSrc, useBigSrc, Spinner } from './imageSrc'
 import type { ImageRecord } from '../../../shared/types'
 import { BAD_DIMENSIONS, CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, DIMENSION_LABELS } from '../../../shared/types'
 import { dimTagColor } from './Sidebar'
@@ -27,71 +28,33 @@ function DimTag(props: { dim: string; conf: number }): JSX.Element {
   )
 }
 
-/** localfile 协议 URL（与 preload fileUrl 一致，渲染层直接同步构造） */
-export function toSrc(p: string): string {
-  return 'localfile://x/' + encodeURIComponent(p)
-}
-
-/** 浏览器 <img> 无法直接渲染的格式（RAW/HEIC）：展示时回退到已生成的缩略图预览 */
-const UNDISPLAYABLE = new Set(['cr2', 'cr3', 'nef', 'arw', 'raf', 'orf', 'rw2', 'dng', 'heic', 'heif'])
-export function viewSrc(img: ImageRecord): string {
-  return UNDISPLAYABLE.has(img.format) && img.thumb ? toSrc(img.thumb) : toSrc(img.path)
-}
-
 /**
- * 大图/预览用“原图”加载：普通格式直接加载原文件；RAW/HEIC 由主进程产出高清预览。
- * 先用缩略图占位，原图就绪后无缝替换；仅当加载超过 300ms 才显示“加载原图中”提示（快则不打扰）。
+ * 导入/缩略图生成期间的点击拦截层（挂在 App 的 main 相对容器上，盖住整个中部内容区）：
+ * 一次导入几千张时，主进程在批量解码生成缩略图，渲染层同时再加载大量原图/响应点击会明显卡顿。
+ * 这层半透明遮罩自带 pointer-events，吸收照片点击/拖拽；「开始筛选」按钮在 TopBar 同步禁用。
  */
-export function useBigSrc(img: ImageRecord | null): { src: string; loading: boolean } {
-  const [src, setSrc] = useState<string>(() => (img ? viewSrc(img) : ''))
-  const [loading, setLoading] = useState(false)
-  useEffect(() => {
-    if (!img) {
-      setSrc('')
-      setLoading(false)
-      return
-    }
-    let alive = true
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const fallback = viewSrc(img)
-    setSrc(fallback)
-    setLoading(false)
-    const target: Promise<string> = UNDISPLAYABLE.has(img.format)
-      ? window.api.bigPreview(img.id).then((p) => (p ? toSrc(p) : fallback)).catch(() => fallback)
-      : Promise.resolve(toSrc(img.path))
-    void target.then((t) => {
-      if (!alive) return
-      if (t === fallback) return
-      timer = setTimeout(() => alive && setLoading(true), 300)
-      const pre = new Image()
-      pre.onload = () => {
-        if (!alive) return
-        if (timer) clearTimeout(timer)
-        setSrc(t)
-        setLoading(false)
-      }
-      pre.onerror = () => {
-        if (!alive) return
-        if (timer) clearTimeout(timer)
-        setLoading(false)
-      }
-      pre.src = t
-    })
-    return () => {
-      alive = false
-      if (timer) clearTimeout(timer)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [img?.id, img?.path, img?.thumb, img?.format])
-  return { src, loading }
-}
-
-/** 旋转加载指示器（大图原图加载提示） */
-export function Spinner(props: { label: string; dark?: boolean }): JSX.Element {
+export function BusyOverlay(): JSX.Element | null {
+  const imp = useStore((s) => s.importProgress)
+  const th = useStore((s) => s.thumbsProgress)
+  if (!imp && !th) return null
+  const done = imp ? imp.done : (th as { done: number }).done
+  const total = imp ? imp.total : (th as { total: number }).total
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0
   return (
-    <div className={'flex items-center gap-2 rounded-md px-3 py-1.5 text-xs shadow-lg ' + (props.dark ? 'bg-black/70 text-white' : 'bg-panel/95 border border-line text-fg2')}>
-      <span className="w-3.5 h-3.5 rounded-full border-2 border-current/30 border-t-current animate-spin inline-block shrink-0" />
-      {props.label}
+    <div
+      className="absolute inset-0 z-40 flex items-center justify-center bg-base/55 backdrop-blur-[2px] cursor-progress"
+      title="导入与缩略图生成完成前请暂缓操作"
+    >
+      <div className="flex flex-col items-center gap-3 rounded-2xl border border-line bg-panel/95 px-8 py-6 shadow-2xl">
+        <span className="inline-block w-8 h-8 rounded-full border-[3px] border-brand border-t-transparent animate-spin" />
+        <div className="text-base font-bold text-fg">
+          {imp ? `正在导入照片 ${done} / ${total}` : `正在生成缩略图 ${done} / ${total}`}
+        </div>
+        <div className="w-56 h-2 rounded-full bg-panel2 overflow-hidden">
+          <div className="h-full rounded-full bg-brand transition-[width]" style={{ width: `${pct}%` }} />
+        </div>
+        <div className="text-xs text-fg3">AI 引擎正在准备图库，完成前请暂缓点击照片或开始筛选</div>
+      </div>
     </div>
   )
 }
@@ -360,15 +323,18 @@ export default function ImageView(): JSX.Element {
   const dbl = (img: ImageRecord): void => openPreview(img.id)
   const reorder = useStore((s) => s.reorder)
 
-  // Ctrl + 滚轮缩放网格缩略图尺寸（100–360px），列数仍 auto-fill 自适应；记住上次缩放
-  const gridRef = useRef<HTMLDivElement | null>(null)
+  // Ctrl + 滚轮缩放网格缩略图尺寸（100–360px），列数仍 auto-fill 自适应；记住上次缩放。
+  // 监听器用 callback ref 绑定：网格容器会在切到重复叠卡视图/空库引导等分支时卸载重挂，
+  // 若只在 useEffect([viewMode]) 里绑一次，重挂后节点是新的而 effect 不重跑，
+  // 导致“Ctrl+滚轮大多时候没反应、偶尔又可以”。callback ref 每次挂载/卸载自动重绑/清理。
   const [gridSize, setGridSize] = useState<number>(() => {
     const v = Number(localStorage.getItem('gridSize'))
     return Number.isFinite(v) && v >= 100 && v <= 360 ? v : 160
   })
-  useEffect(() => {
-    if (viewMode !== 'grid') return
-    const el = gridRef.current
+  const wheelCleanup = useRef<(() => void) | null>(null)
+  const bindGridWheel = useCallback((el: HTMLDivElement | null): void => {
+    wheelCleanup.current?.()
+    wheelCleanup.current = null
     if (!el) return
     const onWheel = (e: WheelEvent): void => {
       if (!e.ctrlKey) return
@@ -380,8 +346,8 @@ export default function ImageView(): JSX.Element {
       })
     }
     el.addEventListener('wheel', onWheel, { passive: false })
-    return () => el.removeEventListener('wheel', onWheel)
-  }, [viewMode])
+    wheelCleanup.current = () => el.removeEventListener('wheel', onWheel)
+  }, [])
 
   // 重复/连拍与废弃桶：走专用叠卡分组视图（放在所有 hooks 之后，不违反 Hook 规则）
   if (activeCategory === 'duplicate' || activeCategory === CAT_DUP_TRASH) {
@@ -436,7 +402,7 @@ export default function ImageView(): JSX.Element {
 
   if (viewMode === 'grid') {
     return (
-      <div ref={gridRef} className="h-full overflow-auto p-3 fade-in">
+      <div ref={bindGridWheel} className="h-full overflow-auto p-3 fade-in">
         <BusyBanner />
         <GridView images={sorted} size={gridSize} click={click} dbl={dbl} dragIds={dragIds} onReorder={(ids) => void reorder(ids)} />
       </div>
@@ -452,7 +418,7 @@ export default function ImageView(): JSX.Element {
         <table className="w-full text-xs border-separate border-spacing-0">
           <thead>
             <tr className="text-fg3 text-left">
-              <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium w-14"></th>
+              <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium w-24"></th>
               <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium">文件名</th>
               <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium">AI 标签</th>
               <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium w-36">最高置信度</th>
@@ -475,7 +441,7 @@ export default function ImageView(): JSX.Element {
                   onDoubleClick={() => dbl(img)}
                 >
                   <td className={'border-b border-line/50 px-2 py-1 ' + (isCurrent ? 'border-l-2 border-l-red-500' : 'border-l-2 border-l-transparent')}>
-                    <img src={img.thumb ? toSrc(img.thumb) : toSrc(img.path)} loading="lazy" className="w-11 h-11 object-cover rounded-md ring-1 ring-line" alt="" draggable={false} />
+                    <img src={img.thumb ? toSrc(img.thumb) : toSrc(img.path)} loading="lazy" className="w-[72px] h-[72px] object-cover rounded-md ring-1 ring-line" alt="" draggable={false} />
                   </td>
                   <td className="border-b border-line/50 px-2 py-1 max-w-[280px] align-middle">
                     <div className="truncate font-mono text-fg2" title={img.path}>{img.filename}</div>

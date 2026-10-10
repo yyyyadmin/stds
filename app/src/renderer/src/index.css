@@ -120,3 +120,88 @@ body {
   animation:
     indeterminate 1.15s ease-in-out infinite;
 }
+
+/* ===== AI 引擎状态徽章动效 ===== */
+/* 工作中：青→品牌蓝→紫三色流动渐变（背景 220% 宽横向平移） */
+@keyframes engineFlow {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 220% 50%; }
+}
+.engine-live {
+  background-image: linear-gradient(100deg, #06b6d4, #3b82f6, #8b5cf6, #3b82f6, #06b6d4);
+  background-size: 220% 100%;
+  animation: engineFlow 2.6s linear infinite;
+}
+/* 外发光呼吸（蓝紫） */
+@keyframes glowPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0), 0 0 10px 0 rgba(59, 130, 246, 0.55); }
+  50% { box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.2), 0 0 18px 2px rgba(139, 92, 246, 0.7); }
+}
+.engine-glow {
+  animation: glowPulse 1.8s ease-in-out infinite;
+}
+/* 就绪：柔和呼吸发光（青绿） */
+@keyframes breathe {
+  0%, 100% { box-shadow: 0 0 5px 0 rgba(16, 185, 129, 0.35); filter: brightness(0.95); }
+  50% { box-shadow: 0 0 13px 1px rgba(16, 185, 129, 0.75); filter: brightness(1.1); }
+}
+.engine-ready-glow {
+  animation: breathe 2.6s ease-in-out infinite;
+}
+/* 启动中：琥珀色缓慢脉冲 */
+@keyframes busyGlow {
+  0%, 100% { box-shadow: 0 0 6px 0 rgba(245, 158, 11, 0.3); }
+  50% { box-shadow: 0 0 14px 1px rgba(245, 158, 11, 0.7); }
+}
+.engine-busy-glow {
+  animation: busyGlow 1.2s ease-in-out infinite;
+}
+/* 均衡器跳动条（三根错峰，底锚点上下伸缩）——传达“正在实时运算” */
+@keyframes eq {
+  0%, 100% { transform: scaleY(0.3); }
+  50% { transform: scaleY(1); }
+}
+.engine-eq > i {
+  display: inline-block;
+  width: 2px;
+  height: 11px;
+  margin-right: 2px;
+  background: currentColor;
+  border-radius: 1px;
+  transform-origin: bottom;
+  animation: eq 0.9s ease-in-out infinite;
+}
+.engine-eq > i:last-child { margin-right: 0; }
+.engine-eq > i:nth-child(2) { animation-delay: 0.15s; }
+.engine-eq > i:nth-child(3) { animation-delay: 0.3s; }
+/* 扫描高光：一道斜光反复扫过（仅工作中） */
+@keyframes sheen {
+  0% { transform: translateX(-160%) skewX(-20deg); }
+  55%, 100% { transform: translateX(320%) skewX(-20deg); }
+}
+.engine-sheen {
+  position: relative;
+  overflow: hidden;
+}
+.engine-sheen::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 38%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.5), transparent);
+  animation: sheen 2.2s ease-in-out infinite;
+  pointer-events: none;
+}
+/* 尊重系统“减少动态效果”偏好：关闭引擎徽章动画 */
+@media (prefers-reduced-motion: reduce) {
+  .engine-live,
+  .engine-glow,
+  .engine-ready-glow,
+  .engine-busy-glow,
+  .engine-eq > i,
+  .engine-sheen::after {
+    animation: none !important;
+  }
+}

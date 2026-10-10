@@ -125,8 +125,19 @@ export default function TopBar(): JSX.Element {
         </button>
       )}
       {!running ? (
-        <button className="btn-primary" onClick={() => void s.startScan()} disabled={s.engineBusy}>
-          {s.engineBusy ? '引擎启动中…' : '开始筛选'}
+        <button
+          className="btn-primary"
+          onClick={() => void s.startScan()}
+          disabled={s.engineBusy || !!s.importProgress || !!s.thumbsProgress}
+          title={s.importProgress || s.thumbsProgress ? '图库导入/缩略图生成中，完成后可开始筛选' : undefined}
+        >
+          {s.importProgress
+            ? `导入中 ${s.importProgress.done}/${s.importProgress.total}…`
+            : s.thumbsProgress
+              ? `生成缩略图 ${s.thumbsProgress.done}/${s.thumbsProgress.total}…`
+              : s.engineBusy
+                ? '引擎启动中…'
+                : '开始筛选'}
         </button>
       ) : (
         <button className="btn-danger" onClick={() => void s.stopScan()}>
@@ -258,23 +269,55 @@ export default function TopBar(): JSX.Element {
         ))}
       </div>
 
-      <button className="btn" onClick={() => void useStore.setState({ showExport: true })} disabled={s.counts.all === 0}>
+      <button
+        className="btn-primary inline-flex items-center gap-1.5 disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-brand"
+        onClick={() => void useStore.setState({ showExport: true })}
+        disabled={s.counts.all === 0}
+        title="导出交付：把选中的分类导出为成品照片"
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="7 10 12 15 17 10" />
+          <line x1="12" y1="15" x2="12" y2="3" />
+        </svg>
         导出交付
       </button>
       <button className="btn-ghost text-xl leading-none px-2" title="设置" onClick={() => void useStore.setState({ showSettings: true })}>
         ⚙️
       </button>
+      {/* AI 引擎状态徽章（三态动效）：
+          扫描中 = 青→蓝→紫流动渐变 + 外发光呼吸 + 斜光扫过 + 均衡器跳动条（「正在使用 AI 引擎」）
+          启动中 = 琥珀脉冲；空闲就绪 = 青绿柔和呼吸 */}
       <span
         className={
-          'chip ' +
-          (s.engineBusy
-            ? 'bg-yellow-900/60 text-yellow-200'
-            : 'bg-emerald-900/60 text-emerald-200')
+          'chip !gap-1.5 !border-0 !py-1.5 ' +
+          (running
+            ? 'engine-live engine-glow engine-sheen text-white !px-3 !text-[13px] font-bold tracking-wide'
+            : s.engineBusy
+              ? 'engine-busy-glow bg-yellow-900/60 text-yellow-200 !px-2.5 !text-[12px]'
+              : 'engine-ready-glow bg-emerald-900/60 text-emerald-200 !px-2.5 !text-[12px]')
         }
-        title={s.toast?.msg || 'AI 引擎状态：' + (s.engineBusy ? '启动中' : '引擎已在后台就绪（见设置）')}
+        title={
+          s.toast?.msg ||
+          (running
+            ? 'AI 引擎正在实时处理照片…'
+            : s.engineBusy
+              ? 'AI 引擎启动中…'
+              : 'AI 引擎已就绪（后台运行，详见设置）')
+        }
       >
-        <span className={'w-1.5 h-1.5 rounded-full ' + (s.engineBusy ? 'bg-yellow-400' : 'bg-emerald-400')} />
-        AI引擎
+        {running ? (
+          <span className="engine-eq inline-flex items-end h-[11px] leading-none" aria-hidden>
+            <i /><i /><i />
+          </span>
+        ) : (
+          <span
+            className={
+              'w-1.5 h-1.5 rounded-full ' + (s.engineBusy ? 'bg-yellow-400 animate-pulse' : 'bg-emerald-400')
+            }
+          />
+        )}
+        {s.engineBusy ? 'AI引擎启动中' : 'AI引擎运行中'}
       </span>
 
       {/* 主题切换 */}

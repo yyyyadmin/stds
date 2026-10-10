@@ -316,10 +316,18 @@ export function countImages(): { total: number; done: number; pending: number } 
 // ---------- 分类计数（侧栏徽章） ----------
 
 export function categoryCounts(): Record<string, number> {
-  const rows = db.prepare('SELECT category, tags, status FROM images').all() as Array<{ category: string; tags: string | null; status: string }>
+  const rows = db.prepare('SELECT id, category, tags, status FROM images').all() as Array<{ id: number; category: string; tags: string | null; status: string }>
   const map: Record<string, number> = {}
   let library = 0
-  const dimCount: Record<string, number> = {}
+  // 维度分类徽章必须与 listByCategory（点开分类看到的缩略图）以及导出清单“三数一致”：
+  // 一张图属于该维度分类 ⇔ 主分类===该维度 ∪ 该维度标签为中/高置信。用 Set 去重取并集，
+  // 不能用 max(主分类数, 标签数)——那样会漏掉“主分类在此、但无对应中/高标签”的图（手动归入/
+  // 阈值边界），导致徽章 < 导出数（“选后多几张”）。
+  const dimSets: Record<string, Set<number>> = {}
+  const addDim = (d: string, id: number): void => {
+    if (!dimSets[d]) dimSets[d] = new Set()
+    dimSets[d].add(id)
+  }
   map.all = rows.length
   for (const r of rows) {
     map[r.category] = (map[r.category] || 0) + 1
@@ -328,19 +336,20 @@ export function categoryCounts(): Record<string, number> {
       // 中性/自定义分类同样属于成品库（垃圾桶与重复废弃桶除外）
       library += 1
     }
-    // 维度分类徒章 = 标签并集计数（与 listByCategory 视图一致，垃圾桶/废弃桶除外）
-    if (r.status === 'done' && r.tags && !isTrashLike(r.category)) {
+    if (isTrashLike(r.category)) continue // 垃圾桶/废弃桶不出现在任何维度并集视图
+    if (isDimCat(r.category)) addDim(r.category, r.id) // 主分类命中
+    if (r.status === 'done' && r.tags) {
       try {
         const tags = JSON.parse(r.tags) as Record<string, { level?: string }>
         for (const [d, t] of Object.entries(tags)) {
-          if (t && t.level !== 'low' && isDimCat(d)) dimCount[d] = (dimCount[d] || 0) + 1
+          if (t && t.level !== 'low' && isDimCat(d)) addDim(d, r.id) // 标签命中
         }
       } catch {
         /* ignore */
       }
     }
   }
-  for (const [d, n] of Object.entries(dimCount)) map[d] = Math.max(map[d] || 0, n)
+  for (const [d, set] of Object.entries(dimSets)) map[d] = set.size
   map[CAT_LIBRARY] = (map[CAT_LIBRARY] || 0) + library
   return map
 }

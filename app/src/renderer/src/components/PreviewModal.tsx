@@ -7,7 +7,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
-import { toSrc, useBigSrc, Spinner } from './ImageView'
+import { toSrc, useBigSrc, Spinner } from './imageSrc'
 import JudgmentBar from './JudgmentBar'
 import {
   CAT_REVIEW,
