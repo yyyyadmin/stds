@@ -68,6 +68,34 @@ body {
   background: transparent;
 }
 
+/* 主图库区滚动条：加宽、加明显，一眼看见且好点好拖（用户反馈 2026-10-11）。
+   关键坑：上面全局 * 设了 scrollbar-width/scrollbar-color，Chromium 里只要这两个标准属性
+   不为 auto，就会禁用自定义 ::-webkit-scrollbar 退回系统细样式——所以这里必须先把它们打回
+   auto 把控制权交还 webkit，宽样式才生效。仅作用于 .gallery-scroll，大图模式/弹窗的小滚动条不受影响。 */
+.gallery-scroll {
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+}
+.gallery-scroll::-webkit-scrollbar {
+  width: 22px;
+  height: 22px;
+}
+.gallery-scroll::-webkit-scrollbar-track {
+  background: rgb(var(--c-panel2));
+  border-left: 1px solid rgb(var(--c-line));
+}
+.gallery-scroll::-webkit-scrollbar-thumb {
+  background: rgb(var(--c-fg3));
+  border-radius: 11px;
+  /* 4px 透明描边 + padding-box：点击热区 22px，可见滑块约 14px 圆角，两者兼顾 */
+  border: 4px solid transparent;
+  background-clip: padding-box;
+}
+.gallery-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--c-fg2));
+  background-clip: padding-box;
+}
+
 @layer components {
   .btn {
     @apply px-3 py-1.5 rounded-md text-sm bg-panel2 hover:bg-line border border-line transition-colors cursor-pointer;
@@ -91,6 +119,16 @@ body {
   }
   .chip {
     @apply inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] leading-none font-medium;
+    /* 中文徽章的光学垂直居中：leading-none 时线盒只有字号高，而雅黑/苹方的 ascent 与 descent
+       不对称，墨迹会比徽章中心偏低。探针实测（放大 6 倍逐像素扫墨迹）：10px 的“待确认”
+       上留白 2.67px / 下留白 1.67px，墨迹中心低 0.5px；16px 那档（!text-base）低约 0.9px。
+       改 line-height 没用（它把内容区上下等量撑开，偏差不变，只是把徽章撑高），只能做光学
+       微调：上内边距少 0.5px、下内边距多 0.5px，两者之和仍是 py-0.5 的 4px —— 徽章高度一点
+       不变，绝对定位在卡片右上角的角标不会跳位。这里故意用 px 而不是 em：em 会把 !text-base
+       那档也撑高 2px（它的 py-0.5 本来就是绝对值），而 0.5px 已能把常用的 10px 档完全拉正，
+       16px 档从低 0.9px 降到低 0.4px（肉眼不可见，不值得为它多撑高）。 */
+    padding-top: 1.5px;
+    padding-bottom: 2.5px;
   }
   .input {
     @apply bg-panel2 border border-line rounded-md px-2 py-1 text-sm outline-none focus:border-brand;
@@ -208,4 +246,22 @@ body {
   .engine-sheen::after {
     animation: none !important;
   }
+}
+
+/* 低配精简模式（第二档 A1）：store 在 perfMode=lean 或 auto 探测不达标时挂到 html.perf-lean。
+ * 只砍“吃帧率但不传递信息”的东西：过渡动画、毛玻璃、装饰性 pulse 呼吸；
+ * animate-spin 加载转圈保留（砍了用户分不清是卡死还是在忙），选中 ring 也不动
+ * （tailwind ring 本身就是 box-shadow，砍它选中态视觉来源就没了）。 */
+html.perf-lean *,
+html.perf-lean *::before,
+html.perf-lean *::after {
+  transition-duration: 0s !important;
+  transition-delay: 0s !important;
+}
+html.perf-lean [class*='backdrop-blur'] {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+html.perf-lean [class*='animate-pulse'] {
+  animation: none !important;
 }

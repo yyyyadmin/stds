@@ -25,6 +25,8 @@ export default function SettingsDialog(): JSX.Element {
   const saveSettings = useStore((s) => s.saveSettings)
   const rescanAll = useStore((s) => s.rescanAll)
   const appVersion = useStore((s) => s.appVersion)
+  const perfHint = useStore((s) => s.perfHint)
+  const perfAutoLean = useStore((s) => s.perfAutoLean)
 
   const [engine, setEngine] = useState<EngineStatus | null>(null)
   const [stats, setStats] = useState<{ total: number; perDim: Record<string, { falsePositive: number; truePositive: number; total: number }> } | null>(null)
@@ -99,24 +101,52 @@ export default function SettingsDialog(): JSX.Element {
           <section>
             <h3 className="text-fg2 font-bold mb-2">环境检测</h3>
             <div className="grid grid-cols-2 gap-3 mb-2">
-              <label className="flex items-center gap-2 text-fg2">
-                引擎偏好
-                <select className="input flex-1" value={settings.enginePreference}
+              {/* 两列 grid 每列仅 ~290px：select 必须 min-w-0 + truncate 才能缩到选项文字
+                  的最小内容宽度以下，否则长选项（"GPU / CUDA（NVIDIA）"）会把左边标签
+                  挤成两行（用户实测 2026-10-11）；选中的长文案靠 title 悬停看全 */}
+              <label className="flex items-center gap-2 text-fg2 min-w-0">
+                <span className="whitespace-nowrap">引擎偏好</span>
+                <select className="input flex-1 min-w-0 truncate" value={settings.enginePreference}
                   onChange={(e) => void saveSettings({ enginePreference: e.target.value as 'auto' | 'python' | 'node' })}>
                   <option value="auto">自动（Python 优先）</option>
                   <option value="python">仅 Python AI 引擎</option>
                   <option value="node">仅 Node 基础引擎</option>
                 </select>
               </label>
-              <label className="flex items-center gap-2 text-fg2">
-                计算设备
-                <select className="input flex-1" value={settings.devicePreference}
+              <label className="flex items-center gap-2 text-fg2 min-w-0">
+                <span className="whitespace-nowrap">计算设备</span>
+                <select className="input flex-1 min-w-0 truncate" value={settings.devicePreference}
                   onChange={(e) => void saveSettings({ devicePreference: e.target.value as 'auto' | 'cpu' | 'cuda' })}>
                   <option value="auto">自动检测</option>
                   <option value="cpu">CPU（省电稳定）</option>
                   <option value="cuda">GPU / CUDA（NVIDIA）</option>
                 </select>
               </label>
+            </div>
+            {/* 性能模式（第二档 A1）：默认自动——只有探测到低配（≤ 4 核 / < 8G / 软件渲染）才精简；
+                精简只砍动画毛玻璃并强制小档缩略图，功能一项不少。好机器上选了也白选，故给出手动档 */}
+            <label className="flex items-center gap-2 text-fg2 min-w-0 mb-2" title="精简只去掉动画过渡、毛玻璃等装饰效果并强制用小档缩略图，功能不变；低配机器启动时会自动精简">
+              <span className="whitespace-nowrap">性能模式</span>
+              <select className="input flex-1 min-w-0 truncate" value={settings.perfMode ?? 'auto'}
+                onChange={(e) => void saveSettings({ perfMode: e.target.value as 'auto' | 'full' | 'lean' })}>
+                <option value="auto">自动（低配机器自动精简）</option>
+                <option value="full">全特效（低配也不精简）</option>
+                <option value="lean">精简（好机器也追求更跟手）</option>
+              </select>
+            </label>
+            {/* 本机档位常驻展示（与下拉选项无关）：用户要的是“知道自己的电脑是什么级别”，
+                哪怕手动选了全特效/精简，探测结论也照实说。层级靠排版：小字浅色fg3，
+                只有结论那一个词着色 */}
+            <div className="text-xs text-fg3 mb-2">
+              {perfHint ? (
+                <>
+                  本机探测：{perfHint.cores} 核 · {Math.round(perfHint.memGB)}GB 内存 ·{' '}
+                  {perfHint.gpuSoftware ? '软件渲染' : '硬件加速渲染'} ——{' '}
+                  <b className={perfAutoLean ? 'text-warn' : 'text-good'}>{perfAutoLean ? '低配（选自动会精简）' : '高配（选自动保全特效）'}</b>
+                </>
+              ) : (
+                '本机档位：启动时探测中，稍后重开设置可见'
+              )}
             </div>
             <div className="rounded-md bg-panel2 border border-line p-3 text-xs space-y-1">
               {engine ? (
@@ -142,65 +172,78 @@ export default function SettingsDialog(): JSX.Element {
               )}
               <div className="pt-1 flex gap-2">
                 <button className="btn text-xs" onClick={() => void window.api.engineStatus().then(setEngine)}>刷新状态</button>
-                <button className="btn text-xs" onClick={() => { if (confirm('重新筛选将覆盖 AI 判定（您手动修正过的图片与垃圾桶内容会保留）。继续？')) void rescanAll() }}>
+                <button
+                  className="btn text-xs"
+                  onClick={() => {
+                    if (confirm('重新筛选会先把上一轮的 AI 分类清零重算（您手动放置的图片、手动加的标签，以及垃圾桶/废弃桶内容都会保留不受影响）。继续？')) void rescanAll()
+                  }}
+                >
                   重新筛选全部图片
                 </button>
               </div>
             </div>
           </section>
 
-          {/* 检测程度 + 阈值调整（主区常驻） */}
+          {/* 筛选力度（原"检测程度"）：主区只留一个结果导向下拉；两根滑条搬进
+              高级设置——同一对参数不再在客户面前摆两个入口（用户拍板 2026-10-11），
+              选项里的"（高 0.80 / 中 0.55）"小数也去掉了 */}
           <section>
-            <h3 className="text-fg2 font-bold mb-2">检测程度</h3>
-            <div className="rounded-md bg-panel2 border border-line p-3 space-y-3">
-              <label className="flex items-center justify-between gap-3 text-fg2">
-                <span className="whitespace-nowrap">严格程度</span>
-                <select className="input flex-1" value={strictNow} onChange={(e) => applyStrictness(e.target.value)}>
-                  {STRICTNESS_PRESETS.map((p) => (
-                    <option key={p.key} value={p.key}>{p.label}（高 {p.high.toFixed(2)} / 中 {p.mid.toFixed(2)}）</option>
-                  ))}
-                  {strictNow === 'custom' && <option value="custom">自定义（滑条微调过）</option>}
-                </select>
-              </label>
+            <h3 className="text-fg2 font-bold mb-2">筛选力度</h3>
+            <div className="rounded-md bg-panel2 border border-line p-3 space-y-2">
+              <select className="input w-full" value={strictNow} onChange={(e) => applyStrictness(e.target.value)}>
+                {STRICTNESS_PRESETS.map((p) => (
+                  <option key={p.key} value={p.key}>{p.label}</option>
+                ))}
+                {strictNow === 'custom' && <option value="custom">自定义（高级设置里微调过）</option>}
+              </select>
               <p className="text-xs text-fg3">
                 {strictNow === 'custom'
-                  ? '当前为自定义阈值；越严格 → 更多照片被拉进待确认/坏维度，越一般 → 误报更少、绝大多数直接进成品库。'
+                  ? '当前为自定义阈值：越严格 → 越多照片被拉进待确认，越宽松 → 误报更少、绝大多数直接进交付库。'
                   : STRICTNESS_PRESETS.find((p) => p.key === strictNow)?.tip}
               </p>
-              <div className="space-y-3">
-                <div>
-                  <div className="flex justify-between text-xs text-fg3">
-                    <span>高置信度阈值（&gt; 直接标记进坏维度分类）</span>
-                    <b className="text-fg tabular-nums">{settings.highThreshold.toFixed(2)}</b>
-                  </div>
-                  <input type="range" min={0.5} max={0.99} step={0.01} value={settings.highThreshold}
-                    className="w-full accent-red-500"
-                    onChange={(e) => setThreshold('highThreshold', Number(e.target.value))} />
-                </div>
-                <div>
-                  <div className="flex justify-between text-xs text-fg3">
-                    <span>中置信度下限（介于中和高之间 → 待确认区）</span>
-                    <b className="text-fg tabular-nums">{settings.midThreshold.toFixed(2)}</b>
-                  </div>
-                  <input type="range" min={0.3} max={0.95} step={0.01} value={settings.midThreshold}
-                    className="w-full accent-yellow-500"
-                    onChange={(e) => setThreshold('midThreshold', Number(e.target.value))} />
-                </div>
-                <p className="text-xs text-fg3">
-                  低于 {settings.midThreshold.toFixed(2)} 的判定不标记，图片默认留在成品库。调整阈值/严格程度<b>无需重新检测</b>，立即按已存的原始置信度重新分桶。
-                </p>
-              </div>
+              <p className="text-xs text-fg3">
+                只影响瑕疵照片（闭眼/模糊/曝光等）进【待确认】的门槛；人数分类（合影/单人/无人）是引擎的结构结论，不随这里变。<b>切换档位无需重新检测</b>，立即按已存的原始置信度重新分桶。
+              </p>
             </div>
           </section>
 
           {/* 高级设置（默认折叠） */}
           <section>
             <button className="w-full flex items-center justify-between text-fg2 font-bold" onClick={() => setAdvanced((v) => !v)}>
-              <span>高级设置（场景 / 修正学习）</span>
+              <span>高级设置（阈值微调 / 场景 / 修正学习）</span>
               <span className="text-fg3">{advanced ? '▲ 收起' : '▼ 展开'}</span>
             </button>
             {advanced && (
               <div className="mt-3 space-y-5">
+                {/* 置信度阈值微调：从主区挪来。和主区"筛选力度"下拉是同一对参数，
+                   滑过之后档位显示"自定义"，回下拉选档即可覆盖 */}
+                <div>
+                  <h4 className="text-fg2 font-bold mb-2">置信度阈值微调</h4>
+                  <div className="rounded-md bg-panel2 border border-line p-3 space-y-3">
+                    <div>
+                      <div className="flex justify-between text-xs text-fg3">
+                        <span>高置信度阈值（高于此线 → 直接归入瑕疵）</span>
+                        <b className="text-fg tabular-nums">{settings.highThreshold.toFixed(2)}</b>
+                      </div>
+                      <input type="range" min={0.5} max={0.99} step={0.01} value={settings.highThreshold}
+                        className="w-full accent-red-500"
+                        onChange={(e) => setThreshold('highThreshold', Number(e.target.value))} />
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-xs text-fg3">
+                        <span>中置信度下限（介于中和高之间 → 待确认）</span>
+                        <b className="text-fg tabular-nums">{settings.midThreshold.toFixed(2)}</b>
+                      </div>
+                      <input type="range" min={0.3} max={0.95} step={0.01} value={settings.midThreshold}
+                        className="w-full accent-yellow-500"
+                        onChange={(e) => setThreshold('midThreshold', Number(e.target.value))} />
+                    </div>
+                    <p className="text-xs text-fg3">
+                      低于 {settings.midThreshold.toFixed(2)} 的判定不标记，图片默认留在交付库。调整阈值<b>无需重新检测</b>，立即按已存的原始置信度重新分桶。
+                    </p>
+                  </div>
+                </div>
+
                 {/* 场景预设 */}
                 <div>
                   <h4 className="text-fg2 font-bold mb-2">场景预设</h4>

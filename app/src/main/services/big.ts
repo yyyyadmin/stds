@@ -1,6 +1,6 @@
 /**
  * 大图原图预览缓存：浏览器 <img> 无法直接渲染 RAW/HEIC 原文件，
- * 主进程用 sharp（含 RAW 内嵌预览兜底链）产出长边 2560 的高清 JPEG 缓存供大图视图使用。
+ * 主进程用 sharp（含 RAW 内嵌预览兜底链）产出长边 2560 的高清 JPEG 缓存供放大弹窗使用。
  */
 import { app } from 'electron'
 import { join } from 'path'

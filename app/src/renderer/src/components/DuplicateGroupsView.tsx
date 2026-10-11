@@ -2,14 +2,14 @@
  * 重复/连拍 分组视图（专用定制界面）
  * - 把同一 dupGroup 的重复/连拍图叠成一张"3D 堆叠卡"：后层向左上、前层向右下错开，
  *   每张都露出右下角，一眼看出这一组有几张。
- * - 整组成员 = 本分类的多余帧 + 其它分类里的同伴（聚类时每组最早的第一张 AI 默认保留帧留在成品库）。
- *   后者由主进程 listImagesByGroups 按 dup_group 补全，在弹窗里以锁定卡展示（虚线框 + “已在成品库”角标）：
+ * - 整组成员 = 本分类的多余帧 + 其它分类里的同伴（聚类时每组最早的第一张 AI 默认保留帧留在交付库）。
+ *   后者由主进程 listImagesByGroups 按 dup_group 补全，在弹窗里以锁定卡展示（虚线框 + “已在交付库”角标）：
  *   这样每组永远看得到完整上下文，2 张的组不会再退化成一张“未成组”孤帧（已彻底取消该分区）。
  * - 点击堆叠卡 → 弹窗平铺该组全部照片，逐张标记「留 / 废」：
  *   · keep 模式（在【重复/连拍】分类内）：支持两种选图习惯（全局设置记忆，切换一次永久保持）：
  *     - 选丢弃的（dupPickMode=drop，默认）/ 选保留的（dupPickMode=keep）
  *     两种模式都无默认选择；卡片三态：绿色=标保留、红色=标废弃、无边框=还没决定（留在重复类下次接着选）
- *     底部两个按钮分开执行：「处理已选」（drop=丢弃标红的→废弃桶 / keep=保留标绿的→成品库）
+ *     底部两个按钮分开执行：「处理已选」（drop=丢弃标红的→废弃桶 / keep=保留标绿的→交付库）
  *     与「处理未选」（把还没决定的批量定案），只点一次不强制对全组下结论
  *     回库/进桶同时清 duplicate 标签（重聚类不会再抓回来）
  *     首次使用弹窗内会显示一次性引导（dupGuideSeen 记忆，看过不再弹）
@@ -42,21 +42,21 @@ interface Group {
   gid: string
   /** 整组成员（含不在当前分类的锁定帧），按 id 升序 */
   arr: ImageRecord[]
-  /** 不在当前分类、只能看不能选的成员 id（如成品库里的 AI 默认保留帧） */
+  /** 不在当前分类、只能看不能选的成员 id（如交付库里的 AI 默认保留帧） */
   locked: Set<number>
 }
 
 /**
  * 锁定帧角标：只回答客户真正关心的问题——“这张会不会被导出”。
- * 成品库在这里是虚分类：人数（单人照/多人合照/无人物场景）、黑白照、自定义分类都算成品库
- * （与主进程 exporter.isLibrary 同一口径，导出时一起走），所以主分类是「多人合照」的兜底帧
- * 也照样正常导出——角标写「成品库」而不是「多人合照」，否则会和顶部说明自相矛盾。
+ * 交付库在这里是虚分类：人数（单人照/多人合拍照/多人混合照/无人物场景）、黑白照、自定义分类都算交付库
+ * （与主进程 exporter.isLibrary 同一口径，导出时一起走），所以主分类是「多人合拍照」的兜底帧
+ * 也照样正常导出——角标写「交付库」而不是「多人合拍照」，否则会和顶部说明自相矛盾。
  */
 function catShort(cat: string): string {
   if (isTrashLike(cat)) return cat === CAT_DUP_TRASH ? '废弃桶' : '垃圾桶'
   if (cat === CAT_REVIEW) return '待确认'
   if (isBadDim(cat)) return DIMENSION_LABELS[cat] || '问题图区'
-  return '成品库'
+  return '交付库'
 }
 
 /** 这张落在哪个相册（与短名一致时不重复显示） */
@@ -66,7 +66,7 @@ function catAlbum(cat: string): string {
   return DIMENSION_LABELS[cat as keyof typeof DIMENSION_LABELS] || ''
 }
 
-/** 悬浮说明用的完整说法：如「成品库（多人合照）」 */
+/** 悬浮说明用的完整说法：如「交付库（多人合拍照）」 */
 function catFull(cat: string): string {
   const album = catAlbum(cat)
   return album ? `${catShort(cat)}（${album}）` : catShort(cat)
@@ -77,7 +77,7 @@ function StackCard({ group, onOpen }: { group: Group; onOpen: () => void }): JSX
   const layers = group.arr.slice(0, 4)
   const n = group.arr.length
   const todo = n - group.locked.size
-  // 兜底帧到底在哪个“库”：不能写死成品库（它也可能停在待确认/垃圾桶），取第一张锁定帧的真实短名
+  // 兜底帧到底在哪个“库”：不能写死交付库（它也可能停在待确认/垃圾桶），取第一张锁定帧的真实短名
   const lockedFirst = group.arr.find((i) => group.locked.has(i.id))
   const step = 14
   return (
@@ -296,7 +296,7 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
   const [zoomIdx, setZoomIdx] = useState<number | null>(null)
   // “换一张保留”：待替身选中期间记住哪张锁定帧要被换掉（仅 keep 模式）
   const [swapFrom, setSwapFrom] = useState<number | null>(null)
-  // 硬不变式：每组任何时候至少一张留在成品库。所以“先升后降”——
+  // 硬不变式：每组任何时候至少一张留在交付库。所以“先升后降”——
   // 顶替帧先进库，原兜底帧再退回本组重新由用户决定，中间不会出现一组空库的瞬间。
   const doSwap = (targetId: number): void => {
     const from = swapFrom
@@ -314,7 +314,7 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
     })()
   }
   const toggle = (id: number): void => {
-    // 锁定帧（不在本分类，如成品库里的保留帧）不参与选择，只能看
+    // 锁定帧（不在本分类，如交付库里的保留帧）不参与选择，只能看
     if (group.locked.has(id)) return
     setMarked((prev) => {
       const next = new Set(prev)
@@ -348,7 +348,7 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
   const markAll = (): void => setMarked(new Set(catIds))
   const clearMarks = (): void => setMarked(new Set())
 
-  // 执行“已选”：drop 习惯下已标的是废帧→废弃桶；keep 习惯下已标的是保留帧→成品库
+  // 执行“已选”：drop 习惯下已标的是废帧→废弃桶；keep 习惯下已标的是保留帧→交付库
   const applyMarked = (): void => {
     if (mode === 'keep') {
       if (marked.size) void moveIds([...marked], pickMode === 'drop' ? CAT_DUP_TRASH : CAT_LIBRARY)
@@ -357,7 +357,7 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
     }
     onClose()
   }
-  // 执行“未选”（整组定案快捷键）：drop 习惯下未选=保留→成品库；keep 习惯下未选=废→废弃桶
+  // 执行“未选”（整组定案快捷键）：drop 习惯下未选=保留→交付库；keep 习惯下未选=废→废弃桶
   const applyUnmarked = (): void => {
     if (unmarkedIds.length) void moveIds(unmarkedIds, pickMode === 'drop' ? CAT_LIBRARY : CAT_DUP_TRASH)
     onClose()
@@ -413,12 +413,12 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
             {mode === 'keep' ? (
               <>
                 <div className="mb-1">
-                  说明：<b className="text-fg2">虚线框那张</b>是 AI 默认保留帧，已经在其它分类（正常导出），本弹窗只给你对比、不可点选；其余都是与它重复的多余连拍帧，由你逐张决定去留。不喜欢那张？点它上面的<span className="text-brand font-medium">「🔁 换一张保留」</span>顶一张上去，原那张会回到本组重新决定（否则成品库里这组就只剩它一张）。
+                  说明：<b className="text-fg2">虚线框那张</b>是 AI 默认保留帧，已经在其它分类（正常导出），本弹窗只给你对比、不可点选；其余都是与它重复的多余连拍帧，由你逐张决定去留。不喜欢那张？点它上面的<span className="text-brand font-medium">「🔁 换一张保留」</span>顶一张上去，原那张会回到本组重新决定（否则交付库里这组就只剩它一张）。
                 </div>
                 {pickMode === 'drop' ? (
-                  <>点击不要的照片标<span className="text-bad font-medium">红色（废）</span>，再点取消；<b className="text-fg2">没点过的不算数</b>，会留在重复类里下次接着选。底部两按钮分开执行：<span className="text-bad font-medium">丢弃已选</span>→废弃桶，<span className="text-good font-medium">保留未选</span>→成品库（正常导出）。</>
+                  <>点击不要的照片标<span className="text-bad font-medium">红色（废）</span>，再点取消；<b className="text-fg2">没点过的不算数</b>，会留在重复类里下次接着选。底部两按钮分开执行：<span className="text-bad font-medium">丢弃已选</span>→废弃桶，<span className="text-good font-medium">保留未选</span>→交付库（正常导出）。</>
                 ) : (
-                  <>逐张点击你喜欢的照片标<span className="text-good font-medium">绿色（保留）</span>，再点取消；<b className="text-fg2">没点过的不算数</b>，会留在重复类里下次接着选。底部两按钮分开执行：<span className="text-good font-medium">保留已选</span>→成品库（正常导出），<span className="text-bad font-medium">丢弃未选</span>→废弃桶。</>
+                  <>逐张点击你喜欢的照片标<span className="text-good font-medium">绿色（保留）</span>，再点取消；<b className="text-fg2">没点过的不算数</b>，会留在重复类里下次接着选。底部两按钮分开执行：<span className="text-good font-medium">保留已选</span>→交付库（正常导出），<span className="text-bad font-medium">丢弃未选</span>→废弃桶。</>
                 )}
               </>
             ) : (
@@ -428,7 +428,7 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
           {/* “换一张保留”进行中的顶栏提示：选替身期间点任意一张即完成交换 */}
           {swapFrom !== null && (
             <div className="mb-3 rounded-lg border border-brand/50 bg-brand/10 px-3 py-2 text-sm text-fg flex items-center gap-3 sticky top-0 z-20 shadow">
-              <span>🔁 点下面任意一张顶替【成品库】里那张：新那张进成品库（正常导出），原那张回到本组重新由你决定。</span>
+              <span>🔁 点下面任意一张顶替【交付库】里那张：新那张进交付库（正常导出），原那张回到本组重新由你决定。</span>
               <button className="btn text-xs whitespace-nowrap ml-auto" onClick={() => setSwapFrom(null)}>
                 取消
               </button>
@@ -525,7 +525,7 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
           {mode === 'keep' ? (
             <>
               {pickMode === 'drop' ? (
-                <button className="btn text-xs" onClick={markAll} title="把本组待选的全部标废（只标记、不执行；成品库那张保留帧不受影响）">全标废（只留成品库那张）</button>
+                <button className="btn text-xs" onClick={markAll} title="把本组待选的全部标废（只标记、不执行；交付库那张保留帧不受影响）">全标废（只留交付库那张）</button>
               ) : (
                 <button className="btn text-xs" onClick={markAll} title="把待选的全部标保留（只标记，不执行）">全部标保留</button>
               )}
@@ -541,23 +541,23 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
           <button className="btn" onClick={onClose} title="不执行任何移动，未处理的图留在重复类里">稍后再说</button>
           {mode === 'keep' ? (
             <>
-              {/* 处理未选（整组定案）：drop 习惯下未选=保留→成品库；keep 习惯下未选=废→废弃桶 */}
+              {/* 处理未选（整组定案）：drop 习惯下未选=保留→交付库；keep 习惯下未选=废→废弃桶 */}
               <button
                 className={'text-xs whitespace-nowrap ' + (pickMode === 'drop' ? 'btn-good' : 'btn-danger')}
                 disabled={!unmarkedIds.length}
                 onClick={applyUnmarked}
-                title={pickMode === 'drop' ? '这一组不用再挑了：把没点过的全部移回成品库（正常导出）' : '这一组定案：把没点到的全部移入废弃桶（永不导出）'}
+                title={pickMode === 'drop' ? '这一组不用再挑了：把没点过的全部移回交付库（正常导出）' : '这一组定案：把没点到的全部移入废弃桶（永不导出）'}
               >
-                {pickMode === 'drop' ? `保留未选 ${unmarkedIds.length} 张→成品库` : `丢弃未选 ${unmarkedIds.length} 张→废弃桶`}
+                {pickMode === 'drop' ? `保留未选 ${unmarkedIds.length} 张→交付库` : `丢弃未选 ${unmarkedIds.length} 张→废弃桶`}
               </button>
               {/* 处理已选（主按钮）：只动点过的，没点过的留在重复类 */}
               <button
                 className={pickMode === 'drop' ? 'btn-danger whitespace-nowrap' : 'btn-good whitespace-nowrap'}
                 disabled={!marked.size}
                 onClick={applyMarked}
-                title={pickMode === 'drop' ? '只把标红的移入废弃桶，没点过的不动' : '只把标绿的移回成品库，没点过的不动'}
+                title={pickMode === 'drop' ? '只把标红的移入废弃桶，没点过的不动' : '只把标绿的移回交付库，没点过的不动'}
               >
-                {pickMode === 'drop' ? `丢弃已选 ${marked.size} 张→废弃桶` : `保留已选 ${marked.size} 张→成品库`}
+                {pickMode === 'drop' ? `丢弃已选 ${marked.size} 张→废弃桶` : `保留已选 ${marked.size} 张→交付库`}
               </button>
             </>
           ) : (
@@ -590,23 +590,23 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
             onClick={(e) => e.stopPropagation()}
           >
             <div className="text-lg font-bold text-fg mb-1">👋 第一次整理重复/连拍？两种选图方式随你</div>
-            <div className="text-sm text-fg2 leading-relaxed mb-4">每组最早的那张 AI 已默认放进【成品库】兜底（就算你一张没整理，这组也不会整组漏导），弹窗里会把它用<b className="text-fg2">虚线框</b>一起显示供对比，其余多余连拍帧由你决定。选一次习惯就会永远记住（可随时在顶部切换）：</div>
+            <div className="text-sm text-fg2 leading-relaxed mb-4">每组最早的那张 AI 已默认放进【交付库】兜底（就算你一张没整理，这组也不会整组漏导），弹窗里会把它用<b className="text-fg2">虚线框</b>一起显示供对比，其余多余连拍帧由你决定。选一次习惯就会永远记住（可随时在顶部切换）：</div>
             <div className="grid grid-cols-2 gap-3 mb-4">
               <div className="rounded-lg border border-line bg-panel2 p-3">
                 <div className="text-sm font-bold text-brand mb-1">点选要丢弃的</div>
                 <div className="text-xs text-fg2 leading-relaxed">
-                  点击你不要的照片标<span className="text-bad font-medium">红色（废）</span>，底部<b className="text-fg2">两个按钮分开执行</b>：<span className="text-bad font-medium">丢弃已选</span>→废弃桶，<span className="text-good font-medium">保留未选</span>→成品库。没点过的不算数，下次接着选。
+                  点击你不要的照片标<span className="text-bad font-medium">红色（废）</span>，底部<b className="text-fg2">两个按钮分开执行</b>：<span className="text-bad font-medium">丢弃已选</span>→废弃桶，<span className="text-good font-medium">保留未选</span>→交付库。没点过的不算数，下次接着选。
                 </div>
               </div>
               <div className="rounded-lg border border-line bg-panel2 p-3">
                 <div className="text-sm font-bold text-good mb-1">点选要保留的</div>
                 <div className="text-xs text-fg2 leading-relaxed">
-                  逐张点击你喜欢的照片标<span className="text-good font-medium">绿色（保留）</span>，同样<b className="text-fg2">两个按钮分开执行</b>：<span className="text-good font-medium">保留已选</span>→成品库，<span className="text-bad font-medium">丢弃未选</span>→废弃桶。这一组没挑完可以先关窗，剩下的明天接着挑。
+                  逐张点击你喜欢的照片标<span className="text-good font-medium">绿色（保留）</span>，同样<b className="text-fg2">两个按钮分开执行</b>：<span className="text-good font-medium">保留已选</span>→交付库，<span className="text-bad font-medium">丢弃未选</span>→废弃桶。这一组没挑完可以先关窗，剩下的明天接着挑。
                 </div>
               </div>
             </div>
             <div className="text-xs text-fg3 leading-relaxed mb-4">
-              颜色含义永远一致：<span className="text-good font-medium">绿 = 保留 → 回成品库，正常导出</span>；<span className="text-bad font-medium">红 = 废弃 → 进废弃桶，永不导出</span>；<span className="text-fg2 font-medium">没点过 = 还没决定</span>，留在组里下次接着选；<span className="text-fg2 font-medium">虚线框 = 那张兜底帧</span>（已在成品库，只作对比），<span className="text-brand font-medium">不喜欢它就点「🔁 换一张保留」</span>换一张上去。拿不准就点卡片中间的「放大查看」对比原图再定。
+              颜色含义永远一致：<span className="text-good font-medium">绿 = 保留 → 回交付库，正常导出</span>；<span className="text-bad font-medium">红 = 废弃 → 进废弃桶，永不导出</span>；<span className="text-fg2 font-medium">没点过 = 还没决定</span>，留在组里下次接着选；<span className="text-fg2 font-medium">虚线框 = 那张兜底帧</span>（已在交付库，只作对比），<span className="text-brand font-medium">不喜欢它就点「🔁 换一张保留」</span>换一张上去。拿不准就点卡片中间的「放大查看」对比原图再定。
             </div>
             <button className="btn-primary w-full text-sm" onClick={closeGuide}>知道了，开始使用</button>
           </div>
@@ -617,7 +617,7 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
 }
 
 export default function DuplicateGroupsView({ images, mode }: { images: ImageRecord[]; mode: 'keep' | 'trash' }): JSX.Element {
-  // 整组补全：本分类只装“多余帧”，同组的 AI 默认保留帧还留在成品库等其它分类。
+  // 整组补全：本分类只装“多余帧”，同组的 AI 默认保留帧还留在交付库等其它分类。
   // 按 dup_group 向主进程要回整组成员，否则 2 张的组只显示 1 张（退化成所谓的“未成组”孤帧）。
   const gidsKey = useMemo(
     () => [...new Set(images.map((i) => i.dupGroup).filter((g): g is string => !!g))].join('|'),
@@ -708,8 +708,8 @@ export default function DuplicateGroupsView({ images, mode }: { images: ImageRec
             {/* 收起态只留这一行极简摘要，和标题挤在同一行，不再单独占版面 */}
             {!bannerOpen && (
               <span className="text-fg3">
-                每组最早那张已在<b className="text-fg2">成品库</b>兜底；虚线框=它，<span className="text-brand font-medium">可换一张保留</span>；
-                <span className="text-good font-medium">绿→成品库</span>·<span className="text-bad font-medium">红→废弃桶</span>·没点过的下次接着挑
+                每组最早那张已在<b className="text-fg2">交付库</b>兜底；虚线框=它，<span className="text-brand font-medium">可换一张保留</span>；
+                <span className="text-good font-medium">绿→交付库</span>·<span className="text-bad font-medium">红→废弃桶</span>·没点过的下次接着挑
               </span>
             )}
             {/* 展开/收起紧跟在文字后面，做成带蓝边的实心按钮：挂行尾没人看得见 */}
@@ -729,19 +729,19 @@ export default function DuplicateGroupsView({ images, mode }: { images: ImageRec
           {bannerOpen && (
             <ul className="space-y-1 mt-1.5 leading-relaxed">
               <li>
-                · 每一组连拍/重复，AI 已经先把<b className="text-fg2">最早的那张自动放进【成品库】兜底</b>——你一张都不整理，这组也至少有一张会被导出，<b className="text-fg2">不会整组丢</b>。
+                · 每一组连拍/重复，AI 已经先把<b className="text-fg2">最早的那张自动放进【交付库】兜底</b>——你一张都不整理，这组也至少有一张会被导出，<b className="text-fg2">不会整组丢</b>。
               </li>
               <li>
-                · 所以点开分组会看到一张<span className="text-fg2 font-medium">虚线框、写着「🔒 已在成品库」</span>的：它就是那张兜底帧，在这里只给你对比，不占“待决定”名额。
+                · 所以点开分组会看到一张<span className="text-fg2 font-medium">虚线框、写着「🔒 已在交付库」</span>的：它就是那张兜底帧，在这里只给你对比，不占“待决定”名额。
               </li>
               <li>
-                · <b className="text-fg2">不喜欢 AI 挑的这张？</b>点它上面的<span className="text-brand font-medium">「🔁 换一张保留」</span>，再点任意一张顶上去：新那张进成品库，原那张自动回到本组，跟其它帧一样重新由你决定。
+                · <b className="text-fg2">不喜欢 AI 挑的这张？</b>点它上面的<span className="text-brand font-medium">「🔁 换一张保留」</span>，再点任意一张顶上去：新那张进交付库，原那张自动回到本组，跟其它帧一样重新由你决定。
               </li>
               <li>
-                · 剩下的多余帧由你定：<span className="text-good font-medium">标绿 → 回成品库（一起导出）</span>；<span className="text-bad font-medium">标红 → 进废弃桶（永不导出）</span>；没点过的留在组里，下次接着挑。
+                · 剩下的多余帧由你定：<span className="text-good font-medium">标绿 → 回交付库（一起导出）</span>；<span className="text-bad font-medium">标红 → 进废弃桶（永不导出）</span>；没点过的留在组里，下次接着挑。
               </li>
               <li>
-                · 为什么要有这张兜底：怕你还没整理到这一组就去导出，结果整组一张不剩。真想全清也可以（全标红→废弃桶，随时能恢复），只是那样成品库里这组就没图了。
+                · 为什么要有这张兜底：怕你还没整理到这一组就去导出，结果整组一张不剩。真想全清也可以（全标红→废弃桶，随时能恢复），只是那样交付库里这组就没图了。
               </li>
             </ul>
           )}

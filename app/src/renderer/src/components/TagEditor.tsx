@@ -4,6 +4,8 @@
  * 设计模型：一张图 = 一组标签 + 一个状态分类。
  * 维度分类页是「主分类 ∪ 中/高标签」的并集视图，所以：
  * - 添加标签 = 图同时出现在该维度分类并排到第一张（不是移动，原状态不变）
+ *   例外：人数三分类（单人/多人/无人物）互斥，添加等于替换——旧标签清掉，
+ *   旧标签是主分类时归属一并换过来（否则图会同时留在两个互斥相册），并先弹确认条
  * - 删除标签 = 从该维度分类消失；若图的主分类就是该维度，会连带移出该分类
  * 两者都记一条修正样本喂阈值自学习（删=误判→少标，加=漏检→更早召回）。
  * 支持多选批量：传入多张图时，添加/删除对全部图生效。
@@ -21,13 +23,13 @@ import {
   BAD_DIMENSIONS,
   DIMENSION_LABELS,
   NEUTRAL_DIMENSIONS,
+  PERSON_DIMS,
   isBadDim,
   type DimensionKey,
   type ImageRecord
 } from '../../../shared/types'
 
-/** 人数三维度互斥（一张图只能属于其中之一） */
-const PERSON_DIMS: DimensionKey[] = ['single_person', 'group_photo', 'no_person']
+/** 人数四维度互斥（一张图只能属于其中之一）：互斥表与主进程共用 shared/types 里的 PERSON_DIMS */
 
 /** 可手动添加的维度：重复由重复分组视图管理，不出现在这里 */
 const ADDABLE: DimensionKey[] = [...BAD_DIMENSIONS.filter((d) => d !== 'duplicate'), ...NEUTRAL_DIMENSIONS]
@@ -37,6 +39,38 @@ function shownTags(img: ImageRecord): DimensionKey[] {
   return Object.entries(img.tags || {})
     .filter(([, v]) => v && v.level !== 'low')
     .map(([d]) => d as DimensionKey)
+}
+
+/**
+ * 浏览中的分类若是“可打标维度”（坏维度/人数/黑白，重复除外）→ 返回该维度 = 当前列表的
+ * 锚点标签：图靠它才出现在这个并集视图里，删了图就移出当前分类（TagEditor 据此标定位针 + 二次确认）。
+ * 状态分类（交付库/待确认/垃圾桶/自定义）按主分类字段过滤，删标签不会移出列表 → 返回 null 不标。
+ */
+export function anchorDimOfCategory(category: string | null | undefined): DimensionKey | null {
+  return category && (ADDABLE as string[]).includes(category) ? (category as DimensionKey) : null
+}
+
+/**
+ * 当前分类锚点图标：地图定位针（“你在这里”的通用符号，比图钉📌语义准——
+ * 图钉读作“置顶/固定”，而这里要表达的是“图就定位在这个分类里”）。
+ * 用 SVG 不用 emoji：emoji 自带彩色不随主题，SVG 描维度色与左侧标签色块同源。
+ */
+export function CatPinIcon({ dim, color, className }: { dim?: DimensionKey; color?: string; className?: string }): JSX.Element {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke={color ?? dimTagColor(dim!)}
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
+      <circle cx="12" cy="10" r="3" />
+    </svg>
+  )
 }
 
 interface Row {
@@ -51,12 +85,18 @@ export default function TagEditor({
   imgs,
   anchorDim = null,
   size = 'lg',
-  showReason = true
+  showReason = false
 }: {
   imgs: ImageRecord[]
   /** 当前分类对应的维度：删除它会把图移出当前分类，需二次确认 */
   anchorDim?: DimensionKey | null
   size?: 'sm' | 'lg'
+  /**
+   * 是否展开判定理由长句（“头部贴边出框（右），脸框占图高12%”这类）。**默认不展开**：
+   * 大图右栏、单个图右下角“标签管理”弹窗、底部工具条“批量标签管理”弹窗三个入口都不显示——
+   * 那是给调阈值的人看的，客户与摄影师复审时看不懂也不需要看。理由与置信度照旧写进库里的
+   * tags JSON（跟阈值自学习用的 corrections 一起留着），只是不渲染；要排查时显式传 true 即可恢复。
+   */
   showReason?: boolean
 }): JSX.Element {
   const addTag = useStore((s) => s.addTag)
@@ -64,6 +104,8 @@ export default function TagEditor({
   const tagBusy = useStore((s) => s.tagBusy)
   const [picker, setPicker] = useState(false)
   const [confirmDim, setConfirmDim] = useState<DimensionKey | null>(null)
+  // 待确认的人数替换：点下带 ⇄ 的按钮先落到这里，确认条就在面板底部，不直接写库
+  const [pendingReplace, setPendingReplace] = useState<DimensionKey | null>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const pickerWrapRef = useRef<HTMLDivElement>(null)
   useOutsideClose(picker, () => setPicker(false), pickerWrapRef)
@@ -97,19 +139,44 @@ export default function TagEditor({
   useEffect(() => {
     setPicker(false)
     setConfirmDim(null)
+    setPendingReplace(null)
   }, [ids.join(',')])
 
-  /** 该维度对这批图是否可加：全部已有 → 不可加；人数互斥冲突 → 不可加 */
-  const addState = (dim: DimensionKey): { ok: boolean; why: string; has: number } => {
+  /**
+   * 该维度对这批图是否可加。人数三分类互斥不等于“不能加”，而是“换掉”：
+   * 旧分类的图删掉才能加新分类是死路（删了就离开当前相册，再也找不到入口），
+   * 所以这里把冲突当成一种可执行动作报出去，由确认条承担风险告知。
+   */
+  const addState = (
+    dim: DimensionKey
+  ): { ok: boolean; why: string; has: number; missing: number; replaceCount: number; oldLabels: string } => {
     const has = imgs.length - imgs.filter((i) => !shownTags(i).includes(dim)).length
     const missing = imgs.length - has
-    if (PERSON_DIMS.includes(dim)) {
-      const others = PERSON_DIMS.filter((d) => d !== dim)
-      const hit = imgs.flatMap((i) => shownTags(i)).find((d) => others.includes(d))
-      if (hit) return { ok: false, why: `与「${DIMENSION_LABELS[hit]}」互斥：一张图只能属于一个人数分类`, has }
+    if (!PERSON_DIMS.includes(dim)) {
+      if (!missing) return { ok: false, why: '选中的图都已有该标签', has, missing, replaceCount: 0, oldLabels: '' }
+      return { ok: true, why: `为 ${missing} 张图补上该标签（已有该标签的 ${has} 张跳过）`, has, missing, replaceCount: 0, oldLabels: '' }
     }
-    if (!missing) return { ok: false, why: '选中的图都已有该标签', has }
-    return { ok: true, why: `为 ${missing} 张图补上该标签（已有该标签的 ${has} 张跳过）`, has }
+    // 每张图冲突的旧分类可能不同（批量时既有单人照也有无人物），按维度分别计数
+    const others = PERSON_DIMS.filter((d) => d !== dim)
+    const hits = new Map<DimensionKey, number>()
+    for (const i of imgs) {
+      const o = shownTags(i).find((d) => others.includes(d))
+      if (o) hits.set(o, (hits.get(o) ?? 0) + 1)
+    }
+    const replaceCount = [...hits.values()].reduce((a, b) => a + b, 0)
+    const oldLabels = [...hits.keys()].map((d) => `「${DIMENSION_LABELS[d]}」`).join('、')
+    if (!missing && !replaceCount) return { ok: false, why: '选中的图都已有该标签', has, missing, replaceCount: 0, oldLabels: '' }
+    const parts: string[] = []
+    if (missing) parts.push(`为 ${missing} 张补上`)
+    if (replaceCount) parts.push(`把 ${replaceCount} 张的 ${oldLabels} 换成该标签`)
+    return {
+      ok: true,
+      why: parts.join('，') + (replaceCount ? '（被换的图会离开旧人数相册）' : ''),
+      has,
+      missing,
+      replaceCount,
+      oldLabels
+    }
   }
 
   const big = size === 'lg'
@@ -139,6 +206,16 @@ export default function TagEditor({
               >
                 {DIMENSION_LABELS[r.dim]}
               </span>
+              {/* 定位针：当前分类的锚点标签——图就是靠这个标签才在正在浏览的分类里，删了就移出列表。
+                  以前只有点删除弹确认条才知道这件事，现在提前标在行上（悬停有解释） */}
+              {r.dim === anchorDim && (
+                <span
+                  className="shrink-0 inline-flex items-center"
+                  title={`图就定位在「${DIMENSION_LABELS[r.dim]}」分类里（靠这枚标签）——删除后图将移出当前分类`}
+                >
+                  <CatPinIcon dim={r.dim} className={big ? 'w-4 h-4' : 'w-3 h-3'} />
+                </span>
+              )}
               <div className={'shrink-0 bg-line rounded-full overflow-hidden ' + (big ? 'w-20 h-2' : 'w-12 h-1.5')}>
                 <div className={isBadDim(r.dim) ? 'h-full bg-red-500' : 'h-full bg-blue-500'} style={{ width: `${r.conf * 100}%` }} />
               </div>
@@ -199,15 +276,18 @@ export default function TagEditor({
           (big ? ' !py-2.5 !text-sm' : ' !py-1.5 !text-xs')
         }
         onClick={() => setPicker((v) => !v)}
-        title="AI 漏检的维度手动补上：图会同时出现在该维度分类（不是移动）"
+        title="AI 漏检的维度手动补上：图会同时出现在该维度分类（不是移动）；人数/黑白这类互斥分类已存在的，点面板里带 ⇄ 的那枚就是替换（一次点一枚，先确认）"
       >
-        {picker ? '▴ 收起' : '＋ 添加标签'}
+        {/* 按钮同时露出两个动作（添加/替换）：以前只写“添加标签”，用户找不到“替换”在哪——
+            其实互斥分类的替换就在这个面板里（带 ⇄ 的按钮），现在把入口语义直接写上。
+            图标用 ⇄ 字符不用 emoji：面板里替换按钮用的就是它，两处同一符号才能对上 */}
+        {picker ? '▴ 收起' : '＋ 添加标签 ｜ ⇄ 替换标签'}
       </button>
       {picker && (
         <div className="rounded-lg border border-line bg-panel2 p-2.5 mt-2">
           <div className="text-fg2 text-xs mb-2">
             添加到{multi ? `全部 ${imgs.length} 张选中图` : '这张图'}——图同时出现在该维度分类并排到第一张，
-            <span className="text-fg">它当前所属分类不变</span>：
+            <span className="text-fg">它当前所属分类不变</span>（人数三个分类例外：只能留一个，带 ⇄ 的就是替换）：
           </div>
           <div className="grid gap-1.5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(104px, 1fr))' }}>
             {ADDABLE.map((d) => {
@@ -230,17 +310,57 @@ export default function TagEditor({
                   title={st.why}
                   onClick={() => {
                     if (!st.ok) return
+                    // 人数替换会连带把图送出旧相册，且标签操作不在 ↩ 撤回栈里，先确认再写
+                    if (st.replaceCount) {
+                      setPendingReplace(d)
+                      return
+                    }
+                    setPendingReplace(null)
                     void addTag(ids, d)
                   }}
                 >
                   <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: c }} />
                   {DIMENSION_LABELS[d]}
+                  {st.replaceCount > 0 && <span className="opacity-90">⇄</span>}
                   {!st.ok && st.has > 0 && <span className="opacity-70">✓</span>}
                 </button>
               )
             })}
           </div>
-          <div className="text-[11px] text-fg2 mt-2">彩色 = 可添加；灰显 = 已有该标签（✓）或与现有人数分类互斥</div>
+          {pendingReplace &&
+            (() => {
+              const st = addState(pendingReplace)
+              if (!st.replaceCount) return null
+              return (
+                <div className="mt-2 rounded-md border border-warn/50 bg-warn/10 px-2.5 py-2 text-xs text-warn">
+                  <div>
+                    人数分类只能留一个：这 {st.replaceCount} 张会从 {st.oldLabels} 改成「{DIMENSION_LABELS[pendingReplace]}」，
+                    改完它们就离开 {st.oldLabels} 相册
+                    {st.missing ? `（另外 ${st.missing} 张是纯新增，不受影响）` : ''}。标签操作不能用顶栏 ↩ 撤回，只能再改回去。
+                  </div>
+                  {/* 说明占满一行，两个按钮单独一行右对齐：以前 flex-wrap 让“取消”被挤到
+                      第三行左对齐，读起来像两个按钮各管一摊 */}
+                  <div className="mt-2 flex items-center justify-end gap-2">
+                    <button
+                      className="btn !py-1 !text-xs bg-good/15 border-good/50 text-good"
+                      disabled={!!tagBusy}
+                      onClick={() => {
+                        void addTag(ids, pendingReplace)
+                        setPendingReplace(null)
+                      }}
+                    >
+                      确认替换
+                    </button>
+                    <button className="btn !py-1 !text-xs" onClick={() => setPendingReplace(null)}>
+                      取消
+                    </button>
+                  </div>
+                </div>
+              )
+            })()}
+          <div className="text-[11px] text-fg2 mt-2">
+            彩色 = 可添加；带 ⇄ = 会替换掉现有的人数标签（点一下先问确认）；灰显✓ = 已有该标签
+          </div>
         </div>
       )}
       </div>
@@ -249,7 +369,7 @@ export default function TagEditor({
 }
 
 /**
- * 列表端标签管理器：网格/列表/瀑布流/大图卡片上的 🏷 按钮打开，
+ * 列表端标签管理器：网格/列表/瀑布流卡片上的 🏷 按钮打开，
  * 不必进大图右侧栏也能给单张或多张图增删标签。
  * 取数双轨：优先用 store.images（带乐观更新，所以标签秒变），
  * 并用 getImage 逐张兑底权威值——删掉主分类标签后图已离开当前分类列表，
@@ -289,12 +409,12 @@ export function TagManagerModal(): JSX.Element | null {
     .map((id) => images.find((i) => i.id === id) ?? byId[id])
     .filter(Boolean) as ImageRecord[]
   if (!imgs.length) return null
-  const anchorDim = activeCategory && (ADDABLE as string[]).includes(activeCategory) ? (activeCategory as DimensionKey) : null
+  const anchorDim = anchorDimOfCategory(activeCategory)
   const catName = (c: string): string =>
     c.startsWith('custom:')
       ? customCategories.find((x) => `custom:${x.id}` === c)?.name ?? c
       : DIMENSION_LABELS[c as keyof typeof DIMENSION_LABELS] ??
-        ({ library: '成品库', review: '待确认', trash: '垃圾桶', dup_trash: '重复/连拍-废弃' } as Record<string, string>)[c] ??
+        ({ library: '交付库', review: '待确认', trash: '垃圾桶', dup_trash: '重复/连拍-废弃' } as Record<string, string>)[c] ??
         c
 
   return (
@@ -321,8 +441,18 @@ export function TagManagerModal(): JSX.Element | null {
               {imgs.length > 1 && <span className="text-fg2">· 增删标签对全部选中图生效</span>}
             </div>
           </div>
-          <button className="btn-ghost text-fg3 text-sm shrink-0 hover:text-fg" onClick={closeTagManager} title="关闭（Esc）">
-            ✕
+          {/* 关闭按钮：以前是一枚 text-fg3 的淡灰小✕（无尺寸无底色，用户反馈“太小不明显”），
+              改成 36×36 带边框底色的按钮，悬停转红白——一眼看见、好点，红色也符合“关闭/退出”预期。
+              图标用 SVG 描边而非✕字符：字符在不同字体下粗细/居中不一致，SVG 线条干净且真正居中 */}
+          <button
+            className="shrink-0 grid place-items-center w-9 h-9 rounded-lg border border-line bg-panel2 text-fg2 hover:bg-bad hover:border-bad hover:text-white transition-colors cursor-pointer"
+            onClick={closeTagManager}
+            title="关闭（Esc）"
+            aria-label="关闭"
+          >
+            <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" aria-hidden="true">
+              <path d="M6 6l12 12M18 6 6 18" />
+            </svg>
           </button>
         </div>
 
@@ -330,7 +460,6 @@ export function TagManagerModal(): JSX.Element | null {
         <div className="px-4 pt-3">
           <div className="text-xs text-fg3 mb-2 flex items-center gap-1.5">
             <span className="uppercase tracking-wide">AI 标记的标签</span>
-            <span className="text-fg2">（标错的删掉，每次删除都记为一次误判样本）</span>
           </div>
         </div>
         <div className="px-4">
@@ -340,7 +469,7 @@ export function TagManagerModal(): JSX.Element | null {
         {/* 脚注 */}
         <div className="px-4 py-3 mt-2 border-t border-line text-[11px] text-fg3 leading-relaxed">
           添加标签 → 图同时出现在该维度分类的第一张（不是移动，原分类不变）；删除标签 → 从该维度分类消失，
-          若它本来就归在该分类下则一并移出。两种操作都会记为修正样本，累计后自动微调该维度阈值。
+          若它本来就归在该分类下则一并移出。
         </div>
       </div>
     </div>

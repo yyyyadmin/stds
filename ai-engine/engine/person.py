@@ -94,6 +94,123 @@ def _box_inter(a, b):
     return ix * iy
 
 
+def face_pose(f):
+    """用五点关键点算尺度不变的两个姿态比，返回 (yaw, pitch)；关键点不够或双眼重合时返回 None。
+    - 偏航 yaw = |鼻尖x - 眼中点x| / 眼距：正脸≈0，明显侧脸 >0.30
+    - 俯角 pitch = (鼻尖y - 眼中点y) / 脸框高：正脸≈0.12~0.35，低头时鼻尖压向眼睛 <0.06
+    frontal_faces 与 posed_group 共用，避免同一套几何在两处各算一遍、阈值飘移。"""
+    lm = f.get("landmarks5")
+    x, y, w, h = f["box"]
+    if not lm or len(lm) < 3 or h < 1:
+        return None
+    le, re, nose = lm[0], lm[1], lm[2]
+    eye_dist = abs(re[0] - le[0])
+    if eye_dist < max(2.0, w * 0.12):
+        return None
+    yaw = abs(nose[0] - (le[0] + re[0]) / 2.0) / eye_dist
+    pitch = (nose[1] - (le[1] + re[1]) / 2.0) / h
+    return yaw, pitch
+
+
+def frontal_faces(faces, img_h):
+    """从人脸检出结果里筛“正面主体”（用户拍板 2026-10-11 的新口径）：
+    人数只数正面露脸的人——后脑勺/半截身/虚焦前景/低头侧脸都算“在场”
+    但不进人数。判据：
+    - 脸占图高 <3%：关键点不可靠，不算主体（仍算在场）；脸框贴顶：头部不完整（半截头）不算
+    - 姿态比见 face_pose：yaw ≤ 0.30 且 pitch ≥ 0.06
+    返回原 face dict 的子集列表，不改任何字段。"""
+    out = []
+    if img_h <= 0:
+        return out
+    for f in faces or []:
+        x, y, w, h = f["box"]
+        if h / float(img_h) < 0.03 or y < 0.005 * img_h:
+            continue
+        pose = face_pose(f)
+        if pose is None:
+            continue
+        if pose[0] <= 0.30 and pose[1] >= 0.06:
+            out.append(f)
+    return out
+
+
+# 规整摆拍主群的五道几何闸（阈值按用户真实婚礼样图反推）。它们是冻结引擎里的码内常量，
+# 改动必须重建引擎并全库重筛才生效；reason 里会带出“未通过哪一道闸”，
+# 校准时直接按它统计各闸的拦截量就知道该松哪一道，不必猜。
+POSED_H_RATIO = 2.0     # 1 同纵深：簇内最大脸高 / 最小脸高
+POSED_ROW_STD = 0.85    # 2 成一排：脸中心 y 标准差 / 平均脸高
+POSED_GAP_RATIO = 1.3   # 3 紧挨着：按 x 排序后最大净间距 / 平均脸宽
+POSED_MAX_YAW = 0.24    # 4 共同面向：簇内最大 yaw（比正面主体闸 0.30 更严——看镜头是摆拍的强信号）
+POSED_DOMINANT = 0.55   # 5 主群即主体：簇内最大脸高 / 全图最大脸高
+
+
+def posed_group(frontal, img_w, img_h):
+    """在“≥2 个正面主体”的前提下，回答“这是不是一张摆拍合影”。
+    用户拍板 2026-10-11：合影 = 人人在同一纵深平面、横向并排紧贴、共同面向镜头（沙发全家福、
+    伴娘团、双人摆拍）；接亲/做游戏那种人物扎堆、前后多层、各干各的 = 多人混合照。
+
+    先选“同纵深主群”：以每张脸为种子，取脸高落在种子 0.5~2 倍内的同伴数，选同伴最多的那簇。
+    这样“后排一排伴娘”不会被前排一张虚焦大脸带偏（巨脸零同伴，当不了种子）。
+    然后这簇要五道闸全过才算合影，任一不过返回未通过的闸名（写进 reason 供下轮校准量化）。
+    返回 (is_posed, 主群人数, 未通过的闸名列表)。"""
+    if len(frontal or []) < 2 or img_w <= 0 or img_h <= 0:
+        return False, 0, ["正面主体不足2"]
+    hs = [float(f["box"][3]) for f in frontal]
+    best = []
+    for i in range(len(frontal)):
+        if hs[i] <= 0:
+            continue
+        peers = [j for j in range(len(frontal)) if 0.5 <= hs[j] / hs[i] <= 2.0]
+        if len(peers) > len(best):
+            best = peers
+    group = [frontal[j] for j in best]
+    if len(group) < 2:
+        return False, len(group), ["无同纵深主群"]
+
+    gh = [float(f["box"][3]) for f in group]
+    gw = [float(f["box"][2]) for f in group]
+    cx = [f["box"][0] + f["box"][2] / 2.0 for f in group]
+    cy = [f["box"][1] + f["box"][3] / 2.0 for f in group]
+    mean_h = sum(gh) / len(gh)
+    mean_w = sum(gw) / len(gw)
+    fails = []
+    if max(gh) / max(1e-6, min(gh)) > POSED_H_RATIO:
+        fails.append("纵深差异大")
+    cy_mean = sum(cy) / len(cy)
+    cy_std = (sum((v - cy_mean) ** 2 for v in cy) / len(cy)) ** 0.5
+    if cy_std / max(1e-6, mean_h) > POSED_ROW_STD:
+        fails.append("不在一排")
+    order = sorted(range(len(group)), key=lambda k: cx[k])
+    xs = [cx[k] for k in order]
+    ws = [gw[k] for k in order]
+    if len(xs) > 1:
+        gap = max((xs[k + 1] - xs[k]) - (ws[k] + ws[k + 1]) / 2.0 for k in range(len(xs) - 1))
+        if gap / max(1e-6, mean_w) > POSED_GAP_RATIO:
+            fails.append("人物散落不成群")
+    yaws = []
+    for f in group:
+        p = face_pose(f)
+        if p is not None:
+            yaws.append(p[0])
+    if yaws and max(yaws) > POSED_MAX_YAW:
+        fails.append("未共同面向镜头")
+    if max(gh) / max(1e-6, max(hs)) < POSED_DOMINANT:
+        fails.append("画面主体在簇外")
+    return (not fails), len(group), fails
+
+
+def body_has_face(body, faces):
+    """正面脸是否属于这个人体框：脸中心落在框内（垂直允许在框上方一张脸的高度——
+    头常常在人体框外），且不超过框顶往下 70%（脸不会在膝盖以下）。"""
+    bx, by, bw, bh = body["box"]
+    for f in faces:
+        fx, fy, fw, fh = f["box"]
+        cx, cy = fx + fw / 2.0, fy + fh / 2.0
+        if bx <= cx <= bx + bw and by - fh <= cy <= by + bh * 0.7:
+            return True
+    return False
+
+
 def merge_overlaps(bodies):
     """把同一个人被拆开的框合并（礼服/局部遮挡/上下半身双框）：IoU≥0.4 或
     包含度（交集/较小框面积）≥0.65 视为同一人，贪心保留大框。

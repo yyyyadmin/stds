@@ -1,10 +1,11 @@
 /**
  * 多选浮动操作栏（第九章 9.3）：选中后底部浮出
  * - "已选中 N 张" + 取消选择 / 反选 / 全选
- * - 移动到：只负责状态分类（成品库/待确认/自定义/垃圾桶），维度归类交给🏷 标签管理器
- * - 垃圾桶：单选（1 张）直接移；多选（≥2 张）弹确认框（与大图模式同语义），防批量误废
+ * - 移动到：只负责状态分类（交付库/待确认/自定义/垃圾桶），维度归类交给🏷 标签管理器
+ * - 垃圾桶：单选（1 张）直接移；多选（≥2 张）弹确认框（与放大弹窗同语义），防批量误废
  * - 🏷 标签：对全部选中图批量增删标签（加标签=同时出现在该维度分类，不是移动）
- * - 待确认区快捷操作："确认好图"（进成品库）/ "确认坏图"（移入命中的维度/垃圾桶）
+ * - 待确认区快捷操作："确认好图"（进交付库）/ "确认坏图"（移入命中的维度/垃圾桶）
+ *   其中“进交付库”不限待确认页——在任意坏图分类里判图合格都是最高频动作，常驻（垃圾桶/重复废弃桶除外，那里已有“还原”）
  * - 物理移动开关 + 快捷键提示
  */
 import { useEffect, useRef, useState } from 'react'
@@ -15,13 +16,13 @@ import {
   CAT_LIBRARY,
   CAT_REVIEW,
   CAT_TRASH,
+  CAT_DUP_TRASH,
   DIMENSION_LABELS
 } from '../../../shared/types'
 
 export default function SelectionBar(): JSX.Element | null {
   const selection = useStore((s) => s.selection)
   const activeCategory = useStore((s) => s.activeCategory)
-  const viewMode = useStore((s) => s.viewMode)
   const previewId = useStore((s) => s.previewId)
   const images = useStore((s) => s.images)
   const customCategories = useStore((s) => s.customCategories)
@@ -49,10 +50,11 @@ export default function SelectionBar(): JSX.Element | null {
     if (trashAsk && selection.size < 2) dismissTrashAsk()
   }, [trashAsk, selection.size, dismissTrashAsk])
 
-  // 大图模式／放大弹窗自带判定工具栏，不重复显示此浮动条
-  if (!selection.size || viewMode === 'large' || previewId != null) return null
+  // 放大弹窗自带判定工具栏，不重复显示此浮动条（以前还有个大图视图也走这个判断，那个视图已下线）
+  if (!selection.size || previewId != null) return null
   const n = selection.size
   const inTrash = activeCategory === CAT_TRASH
+  const inDupTrash = activeCategory === CAT_DUP_TRASH
   const inReview = activeCategory === CAT_REVIEW
   const allSelected = n === images.length && images.length > 0
   // "确认坏图"：把选中图各自的中置信度维度聚合，取出现最多的维度作为目标分类（无则垃圾桶）
@@ -82,7 +84,7 @@ export default function SelectionBar(): JSX.Element | null {
         </button>
 
         {inTrash ? (
-          <button className="btn" onClick={() => void useStore.getState().restoreFromTrash()} title="从垃圾桶还原回成品库">
+          <button className="btn" onClick={() => void useStore.getState().restoreFromTrash()} title="从垃圾桶还原回交付库">
             ♻️ 还原
           </button>
         ) : (
@@ -94,12 +96,12 @@ export default function SelectionBar(): JSX.Element | null {
             >
               🗑 垃圾桶
             </button>
-            {/* 多选确认框：向上升起在工具栏上方，文案与大图模式垃圾桶确认一致 */}
+            {/* 多选确认框：向上升起在工具栏上方，文案与放大弹窗的垃圾桶确认一致 */}
             {trashAsk && (
               <div ref={trashPanelRef} className="absolute bottom-full mb-2 left-0 w-[340px] bg-panel border border-line rounded-lg shadow-2xl p-3 z-40 fade-in">
                 <div className="text-sm font-bold text-fg mb-1.5">确定把这 {selection.size} 张图移入垃圾桶？</div>
                 <div className="text-xs text-fg2 leading-relaxed mb-2.5">
-                  标签全部保留作为废弃原因；图会从成品库/待确认/自定义和所有维度分类视图消失，只出现在垃圾桶里，可随时还原。
+                  标签全部保留作为废弃原因；图会从交付库/待确认/自定义和所有维度分类视图消失，只出现在垃圾桶里，可随时还原。
                 </div>
                 <div className="flex gap-2">
                   <button className="btn-danger flex-1 text-xs" onClick={confirmTrashAsk}>确认移入垃圾桶</button>
@@ -110,15 +112,19 @@ export default function SelectionBar(): JSX.Element | null {
           </div>
         )}
 
+        {/* “判合格→交付库”常驻：以前只在待确认页有，在闭眼/模糊等坏图页判误判只能展开“移动到”两跳。
+            垃圾桶与重复废弃桶不显（那里已有♻️ 还原）、交付库页本身不显（图已在此） */}
+        {!inTrash && !inDupTrash && activeCategory !== CAT_LIBRARY && (
+          <button
+            className="btn bg-emerald-700 hover:bg-emerald-600 text-white border-transparent"
+            onClick={() => void moveTo(CAT_LIBRARY)}
+            title={inReview ? '确认是好图 → 移入【交付库】（可导出、不进坏图分类）' : '确认合格 → 移入【交付库】（= 移动到 → 交付库，只清除缺陷类标签，人数与黑白照标签保留，可导出）'}
+          >
+            {inReview ? '✓ 好图 → 交付库' : '✓ 合格 → 交付库'}
+          </button>
+        )}
         {inReview && (
           <>
-            <button
-              className="btn bg-emerald-700 hover:bg-emerald-600 text-white border-transparent"
-              onClick={() => void moveTo(CAT_LIBRARY)}
-              title="确认是好图 → 移入【成品库】（可导出、不进坏图分类）"
-            >
-              ✓ 好图 → 成品库
-            </button>
             <button
               className="btn bg-orange-700 hover:bg-orange-600 text-white border-transparent"
               onClick={() => void moveTo(reviewDim || CAT_TRASH)}
@@ -141,10 +147,10 @@ export default function SelectionBar(): JSX.Element | null {
             <div className="absolute bottom-full mb-2 right-0 w-80 max-h-[70vh] overflow-y-auto bg-panel border border-line rounded-lg shadow-2xl p-2 grid grid-cols-3 gap-1 text-xs fade-in z-40">
               <div className="col-span-3 text-gray-500">状态分类（维度归类请用🏷 标签）：</div>
               <button className="btn col-span-3 bg-good/20 border-good/50 text-good" onClick={() => { void moveTo(CAT_LIBRARY, physical); setPanel(false) }}>
-                成品库（正常图片，同时清除所有坏维度标签）
+                交付库（正常图片，同时清除缺陷类标签）
               </button>
               <button className="btn col-span-3 bg-warn/20 border-warn/50 text-warn" onClick={() => { void moveTo(CAT_REVIEW, physical); setPanel(false) }}>
-                待确认（同时清除所有坏维度标签）
+                待确认（同时清除缺陷类标签）
               </button>
               {customCategories.length > 0 && <div className="col-span-3 text-gray-500 mt-1">自定义：</div>}
               {customCategories.map((c) => (
@@ -165,13 +171,15 @@ export default function SelectionBar(): JSX.Element | null {
           )}
         </div>
 
-        {/* 批量判定：对选中所有图记录修正学习（与大图/弹窗 JudgmentBar 同源） */}
+        {/* 批量判定：对选中所有图记录修正学习（与放大弹窗的 JudgmentBar 同源）。
+            文案与弹窗一致带上“仅记录”，因为待确认页旁边就是“✓ 好图 → 交付库”，两个都叫
+            “确认”会让人以为点这个也算放行 */}
         <button
           className="btn bg-emerald-700 hover:bg-emerald-600 text-white border-transparent text-xs whitespace-nowrap"
           onClick={() => void correctBatch([...selection], 'correct')}
-          title="确认选中图的 AI 判定正确，记录用于阈值微调"
+          title="确认选中图的 AI 判定正确，仅记录一条“判对”样本用于阈值微调：图片不移动、不改归属、不清标签（待确认的图仍留在待确认，要放行请用左边的 ✓ 好图 → 交付库）"
         >
-          此判定正确
+          此判定正确（仅记录）
         </button>
         <button
           className="btn bg-orange-500 hover:bg-orange-600 text-white border-transparent text-xs whitespace-nowrap font-medium"

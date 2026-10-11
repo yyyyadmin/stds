@@ -1,8 +1,9 @@
 /**
  * 大图预览层（9.2 + 第五章）
  * - 滚轮缩放 / 拖拽平移 / 双击复位 / ←→切换 / ESC 关闭
- * - AI 标记依据叠加：人脸框、关键点、标签与置信度、判定理由
- * - 一键修正："此判定正确 / 此判定错误"；错误时弹出目标选择面板
+ * - AI 标记叠加（人脸框/关键点）：默认关，点顶部「标记叠加」才开；判定理由长句只写库不渲染（showReason 默认关）
+ * - 一键修正："✓ 合格 → 交付库 / 此判定正确（仅记录）"；原"此判定错误"已下线（与标签增删、移动到重叠），
+ *   换分类用「移动到」/拖侧栏，换维度归属用标签管理（两条路径都会写学习样本）
  * - 原图对比切换
  * - 布局：左缩略列 + 中画布 + 右判定信息/工具列（三栏并排常驻）
  */
@@ -10,13 +11,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { toSrc, useBigSrc, Spinner } from './imageSrc'
 import JudgmentBar from './JudgmentBar'
-import TagEditor from './TagEditor'
+import TagEditor, { anchorDimOfCategory, CatPinIcon } from './TagEditor'
 import {
   CAT_REVIEW,
   CAT_TRASH,
   DIMENSION_LABELS,
   isBadDim,
-  type DimensionKey
+  type DimensionKey,
+  type FaceInfo
 } from '../../../shared/types'
 
 interface Transform {
@@ -28,6 +30,7 @@ interface Transform {
 export default function PreviewModal(): JSX.Element | null {
   const previewId = useStore((s) => s.previewId)
   const images = useStore((s) => s.images)
+  const activeCategory = useStore((s) => s.activeCategory)
   const closePreview = useStore((s) => s.closePreview)
   const stepPreview = useStore((s) => s.stepPreview)
   const openPreview = useStore((s) => s.openPreview)
@@ -67,9 +70,23 @@ export default function PreviewModal(): JSX.Element | null {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [images, previewId])
 
-  // 切换图片时左侧缩略列表跟随滚动
+  // 切换图片时左侧缩略列表跟随滚动：必须居中。用 'nearest' 的语义是“已经在可视区就不滚”，
+  // 于是连着按 → 时当前图会一路贴在列表最下面那张，正好看不到“下一张”预览
   useEffect(() => {
-    activeThumbRef.current?.scrollIntoView({ block: 'nearest' })
+    activeThumbRef.current?.scrollIntoView({ block: 'center' })
+  }, [previewId])
+
+  // 列表记录已瘦身不带 details（人脸框/关键点），只有这里的人脸叠加需要——按 previewId 单张取全量记录（一次 IPC，代价可忽略）
+  const [lazyFaces, setLazyFaces] = useState<FaceInfo[]>([])
+  useEffect(() => {
+    if (previewId == null) return
+    let alive = true
+    void window.api.getImage(previewId).then((r) => {
+      if (alive) setLazyFaces((r?.details?.faces || []).filter((f) => f && f.box))
+    })
+    return () => {
+      alive = false
+    }
   }, [previewId])
 
   const reset = useCallback(() => setT({ scale: 1, x: 0, y: 0 }), [])
@@ -118,11 +135,11 @@ export default function PreviewModal(): JSX.Element | null {
 
   if (!img) return null
 
-  // 当前 AI 判定（右侧信息列顶部显示）
+  // 当前 AI 判定（右边信息列顶部）：只报维度名，不带置信度小数——
+  // “0.91”对判片没有信息量（分数高低不代表该不该留），卡片芯片上已有百分比。
   const primaryDim = isBadDim(img.category) ? (img.category as DimensionKey) : null
-  const primaryTag = primaryDim ? img.tags[primaryDim] : null
   const src = compareOriginal ? big.src : img.thumb ? toSrc(img.thumb) : big.src
-  const faces = (img.details?.faces || []).filter((f) => f && f.box)
+  const faces = lazyFaces
 
   return (
     <div className="fixed inset-0 z-40 bg-black/85 flex flex-col fade-in" onClick={(e) => e.target === e.currentTarget && closePreview()}>
@@ -167,17 +184,26 @@ export default function PreviewModal(): JSX.Element | null {
           onWheel={(e) => e.stopPropagation()}
         >
           {images.map((im) => (
-            <div
-              key={im.id}
-              ref={im.id === img.id ? activeThumbRef : undefined}
-              className={
-                'shrink-0 aspect-square rounded overflow-hidden border cursor-pointer ' +
-                (im.id === img.id ? 'border-brand ring-2 ring-brand/60' : 'border-white/20 hover:border-white/70')
-              }
-              onClick={() => openPreview(im.id)}
-              title={im.filename}
-            >
-              <img src={im.thumb ? toSrc(im.thumb) : toSrc(im.path)} loading="lazy" className="w-full h-full object-cover" alt="" draggable={false} />
+            <div key={im.id} className="relative shrink-0 pr-2.5">
+              <div
+                ref={im.id === img.id ? activeThumbRef : undefined}
+                className={
+                  'aspect-square rounded overflow-hidden border cursor-pointer ' +
+                  (im.id === img.id ? 'border-white ring-2 ring-white/60' : 'border-white/20 hover:border-white/70')
+                }
+                onClick={() => openPreview(im.id)}
+                title={im.filename}
+              >
+                <img src={im.thumb ? toSrc(im.thumb) : toSrc(im.path)} loading="lazy" className="w-full h-full object-cover" alt="" draggable={false} />
+              </div>
+              {/* 当前图指针：右侧留出的窄栏里放一个左指白三角，尖端指向选中缩略图。
+                  光靠白框在整列都偏亮时不够醒目，三角能一眼定位“现在看的是哪张”；
+                  SVG 而不是字符（◀ 会被 Segoe UI Symbol 渲染出自带灰度，也不随主题） */}
+              {im.id === img.id && (
+                <svg viewBox="0 0 8 12" className="absolute right-0.5 top-1/2 -translate-y-1/2 w-2 h-3 text-white pointer-events-none" fill="currentColor" aria-hidden="true">
+                  <path d="M8 0 0 6 8 12Z" />
+                </svg>
+              )}
             </div>
           ))}
         </aside>
@@ -225,37 +251,55 @@ export default function PreviewModal(): JSX.Element | null {
           {Math.abs(t.scale - 1) > 0.01 && (
             <span className="absolute top-2 left-2 chip bg-black/60 text-white/80">{(t.scale * 100).toFixed(0)}%</span>
           )}
-          {/* 左右切换（画布内侧，不压住左右两列） */}
-          <button className="absolute left-3 top-1/2 -translate-y-1/2 w-14 h-14 rounded-full bg-black/40 hover:bg-black/70 text-white text-4xl flex items-center justify-center transition-colors" onClick={() => stepPreview(-1)} title="上一张（←）">‹</button>
-          <button className="absolute right-3 top-1/2 -translate-y-1/2 w-14 h-14 rounded-full bg-black/40 hover:bg-black/70 text-white text-4xl flex items-center justify-center transition-colors" onClick={() => stepPreview(1)} title="下一张（→）">›</button>
+          {/* 左右切换（画布内侧，不压住左右两列）：箭头用 SVG 而不是 ‹› 字符——
+              字符在 flex 居中时受字体基线影响会视觉上偏上，而且 text-4xl 的 ‹ 实际笔画很小；
+              SVG 36px 画在 56px 黑圈内，箭头本身放大且真正上下居中（黑圈尺寸不变） */}
+          <button className="absolute left-3 top-1/2 -translate-y-1/2 w-14 h-14 rounded-full bg-black/40 hover:bg-black/70 text-white flex items-center justify-center transition-colors" onClick={() => stepPreview(-1)} title="上一张（←）">
+            <svg viewBox="0 0 24 24" className="w-9 h-9" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M15 4.5 7.5 12 15 19.5" /></svg>
+          </button>
+          <button className="absolute right-3 top-1/2 -translate-y-1/2 w-14 h-14 rounded-full bg-black/40 hover:bg-black/70 text-white flex items-center justify-center transition-colors" onClick={() => stepPreview(1)} title="下一张（→）">
+            <svg viewBox="0 0 24 24" className="w-9 h-9" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 4.5 16.5 12 9 19.5" /></svg>
+          </button>
         </div>
 
-        {/* 右侧：AI 判定依据 + 标签增删 + 判定工具栏（400px，大字号） */}
-        <aside className="w-[400px] shrink-0 overflow-y-auto rounded-lg bg-black/60 border border-white/10 p-4 flex flex-col gap-4">
+        {/* 右侧：当前主判定 + 标签增删 + 判定工具栏（370px，大字号） */}
+        <aside className="w-[370px] shrink-0 overflow-y-auto rounded-lg bg-black/60 border border-white/10 p-4 flex flex-col gap-4">
           <div className="text-lg text-white/90 flex flex-wrap items-center gap-2">
             当前 AI 判定：
             {primaryDim ? (
-              <span className="chip bg-bad/90 text-white !text-base">{DIMENSION_LABELS[primaryDim]} {(primaryTag?.confidence ?? 0).toFixed(2)}</span>
+              <span className="chip bg-bad/90 text-white !text-base">{DIMENSION_LABELS[primaryDim]}</span>
             ) : img.category === CAT_TRASH ? (
               <span className="chip bg-white/15 text-white/80 !text-base">垃圾桶（手动标记）</span>
             ) : img.category === CAT_REVIEW ? (
               <span className="chip bg-warn/90 text-black !text-base">待确认（中置信度）</span>
             ) : (
-              <span className="chip bg-good/90 text-white !text-base">正常（成品库）</span>
+              <span className="chip bg-good/90 text-white !text-base">正常（交付库）</span>
             )}
             {img.categoryBy === 'user' && <span className="text-xs text-white/50">（用户修正过）</span>}
           </div>
 
-          {/* 标签：✖ 删除单个标签 / ＋ 添加漏检标签（人数互斥、已有置灰） */}
-          <div className="text-sm text-white/70">AI 检测标签（觉得不对可直接删，漏了可加）：</div>
-          <TagEditor imgs={[img]} anchorDim={primaryDim} size="lg" />
+          {/* 标签：✖ 删除单个标签 / ＋ 添加漏检标签（人数三分类互斥→添加即替换，已有才置灰）
+              判定详情（“脸框占图高12%”这类长句）不给复审的人看，TagEditor 已把 showReason 默认关掉，
+              三个入口（大图右栏 / 单个标签弹窗 / 批量标签弹窗）一并收掉；理由照旧存在 tags 里。
+              定位针锚点取“正在浏览的分类”而非图的主分类：并集视图里图可能主分类是待确认、
+              靠“闭眼”标签才在当前列表——用主分类当锚点会漏标（删了图直接移出列表却没提示） */}
+          <div className="text-sm text-white/70 flex flex-wrap items-center gap-1.5">
+            <span>AI 检测标签（觉得不对可直接删，漏了可加；</span>
+            <CatPinIcon color="rgb(255 255 255 / 0.85)" className="w-3.5 h-3.5 shrink-0" />
+            <span>= 当前分类的标签，删了图会移出此分类）：</span>
+          </div>
+          <TagEditor imgs={[img]} anchorDim={anchorDimOfCategory(activeCategory) ?? primaryDim} size="lg" />
 
           {/* 判定操作工具栏：紧跟标签信息下方，2×2 大按钮 */}
           <div className="pt-3 border-t border-white/10 flex flex-col gap-2">
-            <JudgmentBar img={img} layout="grid" size="lg" showTagButton={false} />
-            <div className="text-[10px] text-white/40">
-              高亮阈值：高 &gt;{settings.highThreshold} · 中 {settings.midThreshold}-{settings.highThreshold} · 低 &lt;{settings.midThreshold}
-            </div>
+            <JudgmentBar img={img} size="lg" showTagButton={false} />
+            {/* 叠加图例只在开了标记叠加时才出现：它解释的是人脸框颜色对应的置信度区间，
+                叠加关着时摆这么一行阈值公式纯属噪声（而且只有调参数的人看得懂） */}
+            {showOverlay && (
+              <div className="text-[10px] text-white/40">
+                高亮阈值：高 &gt;{settings.highThreshold} · 中 {settings.midThreshold}-{settings.highThreshold} · 低 &lt;{settings.midThreshold}
+              </div>
+            )}
           </div>
         </aside>
       </div>

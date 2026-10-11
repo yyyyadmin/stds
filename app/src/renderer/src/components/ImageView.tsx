@@ -1,30 +1,62 @@
 /**
- * 多视图（9.2）：网格(160px 4-6列自适应) / 列表(80px) / 瀑布流(保留比例) / 大图(主区+底部缩略条)
- * 缩略图带 AI 标签 + 置信度分数；单击选中 / Shift 连选 / Ctrl 加选 / 双击放大预览
+ * 多视图（9.2）：网格(160px 4-6列自适应) / 列表(80px) / 瀑布流(保留比例)
+ * 缩略图带 AI 标签名（不显示置信度数字）；单击选中 / Shift 连选 / Ctrl 加选 / 双击放大预览
+ * （以前还有第四种「大图」布局，与双击小图弹出的放大弹窗功能重叠，已下线：顶栏「大图」直接开那个弹窗）
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { useStore, sortConf } from '../store'
-import JudgmentBar from './JudgmentBar'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { RefObject } from 'react'
+import { createPortal } from 'react-dom'
+import { useStore, sortConf, filterByQuery } from '../store'
 import DuplicateGroupsView from './DuplicateGroupsView'
-import { toSrc, useBigSrc, Spinner } from './imageSrc'
-import type { ImageRecord } from '../../../shared/types'
-import type { DimensionKey } from '../../../shared/types'
-import { BAD_DIMENSIONS, CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, DIMENSION_LABELS } from '../../../shared/types'
+import { toSrc, ThumbImg } from './imageSrc'
+import type { ImageRecord, DimensionKey } from '../../../shared/types'
+import { BAD_DIMENSIONS, CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, DIMENSION_LABELS, isLibraryBucket } from '../../../shared/types'
 import { dimTagColor } from './Sidebar'
 
 /**
- * 图片上的单个维度标签（坏/中性通用）：
- * 背景色与左侧分类树对应类型的小圆点同色（dimTagColor 单一来源），
- * 白字 + 圆角 5px + 整体阴影，避免图背景杂乱时看不清文字。尺寸保持紧凑。
+ * 网格 Ctrl+滚轮缩放的上下限。上限 610 是按窗口宽度反推的：主区实宽≈2040 CSS px
+ * （2560 屏 − 侧栏 224 − 滚动条与内边距），auto-fill 下“一行三张”最多能放到 672 一格，
+ * 610 留了余量（再往上就变成一行两张，没意义了）；以前卡在 360，最多只能放到一行五张。
+ * 清晰度已与主进程同步提档：importer.ts 的 THUMB_MAX 已从 640 提到 960，3:2 横片短边
+ * 640px，610 格子在 100% 系统缩放下约 1:1；125% 缩放还差约 1.2 倍（610×1.25≈763 物理
+ * px），要再清只能继续提 THUMB_MAX（代价是磁盘，一万张 960 档约 270~310MB）。
  */
-function DimTag(props: { dim: string; conf: number }): JSX.Element {
+const GRID_MIN = 100
+const GRID_MAX = 610
+
+/**
+ * hex 与白/黑混合：p>0 往白靠、p<0 往黑靠，返回 #rrggbb。
+ * 在 JS 里算而不用 CSS color-mix：不依赖内核版本，且三档色（底/框/字）都从
+ * dimTagColor 单一来源派生，改一处左图右栏颜色照旧同步。
+ */
+function tint(hex: string, p: number): string {
+  const n = parseInt(hex.slice(1), 16)
+  const q = Math.abs(p)
+  const target = p > 0 ? 255 : 0
+  const ch = (shift: number) => Math.round(((n >> shift) & 255) * (1 - q) + target * q)
+  return '#' + [16, 8, 0].map((s) => ch(s).toString(16).padStart(2, '0')).join('')
+}
+
+/**
+ * 图片上的单个维度标签（坏/中性通用）：
+ * 基色与左侧分类树对应类型的小圆点同色（dimTagColor 单一来源）。
+ * 样式是「彩色描边 + 同色浅底 + 同色加深文字」：以前是实底色+白字，跟右上角
+ * 分类角标（绿/橙实底）、右下角标签按钮（橙实底）是同一种视觉语言，三种东西分不清；
+ * 改成亮色描边款后一眼能认出“这是维度标签”。文字用基色掺黑加深、底色用基色掺白
+ * 提到接近不透明（尾缀 F2 只留一点透明度让芯片“坐”在图上不飘），任意照片上都可读。
+ * 只写维度名、不跟置信度数字：芯片本来就是按置信度从高到低排出来后取前 3 个的
+ * （见 TagChips 的 sort），数字对筛选本身没有决策价值还占掉一格宽度。数值照旧留在
+ * images.tags[].confidence 里——排序、阈值分级、列表视图的「最高置信度」列、以及主进程
+ * 写进 corrections.orig_confidence 的校准样本都不读这里的 DOM，隐藏显示不影响任何判定。
+ */
+function DimTag(props: { dim: string }): JSX.Element {
+  const c = dimTagColor(props.dim)
   return (
     <span
-      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[5px] text-[11px] leading-none font-medium text-white shadow-[0_1px_3px_rgba(0,0,0,0.65)]"
-      style={{ background: dimTagColor(props.dim) }}
+      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[5px] text-[11px] leading-none font-medium border shadow-[0_1px_3px_rgba(0,0,0,0.65)]"
+      style={{ color: tint(c, -0.35), background: tint(c, 0.88) + 'F2', borderColor: tint(c, 0.2) }}
     >
       {DIMENSION_LABELS[props.dim as keyof typeof DIMENSION_LABELS]}
-      <span className="opacity-80">{(props.conf * 100).toFixed(0)}</span>
     </span>
   )
 }
@@ -87,28 +119,30 @@ function BusyBanner(): JSX.Element | null {
 
 /**
  * 卡片上的标签管理器入口（网格/列表/瀑布流共用）：不必进大图也能删标错的标签、
- * 补 AI 漏检的标签。多选状态下打开即对全部选中图批量生效。
+ * 补 AI 漏检的标签。永远只操作当前这一张图——多选状态不劫持它（用户拍板 2026-10-11：
+ * 要从卡片点进来就该是单图独立管理）；批量增删只走底部工具栏的「批量标签管理」。
  * 默认隐藏，鼠标经过/停在图片上才浮现（hover 胶囊，无描边无图标，只留「标签」两字）。
- * 橙色实底：与左下角维度芯片（蓝/红/紫）拉开区分度。
+ * 橙色实底：与左下角维度芯片（彩色描边浅底款）的视觉语言完全不同，拉开区分度。
  * stopPropagation 避免误触单击选中 / 双击放大 / 拖拽排序。
  */
 function TagBtn({ img, variant = 'hover' }: { img: ImageRecord; variant?: 'hover' | 'plain' }): JSX.Element {
   const openTagManager = useStore((s) => s.openTagManager)
-  const selection = useStore((s) => s.selection)
-  const multi = selection.has(img.id) && selection.size > 1
   return (
     <button
       className={
-        'inline-flex items-center justify-center rounded-md bg-orange-500 text-white font-medium leading-none cursor-pointer whitespace-nowrap ' +
+        // 行高不能写 leading-none：那等于把行盒压到 11px，比雅黑本身的内容高（~15px）还矮，
+        // 半 leading 变负值，CJK 基线落点就不受 align-items:center 控制了（看上去偏上/偏下）。
+        // 给回 1.4 倍行高让半 leading ≥ 0，文字才真正在 h-6 里几何居中。
+        'inline-flex items-center justify-center rounded-md bg-orange-500 text-white font-medium leading-[1.4] cursor-pointer whitespace-nowrap ' +
         (variant === 'hover'
           ? 'absolute right-1 bottom-1 z-20 h-6 px-2 text-[11px] opacity-0 pointer-events-none transition-all duration-150 group-hover:opacity-100 group-hover:pointer-events-auto group-hover:hover:bg-orange-600 group-hover:active:scale-95'
           : 'h-6 px-2 text-[11px] hover:bg-orange-600 active:scale-95 transition-colors')
       }
-      title={multi ? `标签管理（批量）：对选中的 ${selection.size} 张图增删标签` : '标签管理：删除标错的标签 / 补上 AI 漏检的标签（添加后图同时出现在该分类第一张）'}
+      title="标签管理（仅当前这张图）：删除标错的标签 / 补上 AI 漏检的标签（添加后图同时出现在该分类第一张）；批量请走底部工具栏"
       draggable={false}
       onClick={(e) => {
         e.stopPropagation()
-        openTagManager(multi ? [...selection] : [img.id])
+        openTagManager([img.id])
       }}
       onDoubleClick={(e) => e.stopPropagation()}
     >
@@ -117,16 +151,51 @@ function TagBtn({ img, variant = 'hover' }: { img: ImageRecord; variant?: 'hover
   )
 }
 
+/**
+ * 卡片左下角的维度标签条：按置信度取前 3 枚，剩下的折成「+N」。
+ * 悬停 +N 只弹被折叠的剩余标签（用户拍板：不重复显示卡片上已有的前 3 枚）。
+ * 弹层走 portal + fixed：卡片根节点是 overflow-hidden，弹在卡片内部会被剪掉；
+ * pointer-events-none 让它不拦截穿过它去点卡片/拖卡片的行为。
+ * 容器本身 pointer-events-none（点击要透到图上），只有 +N 这一枚要回来才能接住悬停。
+ */
 function TagChips({ img }: { img: ImageRecord }): JSX.Element | null {
   const entries = Object.entries(img.tags || {}).filter(([, t]) => t && t.level !== 'low')
   if (!entries.length) return null
   const sorted = entries.sort((a, b) => (b[1]?.confidence || 0) - (a[1]?.confidence || 0))
+  const hidden = sorted.length > 3 ? sorted.slice(3) : []
+  const [morePos, setMorePos] = useState<{ left: number; bottom: number; maxW: number } | null>(null)
   return (
     <div className="absolute left-1 bottom-1 right-16 flex flex-wrap gap-1 pointer-events-none">
-      {sorted.slice(0, 3).map(([dim, t]) => (
-        <DimTag key={dim} dim={dim} conf={t!.confidence} />
+      {sorted.slice(0, 3).map(([dim]) => (
+        <DimTag key={dim} dim={dim} />
       ))}
-      {sorted.length > 3 && <span className="chip bg-panel2/90 text-gray-300">+{sorted.length - 3}</span>}
+      {hidden.length > 0 && (
+        <span
+          className="chip bg-panel2/90 text-gray-300 pointer-events-auto cursor-help"
+          onMouseEnter={(e) => {
+            const r = e.currentTarget.getBoundingClientRect()
+            // 靠右边缘的卡片把弹层往左收（留 300 预估宽），但不碰穿左边距；最宽 288
+            const left = Math.max(8, Math.min(r.left, window.innerWidth - 300))
+            setMorePos({ left, bottom: window.innerHeight - r.top + 6, maxW: Math.min(288, window.innerWidth - left - 12) })
+          }}
+          onMouseLeave={() => setMorePos(null)}
+        >
+          +{hidden.length}
+        </span>
+      )}
+      {morePos &&
+        hidden.length > 0 &&
+        createPortal(
+          <div
+            className="fixed z-[80] flex flex-wrap gap-1 rounded-lg border border-line bg-panel/95 px-2 py-1.5 shadow-xl pointer-events-none"
+            style={{ left: morePos.left, bottom: morePos.bottom, maxWidth: morePos.maxW }}
+          >
+            {hidden.map(([dim]) => (
+              <DimTag key={dim} dim={dim} />
+            ))}
+          </div>,
+          document.body
+        )}
     </div>
   )
 }
@@ -137,56 +206,127 @@ function StatusRibbon({ img }: { img: ImageRecord }): JSX.Element | null {
   if (img.status === 'skip') return <span className="chip bg-gray-700/90 text-gray-300 absolute right-1 top-1">无法解码</span>
   if (img.category === CAT_TRASH) return <span className="chip bg-black/70 text-white absolute right-1 top-1">🗑</span>
   if (img.category === CAT_REVIEW) return <span className="chip bg-warn text-white absolute right-1 top-1">待确认</span>
-  if (img.category === CAT_LIBRARY) return <span className="absolute right-px top-px w-2 h-2 rounded-full bg-emerald-400 ring-1 ring-white shadow-[0_0_5px_1px_rgba(52,211,153,0.9)]" title="成品库" />
+  // 交付角标必须走虚桶判定（与列表 SQL / 导出同一口径）：单人照、多人合拍照、多人混合照、无人物、
+  // 黑白照、自定义分类的图全都属于交付库且正常导出，直接比 category === 'library'
+  // 会让一万多张里只有一百张带标（新增/删除瑕疵标签并不改归属，所以标不会因此消失）
+  if (isLibraryBucket(img.category))
+    return (
+      <span
+        className="chip bg-good text-white absolute right-1 top-1 shadow-[0_1px_3px_rgba(0,0,0,0.65)]"
+        title={
+          img.category === CAT_LIBRARY
+            ? '交付库（默认参与导出）'
+            : `交付库（默认参与导出），当前相册：${categoryLabelShort(img.category)}`
+        }
+      >
+        交付
+      </span>
+    )
   return null
 }
 
-function Thumb({ img, size, index, onClick, onDoubleClick, dragIds, dragging, onDragStart, onDragEnter, onDragEnd, elRef }: {
+/**
+ * 拖拽预览：把“拖中的这批图”叠成一摞（每张重叠约 90%，错开 10%）+ 右下角计数角标，
+ * 交给 dataTransfer.setDragImage 当拖影。浏览器默认只会把被拖的那一张原样缩小当影，
+ * 多选时完全看不出“拖中的是一整批 N 张”（用户反馈 2026-10-11）。
+ * 坑：元素必须先挂到 body 里、且不能 display:none（否则 Chromium 不渲染拖影）；这里用
+ * top:-1000px 放到屏外，setDragImage 在 dragstart 同步取图后由调用方 setTimeout 移除。
+ */
+function makeStackDragImage(ids: number[]): HTMLElement {
+  const images = useStore.getState().images
+  const byId = new Map(images.map((im) => [im.id, im] as const))
+  const total = ids.length
+  const shown = ids.slice(0, 4) // 最多 4 张卡面，再多也只叠这几层，靠角标说总数
+  const CARD = 92
+  const step = Math.round(CARD * 0.1) // 重叠 90% → 每张只错开 10%
+  const stackW = CARD + step * (shown.length - 1)
+  const h = CARD + step * (shown.length - 1)
+  // 计数角标改放整摞照片的正下方（用户拍板 2026-10-11）：横向不再占空间，
+  // 光标左侧“箭头要去分类栏的方向”彻底没有东西挡；右侧只铺重叠卡，天然在箭头后方。
+  const badgeH = total > 1 ? 26 : 0
+  const w = stackW
+  const wrap = document.createElement('div')
+  wrap.style.cssText = `position:fixed;top:-1000px;left:-1000px;width:${w}px;height:${h + badgeH}px;z-index:99999;pointer-events:none;`
+  // 拖影把手点定在最上层那张（前沿卡）中心：光标像“捻住领头的一张”，
+  // 整摞卡片朝右后方拖、角标垂在下面，往左侧分类拖时前进方向完全清爽
+  wrap.dataset.hotX = String(Math.round(CARD / 2))
+  wrap.dataset.hotY = String(Math.round(h / 2))
+  // 从后往前放，让 ids 的第一张落在最上层
+  for (let i = shown.length - 1; i >= 0; i--) {
+    const rec = byId.get(shown[i])
+    const card = document.createElement('div')
+    card.style.cssText =
+      `position:absolute;left:${i * step}px;top:${i * step}px;width:${CARD}px;height:${CARD}px;` +
+      'border-radius:8px;overflow:hidden;border:2px solid rgba(255,255,255,0.9);' +
+      'box-shadow:0 4px 14px rgba(0,0,0,0.45);background:rgb(31,41,55);'
+    if (rec) {
+      const im = document.createElement('img')
+      im.src = rec.thumb ? toSrc(rec.thumb) : toSrc(rec.path)
+      im.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;'
+      card.appendChild(im)
+    }
+    wrap.appendChild(card)
+  }
+  if (total > 1) {
+    const badge = document.createElement('div')
+    badge.textContent = `${total} 张`
+    // 贴在整摞下方、领头的左前卡正下：视觉上属于“这摞照片”，且不侵扰水平方向
+    badge.style.cssText =
+      'position:absolute;left:0;bottom:0;padding:2px 8px;border-radius:9999px;white-space:nowrap;' +
+      'background:rgb(59,130,246);color:#fff;font-size:12px;font-weight:600;line-height:1.5;' +
+      'box-shadow:0 2px 6px rgba(0,0,0,0.4);'
+    wrap.appendChild(badge)
+  }
+  document.body.appendChild(wrap)
+  return wrap
+}
+
+function ThumbBase({ img, size, index, onClick, onDoubleClick, dragIds }: {
   img: ImageRecord
   size: number
   index: number
   onClick: (index: number, e: React.MouseEvent) => void
   onDoubleClick: (img: ImageRecord) => void
   dragIds: number[]
-  dragging?: boolean
-  onDragStart?: (id: number) => void
-  onDragEnter?: (e: React.DragEvent, id: number) => void
-  onDragEnd?: () => void
-  elRef?: (el: HTMLDivElement | null) => void
 }): JSX.Element {
   const selected = useStore((s) => s.selection.has(img.id))
   const scanCurrent = useStore((s) => (s.scanProgress?.running && s.scanProgress.phase === 'scanning' ? s.scanProgress.current : ''))
   const isScanning = !!scanCurrent && img.filename === scanCurrent
-  const src = img.thumb ? toSrc(img.thumb) : toSrc(img.path)
   return (
     <div
-      ref={elRef}
+      data-img-id={img.id}
       className={
         'relative rounded-md overflow-hidden bg-panel2 border transition-all duration-150 cursor-pointer group ' +
         (isScanning
           ? 'border-red-500 ring-[3px] ring-red-500 scale-105 z-20 '
           : selected
             ? 'border-brand ring-2 ring-brand shadow-[0_0_0_2px_rgba(59,130,246,0.45)]'
-            : 'border-line hover:border-gray-500') +
-        (dragging ? ' opacity-40 scale-90' : '')
+            : 'border-line hover:border-gray-500')
       }
       style={{ width: size, height: size }}
       draggable
+      // 自由排序已取消（用户拍板 2026-10-11）：这里只保留 HTML5 拖拽的 dataTransfer，
+      // 供“拖到左侧分类移动”使用（与瀑布流 MasonryThumb 同一套），不再回调实时换位
       onDragStart={(e) => {
         const ids = selected ? dragIds : [img.id]
         if (!selected) onClick(index, e)
         e.dataTransfer.setData('application/x-image-ids', JSON.stringify(ids))
         e.dataTransfer.effectAllowed = 'move'
-        onDragStart?.(img.id)
+        // 自定义拖影：把这批（多张时）叠成一摞，拖拽途中一眼看清“拖中了 N 张”
+        const preview = makeStackDragImage(ids)
+        const hotX = Number(preview.dataset.hotX) || Math.ceil(preview.offsetWidth / 2)
+        const hotY = Number(preview.dataset.hotY) || Math.ceil(preview.offsetHeight / 2)
+        e.dataTransfer.setDragImage(preview, hotX, hotY)
+        setTimeout(() => preview.remove(), 0)
       }}
-      onDragEnter={(e) => onDragEnter?.(e, img.id)}
-      onDragOver={(e) => e.preventDefault()}
-      onDragEnd={() => onDragEnd?.()}
       onClick={(e) => onClick(index, e)}
       onDoubleClick={() => onDoubleClick(img)}
-      title={`${img.filename}\n${Object.entries(img.tags || {}).filter(([, t]) => t && t.level !== 'low').map(([d, t]) => `${DIMENSION_LABELS[d as keyof typeof DIMENSION_LABELS]} ${(t?.confidence || 0) * 100}%(<${t?.level}>)`).join('\n') || '无坏维度标记'}`}
+      // 悬停只给文件名：以前这里会把每个标签的置信度 + 等级（“半截头 91%(<high>)”）全列一遍，
+      // 那是给调阈值的人看的判定详情，客户和摄影师看着只会懵；卡片下方的彩色芯片只留维度名。
+      // 判定理由与置信度依旧完整存在库里的 tags JSON 里（三个标签入口也都不再渲染它），只是不往悬停提示上铺。
+      title={img.filename}
     >
-      <img src={src} loading="lazy" className="w-full h-full object-cover pointer-events-none" alt={img.filename} draggable={false} />
+      <ThumbImg img={img} cellPx={size} className="w-full h-full object-cover pointer-events-none" />
       {selected && <span className="absolute left-1 top-1 w-4 h-4 rounded-full bg-brand text-white text-[10px] flex items-center justify-center">✓</span>}
       {isScanning && <span className="absolute left-1 top-1 z-10 px-1.5 py-0.5 rounded bg-red-500 text-white text-[10px] font-bold animate-pulse shadow">检测中</span>}
       <StatusRibbon img={img} />
@@ -195,12 +335,23 @@ function Thumb({ img, size, index, onClick, onDoubleClick, dragIds, dragging, on
     </div>
   )
 }
+// memo：框选时 GridView 会随选框一帧一帧重渲染，未 memo 的 Thumb 会跟着 3000 个一起重建。
+// memo 后，只要 props 没变（纯移框、选中集未变）缩略图整体跳过；选中态由 Thumb 内部
+// useStore 订阅驱动，单张变色只重渲染那一张。
+const Thumb = memo(ThumbBase)
 
 /**
- * 网格视图（可拖拽自由排序）：
- * - 本地维护 id 顺序，拖动时实时换位（拖哪就插到哪），松手回网格才落库
- * - 拖到左侧分类的 move 仍由 Sidebar 处理（同一 dataTransfer），互不干扰
- * - props.images 变化（刷新/换排序）时若非拖动中则重同步本地顺序
+ * 网格视图：渲染缩略图 + 两种拖拽手势并存、互不冲突（用户拍板 2026-10-11）：
+ * - 从「空白背景」按下拖动 → 橡皮筋框选（本次新增）：拖出矩形，实时把压到的图选中，松手即为最终选中集；
+ *   框选=全新选中（Ctrl 叠加）。因为从空白处起手，和下面“从图上起手”的手势天然区分开。
+ * - 从「缩略图上」按下拖动 → HTML5 拖拽（Thumb 的 draggable + dataTransfer），拖到左侧分类移动，
+ *   由 Sidebar 接 drop。多选时拖其中一张带的是全部选中项（批量）。
+ * 自由排序拖拽（拖哪插哪、实时让位、松手落库）已整体取消，顺序完全交给 store 的 sortKey。
+ *
+ * 性能坑：本列表未虚拟化，3000 张缩略图全在 DOM 里。若每次 mousemove 都对全体节点
+ * getBoundingClientRect 并写 store，会让 3000 个订阅 selection 的 Thumb 反复重渲染而卡顿。
+ * 所以：按下时一次性快照所有节点矩形（框选期间不自动滚动，矩形稳定），移动中只做数字比较，
+ * 且用 RAF 节流 + 结果集去重，只有选中的 id 集合真的变了才写一次库。
  */
 function GridView(props: {
   images: ImageRecord[]
@@ -208,114 +359,260 @@ function GridView(props: {
   click: (index: number, e: React.MouseEvent) => void
   dbl: (img: ImageRecord) => void
   dragIds: number[]
-  onReorder: (ids: number[]) => void
 }): JSX.Element {
-  const [order, setOrder] = useState<number[]>(() => props.images.map((i) => i.id))
-  const orderRef = useRef<number[]>(order)
-  const [draggingId, setDraggingId] = useState<number | null>(null)
-  const draggingRef = useRef<number | null>(null)
-  // FLIP 动画用：记录每个缩略图 DOM 与上一次静止位置
-  const itemRefs = useRef<Map<number, HTMLDivElement>>(new Map())
-  const prevRects = useRef<Map<number, DOMRect>>(new Map())
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const marqueeSelect = useStore((s) => s.marqueeSelect)
+  const [box, setBox] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null)
+  // 框选期间用的不可变快照：节点矩形 + 上次算出的选中集（去重用）
+  const hitRects = useRef<{ id: number; l: number; t: number; r: number; b: number }[]>([])
+  const lastKey = useRef<string>('')
+  const startPt = useRef<{ x: number; y: number } | null>(null)
+  const moved = useRef(false)
+  const additive = useRef(false)
+  const raf = useRef<number | null>(null)
+  const cur = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
 
-  const applyOrder = (next: number[]): void => {
-    orderRef.current = next
-    setOrder(next)
+  const computeSelection = (x0: number, y0: number, x1: number, y1: number): void => {
+    const minX = Math.min(x0, x1)
+    const maxX = Math.max(x0, x1)
+    const minY = Math.min(y0, y1)
+    const maxY = Math.max(y0, y1)
+    const ids: number[] = []
+    for (const h of hitRects.current) {
+      // 矩形相交（含擦边）即算框到
+      if (h.r >= minX && h.l <= maxX && h.b >= minY && h.t <= maxY) ids.push(h.id)
+    }
+    // 去重：同一批选中不重复写库，避免无谓的全量重渲染
+    const key = ids.join(',')
+    if (key === lastKey.current) return
+    lastKey.current = key
+    marqueeSelect(ids, additive.current)
   }
 
-  // 非拖拽期间，外部图片集（内容/排序）变化时重同步
-  useEffect(() => {
-    if (draggingRef.current != null) return
-    applyOrder(props.images.map((i) => i.id))
-  }, [props.images])
-
-  // FLIP：order 变化时，让“让位”的相邻缩略图平滑滑到新位置（拖拽中的那张不参与，跟手交给浏览器拖影），
-  // 消除网格重排的“瞬间跳格”，换来“自然让位、丝滑插入”的手感
-  useLayoutEffect(() => {
-    const next = new Map<number, DOMRect>()
-    itemRefs.current.forEach((el, id) => {
-      if (el) next.set(id, el.getBoundingClientRect())
+  const onMouseDown = (e: React.MouseEvent): void => {
+    if (e.button !== 0) return
+    // 从缩略图（或其内部子元素）按下：交给浏览器原生拖拽 / 单击选中，不进入框选
+    if ((e.target as HTMLElement).closest('[data-img-id]')) return
+    const el = containerRef.current
+    if (!el) return
+    e.preventDefault() // 阻止拖动空白处选中文字
+    startPt.current = { x: e.clientX, y: e.clientY }
+    cur.current = { x: e.clientX, y: e.clientY }
+    moved.current = false
+    additive.current = e.ctrlKey || e.metaKey
+    // 一次性快照所有缩略图的视口矩形（框选期间不滚动，坐标稳定）
+    hitRects.current = Array.from(el.querySelectorAll<HTMLElement>('[data-img-id]')).map((n) => {
+      const r = n.getBoundingClientRect()
+      return { id: Number(n.dataset.imgId), l: r.left, t: r.top, r: r.right, b: r.bottom }
     })
-    next.forEach((rect, id) => {
-      if (id === draggingRef.current) return
-      const prev = prevRects.current.get(id)
-      if (!prev) return
-      const dx = prev.left - rect.left
-      const dy = prev.top - rect.top
-      if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return
-      const el = itemRefs.current.get(id)
-      if (!el) return
-      el.style.transition = 'none'
-      el.style.transform = `translate(${dx}px, ${dy}px)`
-      requestAnimationFrame(() => {
-        el.style.transition = 'transform 180ms cubic-bezier(0.22, 1, 0.36, 1)'
-        el.style.transform = ''
+    lastKey.current = additive.current ? '' : '__reset__'
+    setBox({ x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY })
+
+    const onMove = (ev: MouseEvent): void => {
+      const s0 = startPt.current
+      if (!s0) return
+      if (!moved.current && Math.hypot(ev.clientX - s0.x, ev.clientY - s0.y) < 4) return
+      moved.current = true
+      cur.current = { x: ev.clientX, y: ev.clientY }
+      if (raf.current != null) return // 本帧已排程：合并，避免一帧多次 setBox 触发全量重渲染
+      // RAF 节流：一帧最多重绘一次选框 + 算一次命中 + 写一次库
+      raf.current = requestAnimationFrame(() => {
+        raf.current = null
+        const s = startPt.current
+        if (!s) return
+        const c = cur.current
+        const nb = { x0: s.x, y0: s.y, x1: c.x, y1: c.y }
+        setBox(nb)
+        computeSelection(nb.x0, nb.y0, nb.x1, nb.y1)
       })
-    })
-    prevRects.current = next
-  }, [order])
-
-  const byId = useMemo(() => {
-    const m = new Map<number, ImageRecord>()
-    for (const im of props.images) m.set(im.id, im)
-    return m
-  }, [props.images])
-
-  const onDragEnter = (e: React.DragEvent, id: number): void => {
-    const drag = draggingRef.current
-    if (drag == null || drag === id) return
-    e.preventDefault()
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
-    const after = e.clientX - rect.left > rect.width / 2
-    const base = orderRef.current.filter((x) => x !== drag)
-    const at = base.indexOf(id)
-    if (at < 0) return
-    base.splice(after ? at + 1 : at, 0, drag)
-    applyOrder(base)
+    }
+    const onUp = (ev: MouseEvent): void => {
+      if (raf.current != null) cancelAnimationFrame(raf.current)
+      raf.current = null
+      const s0 = startPt.current
+      if (s0 && moved.current) {
+        computeSelection(s0.x, s0.y, ev.clientX, ev.clientY)
+      } else if (!additive.current) {
+        // 空白处轻点（没拖出框）= 取消选中（标准文件管理器语义）
+        marqueeSelect([], false)
+      }
+      startPt.current = null
+      setBox(null)
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
   }
-
-  const ordered = order.map((id) => byId.get(id)).filter(Boolean) as ImageRecord[]
 
   return (
     <div
+      ref={containerRef}
       className="grid gap-3 justify-center"
       style={{ gridTemplateColumns: `repeat(auto-fill, ${props.size}px)` }}
-      onDragOver={(e) => {
-        if (draggingRef.current != null) e.preventDefault()
-      }}
-      onDrop={(e) => {
-        if (draggingRef.current == null) return
-        e.preventDefault()
-        props.onReorder(orderRef.current)
-      }}
+      onMouseDown={onMouseDown}
     >
-      {ordered.map((img, i) => (
+      {props.images.map((img, i) => (
         <Thumb
           key={img.id}
           img={img}
           index={i}
           size={props.size}
-          dragging={draggingId === img.id}
           onClick={props.click}
           onDoubleClick={props.dbl}
           dragIds={props.dragIds}
-          onDragStart={(id) => {
-            draggingRef.current = id
-            setDraggingId(id)
-          }}
-          onDragEnter={onDragEnter}
-          onDragEnd={() => {
-            draggingRef.current = null
-            setDraggingId(null)
-          }}
-          elRef={(el) => {
-            if (el) itemRefs.current.set(img.id, el)
-            else itemRefs.current.delete(img.id)
-          }}
         />
       ))}
+      {/* 橡皮筋选框：fixed 定位直接用视口坐标，省掉跟随滚动换算；pointer-events-none 不挡后续命中 */}
+      {box && (
+        <div
+          className="fixed z-50 pointer-events-none rounded-[3px] border border-brand bg-brand/15"
+          style={{
+            left: Math.min(box.x0, box.x1),
+            top: Math.min(box.y0, box.y1),
+            width: Math.abs(box.x1 - box.x0),
+            height: Math.abs(box.y1 - box.y0),
+          }}
+        />
+      )}
     </div>
   )
+}
+
+/**
+ * 网格/列表/瀑布流的“视口锚定”：列表内容变了（移走图、重排）之后，把视口拉回原来正在看的那一张。
+ *
+ * 为什么要自己做：删标签 / 移动 / 判定错误都会 refreshImages() 整包重拉，store 换掉整个 images 数组，
+ * React 按 key 卸掉一批卡片节点。浏览器的原生滚动锚定只在“上方少量 DOM 变化”时兜得住，
+ * 几百个节点同时换位置就直接失效，于是用户在第 1444 张的位置被弹回顶部——批量复查时最打断节奏。
+ *
+ * 做法：稳态时（没有列表变化在处理的瞬间）持续记下“正压在视口上沿的是哪一张、它距容器顶多少像素”，
+ * 一旦列表的成员集合真的变了（有图进出），提交后按 id 找回那一张把偏移还原回去；
+ * 锚点那张被移走了，就用顶上来的相邻那张占住视口上沿，而不是回顶。
+ *
+ * 两个容易踩的点：
+ * - 光在“成员变化那次提交”里读 DOM 是读不到旧布局的（layout effect 跑在 DOM 变更之后），所以锚点
+ *   必须靠 scroll 监听 + 每次稳态提交来保鲜；否则用户滚到新位置再操作，会被弹回历史位置，更莫名。
+ * - 只有顺序变、成员没变（手动拖拽重排、换排序键）时不复位：那时候用户在挑哪张拖哪张，
+ *   强行把他锚回原图片等于跟他的操作打架。
+ *
+ * resetKey（当前相册）变化时不锚定：切相册本来就该从头看，拿上个相册的视口位置过来只会让人莫名。
+ */
+function useScrollAnchor(items: ImageRecord[], scrollerRef: RefObject<HTMLDivElement | null>, resetKey: string): void {
+  const anchor = useRef<{ id: number; offset: number; index: number } | null>(null)
+  const idSetRef = useRef('')
+  const idOrdRef = useRef('') // 展示序签名（含顺序）：成员没进出、只是顺序变时靠它识别
+  const pending = useRef(false)
+  const keyRef = useRef(resetKey)
+  const capElRef = useRef<Element | null>(null)
+  const capAtRef = useRef(0)
+  const boundElRef = useRef<Element | null>(null)
+
+  // 记一次当前视口锚点。force=true 跳过防抖（每次提交后必须拿到准确锚点）；
+  // 同时也是“只建档、不复位”的意思：首次进入 / 换容器 / 换相册时不该把视口弹到任何历史位置。
+  const capture = (force: boolean): void => {
+    const el = scrollerRef.current
+    if (!el) return
+    const now = Date.now()
+    if (!force && now - capAtRef.current < 100) return
+    // 容器被换掉了（切到重复叠卡视图等分支会卸载重挂）：当作重新进入，不算“有图进出”
+    if (capElRef.current !== el) {
+      capElRef.current = el
+      idSetRef.current = ''
+      idOrdRef.current = ''
+      pending.current = false
+    }
+    capAtRef.current = now
+    const ids = items.map((i) => i.id)
+    const idOrd = String(ids.length) + ':' + ids.join(',')
+    const idSet = String(ids.length) + ':' + [...ids].sort((a, b) => a - b).join(',')
+    if (idOrd === idOrdRef.current) {
+      idSetRef.current = idSet
+      if (pending.current) return // 刚拍完马上又要复位，说明中间那次没抓到，别用此刻的位置去复位
+    } else if (idSet === idSetRef.current && anchor.current) {
+      // 成员没进出、只是顺序变了——典型：在多人合照里把中间某张拖进【闭眼】（坏维度与人数
+      // 维度不互斥，图还留在本相册），但移动刷新了 catChangedAt，按时间排序它飞到第 1 位，
+      // 几千张整体挪位把视口甩回顶部（用户实测 2026-10-11）。必须保留滚动期间建档的旧锚点
+      // 去复位，不能用跳完的视口覆盖它。旧代码故意"顺序变不复位"，那是给手动拖拽排序让路，
+      // 排序功能已删除，这条豁免只剩副作用。
+      idOrdRef.current = idOrd
+      pending.current = true
+      return
+    } else {
+      if (idSetRef.current === '') force = true // 首次进入：只建档，不复位
+      pending.current = force || idSetRef.current !== ''
+      idSetRef.current = idSet
+      idOrdRef.current = idOrd
+    }
+    const top = el.getBoundingClientRect().top
+    if (top < -2 || top > window.innerHeight) return // 容器根本不在屏上（切了分支视图），不测锚点
+    const cands = Array.from(el.querySelectorAll<HTMLElement>('[data-img-id]')).map((n) => ({
+      id: Number(n.dataset.imgId),
+      offset: n.getBoundingClientRect().top - top
+    }))
+    // 取“已滚过容器顶”的最后那一张（瀑布流按列排版，DOM 顺序不等于视觉顺序，
+    // 不能拿第一个命中的就算），它才是视觉上压在视口上沿的那张
+    const best = cands.reduce<{ id: number; offset: number } | null>(
+      (acc, c) => (Number.isFinite(c.id) && c.offset <= 0 && (!acc || c.offset > acc.offset) ? { id: c.id, offset: c.offset } : acc),
+      null
+    )
+    if (!best) {
+      // 一张都没滚过容器顶（就在列表开头）：没什么需要“锚回去”的，把旧锚点清掉，
+      // 免得用户先在中部操作、又滚回顶部，下一次列表变化时被拉回中部
+      anchor.current = null
+      return
+    }
+    const index = ids.indexOf(best.id)
+    anchor.current = { id: best.id, offset: best.offset, index: index < 0 ? 0 : index }
+  }
+
+  // 用户滚动时同步刷新锚点。不接住这一路，锚点只会停在“上一次列表变化”的瞬间：
+  // 中间用户自己滚了三千像素，操作完就被弹回他早就离开的地方。
+  // callback ref 卸载时会先把 scrollRef 置 null，那一拍什么都不做（不能拿 null 去判“容器换了”）。
+  useEffect(() => {
+    const el = scrollerRef.current
+    if (!el || el === boundElRef.current) return
+    boundElRef.current = el
+    const onScroll = (): void => capture(false)
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      el.removeEventListener('scroll', onScroll)
+      if (boundElRef.current === el) boundElRef.current = null
+    }
+  })
+
+  // 每次提交后：列表成员进出就把视口拉回锚点，否则把锚点刷新成此刻的视口位置
+  useLayoutEffect(() => {
+    if (keyRef.current !== resetKey) {
+      // 换相册：不锚定，也不在这里建档——此刻 DOM 里还是上个相册的图（store 先改 activeCategory、
+      // 列表还在 await 里），拿旧图的锚点会把新相册滚到一个莫名其妙的位置。留给下一次提交建档。
+      keyRef.current = resetKey
+      anchor.current = null
+      idSetRef.current = ''
+      idOrdRef.current = ''
+      pending.current = false
+      capElRef.current = null
+      return
+    }
+    const el = scrollerRef.current
+    if (!el || !pending.current || !anchor.current) {
+      capture(true)
+      // 顺序变化正是 capture 这一拍才发现的：同一拍就复位，别等下一次渲染——
+      // 否则跳顶的画面会先画出一帧，用户看到的就是"闪一下跳到第一张"
+      if (!el || !pending.current || !anchor.current) return
+    }
+    const a = anchor.current
+    pending.current = false
+    const idx = items.findIndex((i) => i.id === a.id)
+    // 锚点还在原位就还原它；已被移出本分类，就让顶上来的相邻那张正好贴住视口上沿
+    const target = idx >= 0 ? items[idx] : items[Math.min(items.length - 1, Math.max(0, a.index))]
+    const node = target ? el.querySelector<HTMLElement>(`[data-img-id="${target.id}"]`) : null
+    if (node) {
+      const top = el.getBoundingClientRect().top
+      el.scrollTop += node.getBoundingClientRect().top - top - (idx >= 0 ? a.offset : 0)
+    }
+    capture(true)
+  })
 }
 
 export default function ImageView(): JSX.Element {
@@ -323,13 +620,20 @@ export default function ImageView(): JSX.Element {
   const activeCategory = useStore((s) => s.activeCategory)
   const viewMode = useStore((s) => s.viewMode)
   const sortKey = useStore((s) => s.sortKey)
+  const query = useStore((s) => s.query)
+  const setQuery = useStore((s) => s.setQuery)
   const handleClickSelect = useStore((s) => s.handleClickSelect)
   const openPreview = useStore((s) => s.openPreview)
   const selection = useStore((s) => s.selection)
   const scanProgress = useStore((s) => s.scanProgress)
 
   const sorted = useMemo(() => {
-    const arr = [...images]
+    // 先按文件名搜索过滤再排序：displayIds 是下面从 sorted 同步的，
+    // 所以点击选中、Shift 连选、大图左右翻页会自动只在命中集里走，不需要另改
+    const arr = [...filterByQuery(images, query)]
+    // 当前浏览分类视角下的“入场时间”：该分类的标签戳 > 主分类变更戳 > 导入戳
+    const viewTime = (img: ImageRecord): number =>
+      (activeCategory ? img.tags?.[activeCategory as DimensionKey]?.taggedAt : undefined) ?? img.catChangedAt ?? img.addedAt
     switch (sortKey) {
       case 'name':
         arr.sort((a, b) => a.filename.localeCompare(b.filename, 'zh-CN'))
@@ -344,15 +648,17 @@ export default function ImageView(): JSX.Element {
         arr.sort((a, b) => sortConf(b) - sortConf(a))
         break
       case 'time':
-        // “最新在前”：按进入当前分类的时间（导入/AI 归入/手动移动/判定错误都会刷新），
-        // 刚移动到本分类的图立刻排第一；旧数据无时戳回退导入时间
-        arr.sort((a, b) => (b.catChangedAt ?? b.addedAt) - (a.catChangedAt ?? a.addedAt))
+        // “最新在前”：维度分类里优先看“这张图是被标成该维度的时刻”（tags[当前分类].taggedAt），
+        // 没这个戳（AI 标的/旧数据/状态分类浏览）才退回进入主分类的时间（导入/AI 归入/手动移动都会刷）。
+        // 为什么要挂在标签上：一张图同时属于好几个分类，共享的 catChangedAt 一动就是
+        // 所有分类一起跳顶——在单人照里加“闭眼”，只该在闭眼里排第一，单人照里位置不动。
+        arr.sort((a, b) => viewTime(b) - viewTime(a))
         break
       default:
         break
     }
     return arr
-  }, [images, sortKey])
+  }, [images, sortKey, query, activeCategory])
 
   // 把展示序（排序后的 id 序列）同步给 store：点击/Shift 连选按它映射回真实图片
   const setDisplayIds = useStore((s) => s.setDisplayIds)
@@ -360,18 +666,22 @@ export default function ImageView(): JSX.Element {
     setDisplayIds(sorted.map((i) => i.id))
   }, [sorted, setDisplayIds])
 
+  // 三种布局共用一个滚动容器 ref（每次只渲染其中一种，挂上当前那个就行）
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  useScrollAnchor(sorted, scrollRef, activeCategory ?? 'all')
+
   const dragIds = useMemo(() => [...selection], [selection])
   const click = (index: number, e: React.MouseEvent): void => handleClickSelect(index, e)
   const dbl = (img: ImageRecord): void => openPreview(img.id)
-  const reorder = useStore((s) => s.reorder)
 
-  // Ctrl + 滚轮缩放网格缩略图尺寸（100–360px），列数仍 auto-fill 自适应；记住上次缩放。
+  // Ctrl + 滚轮缩放网格缩略图尺寸（GRID_MIN–GRID_MAX），列数仍 auto-fill 自适应；记住上次缩放。
+  // 上下限的推导（窗口宽度、缩略图短边与糊不糊的关系）见文件开头 GRID_MIN / GRID_MAX 的注释。
   // 监听器用 callback ref 绑定：网格容器会在切到重复叠卡视图/空库引导等分支时卸载重挂，
   // 若只在 useEffect([viewMode]) 里绑一次，重挂后节点是新的而 effect 不重跑，
   // 导致“Ctrl+滚轮大多时候没反应、偶尔又可以”。callback ref 每次挂载/卸载自动重绑/清理。
   const [gridSize, setGridSize] = useState<number>(() => {
     const v = Number(localStorage.getItem('gridSize'))
-    return Number.isFinite(v) && v >= 100 && v <= 360 ? v : 160
+    return Number.isFinite(v) && v >= GRID_MIN && v <= GRID_MAX ? v : 160
   })
   const wheelCleanup = useRef<(() => void) | null>(null)
   const bindGridWheel = useCallback((el: HTMLDivElement | null): void => {
@@ -382,7 +692,7 @@ export default function ImageView(): JSX.Element {
       if (!e.ctrlKey) return
       e.preventDefault()
       setGridSize((prev) => {
-        const next = Math.min(360, Math.max(100, prev + (e.deltaY < 0 ? 20 : -20)))
+        const next = Math.min(GRID_MAX, Math.max(GRID_MIN, prev + (e.deltaY < 0 ? 20 : -20)))
         localStorage.setItem('gridSize', String(next))
         return next
       })
@@ -392,6 +702,23 @@ export default function ImageView(): JSX.Element {
   }, [])
 
   // 重复/连拍与废弃桶：走专用叠卡分组视图（放在所有 hooks 之后，不违反 Hook 规则）
+  // 搜不到不能走下面那套“拖入照片”空库引导页（那是给真·空库的），否则看起来像图丢了；
+  // 这个判断必须在叠卡分组之前，否则在重复页搜不到只剩空白，连“清除搜索”的入口都没
+  if (!sorted.length && query.trim()) {
+    return (
+      <div className="h-full overflow-auto flex flex-col items-center justify-center gap-2 text-fg2 p-6">
+        <div className="text-4xl">🔍</div>
+        <div className="text-sm">
+          没有匹配「{query.trim()}」的图片，本相册共 {images.length} 张
+        </div>
+        <div className="text-xs text-fg3">搜索只在当前相册里按文件名匹配（切相册会自动清空），多个名字用空格或逗号分开</div>
+        <button className="btn text-xs mt-1" onClick={() => setQuery('')}>
+          清除搜索
+        </button>
+      </div>
+    )
+  }
+
   if (activeCategory === 'duplicate' || activeCategory === CAT_DUP_TRASH) {
     return <DuplicateGroupsView images={sorted} mode={activeCategory === CAT_DUP_TRASH ? 'trash' : 'keep'} />
   }
@@ -443,10 +770,17 @@ export default function ImageView(): JSX.Element {
   }
 
   if (viewMode === 'grid') {
+    // 网格容器已经用 callback ref 绑滚轮缩放，这里把同一个节点也交给滚动锚定
     return (
-      <div ref={bindGridWheel} className="h-full overflow-auto p-3 fade-in">
+      <div
+        ref={(el) => {
+          scrollRef.current = el
+          bindGridWheel(el)
+        }}
+        className="gallery-scroll h-full overflow-auto p-3 fade-in"
+      >
         <BusyBanner />
-        <GridView images={sorted} size={gridSize} click={click} dbl={dbl} dragIds={dragIds} onReorder={(ids) => void reorder(ids)} />
+        <GridView images={sorted} size={gridSize} click={click} dbl={dbl} dragIds={dragIds} />
       </div>
     )
   }
@@ -455,7 +789,7 @@ export default function ImageView(): JSX.Element {
     const scanning = scanProgress?.running === true && scanProgress?.phase === 'scanning'
     const currentName = scanProgress?.current ?? ''
     return (
-      <div className="h-full overflow-auto px-2 py-1 fade-in">
+      <div ref={scrollRef} className="gallery-scroll h-full overflow-auto px-2 py-1 fade-in">
         <BusyBanner />
         <table className="w-full text-xs border-separate border-spacing-0">
           <thead>
@@ -479,12 +813,13 @@ export default function ImageView(): JSX.Element {
               return (
                 <tr
                   key={img.id}
+                  data-img-id={img.id}
                   className={'cursor-pointer hover:bg-panel2 ' + rowBg}
                   onClick={(e) => click(i, e)}
                   onDoubleClick={() => dbl(img)}
                 >
                   <td className={'border-b border-line/50 px-2 py-1 ' + (isCurrent ? 'border-l-2 border-l-red-500' : 'border-l-2 border-l-transparent')}>
-                    <img src={img.thumb ? toSrc(img.thumb) : toSrc(img.path)} loading="lazy" className="w-[72px] h-[72px] object-cover rounded-md ring-1 ring-line" alt="" draggable={false} />
+                    <ThumbImg img={img} cellPx={72} className="w-[72px] h-[72px] object-cover rounded-md ring-1 ring-line" />
                   </td>
                   <td className="border-b border-line/50 px-2 py-1 max-w-[280px] align-middle">
                     <div className="truncate font-mono text-fg2" title={img.path}>{img.filename}</div>
@@ -492,8 +827,8 @@ export default function ImageView(): JSX.Element {
                   </td>
                   <td className="border-b border-line/50 px-2 py-1 align-middle">
                     <div className="flex flex-wrap gap-1">
-                      {tags.map(([d, t]) => (
-                        <DimTag key={d} dim={d} conf={t!.confidence} />
+                      {tags.map(([d]) => (
+                        <DimTag key={d} dim={d} />
                       ))}
                       {!tags.length && <span className="text-fg3">—</span>}
                     </div>
@@ -527,34 +862,31 @@ export default function ImageView(): JSX.Element {
     )
   }
 
-  if (viewMode === 'masonry') {
-    return (
-      <div className="h-full overflow-auto p-3 fade-in">
-        <BusyBanner />
-        <div style={{ columnGap: 12 }} className="columns-2 md:columns-3 xl:columns-4 2xl:columns-5">
-          {sorted.map((img, i) => (
-            <div key={img.id} className="mb-3 break-inside-avoid" style={{ breakInside: 'avoid' }}>
-              <MasonryThumb img={img} index={i} onClick={click} onDoubleClick={dbl} dragIds={dragIds} />
-            </div>
-          ))}
-        </div>
+  // 瀑布流是剩下的默认布局（老版本还有个 'large' 独立大图视图，已并入双击放大弹窗，
+  // 顶栏「大图」现在走 store.openLargePreview；bootstrap 会把库里残留的旧值兜成 grid）
+  return (
+    <div ref={scrollRef} className="gallery-scroll h-full overflow-auto p-3 fade-in">
+      <BusyBanner />
+      <div style={{ columnGap: 12 }} className="columns-2 md:columns-3 xl:columns-4 2xl:columns-5">
+        {sorted.map((img, i) => (
+          <div key={img.id} className="mb-3 break-inside-avoid" style={{ breakInside: 'avoid' }}>
+            <MasonryThumb img={img} index={i} onClick={click} onDoubleClick={dbl} dragIds={dragIds} />
+          </div>
+        ))}
       </div>
-    )
-  }
-
-  // large 视图：单张占据主区域 + 底部缩略图条
-  return <LargeView sorted={sorted} click={click} dbl={dbl} />
+    </div>
+  )
 }
 
 function categoryLabelShort(cat: string): string {
-  if (cat === 'library') return '成品库'
+  if (cat === 'library') return '交付库'
   if (cat === 'review') return '待确认'
   if (cat === 'trash') return '垃圾桶'
   if (cat.startsWith('custom:')) return '自定义'
   return DIMENSION_LABELS[cat as keyof typeof DIMENSION_LABELS] || cat
 }
 
-/** 分类小圆点颜色：与左侧分类树同色（成品=绿 待确认=黄 垃圾=灰 自定义=品牌色 其余走维度色） */
+/** 分类小圆点颜色：与左侧分类树同色（交付=绿 待确认=黄 垃圾=灰 自定义=品牌色 其余走维度色） */
 function categoryDotColor(cat: string): string {
   if (cat === CAT_LIBRARY) return 'rgb(var(--c-good))'
   if (cat === CAT_REVIEW) return 'rgb(var(--c-warn))'
@@ -591,6 +923,7 @@ function MasonryThumb(props: { img: ImageRecord; index: number; onClick: (i: num
   const ratio = img.width && img.height ? img.width / img.height : 1
   return (
     <div
+      data-img-id={img.id}
       className={
         'relative rounded-md overflow-hidden border cursor-pointer group ' +
         (isScanning
@@ -601,8 +934,15 @@ function MasonryThumb(props: { img: ImageRecord; index: number; onClick: (i: num
       }
       draggable
       onDragStart={(e) => {
-        e.dataTransfer.setData('application/x-image-ids', JSON.stringify(selected ? dragIds : [img.id]))
+        const ids = selected ? dragIds : [img.id]
         if (!selected) onClick(index, e)
+        e.dataTransfer.setData('application/x-image-ids', JSON.stringify(ids))
+        e.dataTransfer.effectAllowed = 'move'
+        const preview = makeStackDragImage(ids)
+        const hotX = Number(preview.dataset.hotX) || Math.ceil(preview.offsetWidth / 2)
+        const hotY = Number(preview.dataset.hotY) || Math.ceil(preview.offsetHeight / 2)
+        e.dataTransfer.setDragImage(preview, hotX, hotY)
+        setTimeout(() => preview.remove(), 0)
       }}
       onClick={(e) => onClick(index, e)}
       onDoubleClick={() => onDoubleClick(img)}
@@ -612,167 +952,6 @@ function MasonryThumb(props: { img: ImageRecord; index: number; onClick: (i: num
       <StatusRibbon img={img} />
       <TagChips img={img} />
       <TagBtn img={img} />
-    </div>
-  )
-}
-
-function LargeView({ sorted, click, dbl }: {
-  sorted: ImageRecord[]
-  click: (i: number, e: React.MouseEvent) => void
-  dbl: (img: ImageRecord) => void
-}): JSX.Element {
-  const largeIndex = useStore((s) => s.largeIndex)
-  const setLargeIndex = useStore((s) => s.setLargeIndex)
-  const stepLarge = useStore((s) => s.stepLarge)
-  const selection = useStore((s) => s.selection)
-  const toggleSelect = useStore((s) => s.toggleSelect)
-  const idx = Math.min(sorted.length - 1, Math.max(0, largeIndex))
-  const cur = sorted[idx]
-  const big = useBigSrc(cur ?? null)
-  const activeThumbRef = useRef<HTMLDivElement>(null)
-
-  // 进入大图视图即自动选中当前图（切回网格/关闭大图后选中态保留）
-  useEffect(() => {
-    const c = sorted[Math.min(sorted.length - 1, Math.max(0, useStore.getState().largeIndex))]
-    if (c) useStore.setState((s) => { const sel = new Set(s.selection); sel.add(c.id); return { selection: sel } })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // 切换图片时把当前缩略图滚入可视区（左侧竖排）
-  useEffect(() => {
-    activeThumbRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-  }, [idx])
-
-  // 鼠标滚轮切换上/下一张（节流）
-  const wheelLock = useRef(0)
-  const onWheel = (e: React.WheelEvent): void => {
-    const now = Date.now()
-    if (now - wheelLock.current < 220) return
-    if (Math.abs(e.deltaY) < 8) return
-    wheelLock.current = now
-    stepLarge(e.deltaY > 0 ? 1 : -1)
-  }
-
-  return (
-    <div className="h-full flex flex-col fade-in">
-      <BusyBanner />
-      <div className="flex-1 min-h-0 flex">
-        {/* 左侧：竖排缩略图列表（加宽；滚轮只滚动列表，不切换图片/缩放） */}
-        <aside
-          className="w-36 shrink-0 overflow-y-auto flex flex-col gap-2 px-2 py-2 bg-panel/60 border-r border-line"
-          onWheel={(e) => e.stopPropagation()}
-        >
-          {sorted.map((img, i) => (
-            <div
-              key={img.id}
-              ref={i === idx ? activeThumbRef : undefined}
-              className={
-                'shrink-0 aspect-square rounded overflow-hidden border cursor-pointer ' +
-                (i === idx ? 'border-brand ring-2 ring-brand shadow-[0_0_0_2px_rgba(59,130,246,0.45)]' : 'border-line hover:border-fg3')
-              }
-              onClick={(e) => {
-                setLargeIndex(i)
-                click(i, e)
-              }}
-              onDoubleClick={() => dbl(img)}
-              title={img.filename}
-            >
-              <img src={img.thumb ? toSrc(img.thumb) : toSrc(img.path)} loading="lazy" className="w-full h-full object-cover" alt="" draggable={false} />
-            </div>
-          ))}
-        </aside>
-        {/* 主图区 */}
-        <div className="relative flex-1 min-h-0 flex items-center justify-center p-4" onWheel={onWheel} onDoubleClick={() => cur && dbl(cur)}>
-          {cur && (
-            <>
-              <img src={big.src} className="max-w-full max-h-full object-contain" alt={cur.filename} draggable={false} title={`${cur.filename}（双击放大）`} />
-              {big.loading && (
-                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                  <Spinner label="加载原图中…" dark />
-                </div>
-              )}
-            </>
-          )}
-          {/* 左右切换按钮（加大） */}
-          <button
-            className="absolute left-3 top-1/2 -translate-y-1/2 w-16 h-16 rounded-full bg-black/40 hover:bg-black/70 text-white text-5xl flex items-center justify-center transition-colors disabled:opacity-25 disabled:cursor-not-allowed"
-            onClick={() => stepLarge(-1)}
-            disabled={idx <= 0}
-            title="上一张（← / ↑ / 滚轮向上）"
-          >
-            ‹
-          </button>
-          <button
-            className="absolute right-3 top-1/2 -translate-y-1/2 w-16 h-16 rounded-full bg-black/40 hover:bg-black/70 text-white text-5xl flex items-center justify-center transition-colors disabled:opacity-25 disabled:cursor-not-allowed"
-            onClick={() => stepLarge(1)}
-            disabled={idx >= sorted.length - 1}
-            title="下一张（→ / ↓ / 滚轮向下）"
-          >
-            ›
-          </button>
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 chip bg-black/55 text-white">
-            {idx + 1} / {sorted.length}
-          </div>
-          {/* 右上角：选中开关（与列表多选同步） */}
-          {cur && (
-            <button
-              className={
-                'absolute top-3 right-3 px-2.5 py-1.5 rounded-md text-xs border whitespace-nowrap transition-colors ' +
-                (selection.has(cur.id)
-                  ? 'bg-brand text-white border-brand'
-                  : 'bg-black/50 text-white/85 border-white/30 hover:border-white/80')
-              }
-              onClick={() => toggleSelect(cur.id)}
-              title="选中/取消选中（与列表多选同步）"
-            >
-              {selection.has(cur.id) ? '✓ 已选中' : '☐ 选中'}
-            </button>
-          )}
-        </div>
-      </div>
-      {/* 底部工具栏：当前图标签 + 判定操作（与放大弹窗同一套） */}
-      {cur && (
-        <div className="shrink-0 border-t border-line bg-panel/90 px-3 py-2 flex items-center gap-3 flex-wrap">
-          <span className="text-xs text-fg3 truncate max-w-44" title={cur.filename}>{cur.filename}</span>
-          <TagChipsFixed img={cur} />
-          <div className="flex-1" />
-          <JudgmentBar img={cur} />
-        </div>
-      )}
-    </div>
-  )
-}
-
-/**
- * 大图底栏的可交互标签芯片：每个标签带 ✕——“这标签不对”只删这一个并记入修正学习，
- * 其它标签与主分类不受影响（多标签图逐标修正的入口）。
- */
-function TagChipsFixed({ img }: { img: ImageRecord }): JSX.Element | null {
-  const removeTag = useStore((s) => s.removeTag)
-  const entries = Object.entries(img.tags || {}).filter(([, t]) => t && t.level !== 'low')
-  if (!entries.length) return null
-  return (
-    <div className="flex gap-1 flex-wrap justify-center items-center">
-      {entries.map(([d, t]) => (
-        <span
-          key={d}
-          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[5px] text-[11px] leading-none font-medium text-white shadow-[0_1px_3px_rgba(0,0,0,0.65)]"
-          style={{ background: dimTagColor(d) }}
-        >
-          {DIMENSION_LABELS[d as DimensionKey]}
-          <span className="opacity-80 tabular-nums">{(t!.confidence * 100).toFixed(0)}</span>
-          <button
-            className="w-3.5 h-3.5 leading-none rounded-full bg-black/25 hover:bg-black/60 text-white text-[10px] cursor-pointer"
-            title={`这标签不对：移除「${DIMENSION_LABELS[d as DimensionKey]}」并记入 AI 学习（不影响其它标签）`}
-            onClick={(e) => {
-              e.stopPropagation()
-              void removeTag([img.id], d as DimensionKey)
-            }}
-          >
-            ✕
-          </button>
-        </span>
-      ))}
     </div>
   )
 }

@@ -1,7 +1,7 @@
 /**
  * 导出交付对话框
- * - 六种导出方式：成品库导出 / 包含式 / 排除式 / 全部（+待确认开关，垃圾桶永远排除）
- * - 快捷预设：只导成品库 / 排除坏图导其余 / 全部不含垃圾桶
+ * - 六种导出方式：交付库导出 / 包含式 / 排除式 / 全部（+待确认开关，垃圾桶永远排除）
+ * - 快捷预设：只导交付库 / 排除坏图导其余 / 全部不含垃圾桶
  * - 选项：目标目录、格式、按分类子文件夹、保留原文件名、物理移动、重名处理
  * - 实时"将导出 N 张（共 M 张）"、进度条 + 取消
  */
@@ -20,7 +20,7 @@ import {
 } from '../../../shared/types'
 
 const MODE_LABELS: Record<ExportOptions['mode'], string> = {
-  library: '仅成品库（推荐）',
+  library: '仅交付库（推荐）',
   include: '包含式：只导出勾选分类',
   exclude: '排除式：导出除勾选外的全部',
   all: '全部文件（自动排除垃圾桶）'
@@ -96,7 +96,7 @@ export default function ExportDialog(): JSX.Element {
           <div>
             <div className="text-gray-400 text-xs mb-1.5">快捷预设：</div>
             <div className="flex gap-2 flex-wrap">
-              <button className="btn" onClick={() => applyPreset('library')}>只导成品库</button>
+              <button className="btn" onClick={() => applyPreset('library')}>只导交付库</button>
               <button className="btn" onClick={() => applyPreset('excludeBad')}>排除坏图，导其余全部</button>
               <button className="btn" onClick={() => applyPreset('allNoTrash')}>全部（不含垃圾桶）</button>
             </div>
@@ -136,7 +136,7 @@ export default function ExportDialog(): JSX.Element {
                 ))}
                 <label className="flex items-center gap-1.5 text-gray-300 cursor-pointer">
                   <input type="checkbox" checked={cats.has(CAT_LIBRARY)} onChange={() => toggleCat(CAT_LIBRARY)} />
-                  成品库 <span className="text-gray-600">({counts[CAT_LIBRARY] || 0})</span>
+                  交付库 <span className="text-gray-600">({counts[CAT_LIBRARY] || 0})</span>
                 </label>
                 {customCategories.map((c) => (
                   <label key={c.id} className="flex items-center gap-1.5 text-gray-300 cursor-pointer">

@@ -1,7 +1,7 @@
 /**
  * 分类体系核心（第三、四章）
  * - 置信度三级分档：高 >high 直接标记 / 中 [mid,high] 待确认 / 低 <mid 不标记
- * - 成品库 = 未被任何坏维度（高置信）标记 且 不在待确认/垃圾桶
+ * - 交付库 = 未被任何坏维度（高置信）标记 且 不在待确认/垃圾桶
  * - 用户手动放置（categoryBy = 'user'）优先，AI 不覆盖
  */
 import type { AppSettings, CategoryKey, DimResult, DimensionKey, ImageRecord } from '../shared/types'
@@ -61,7 +61,7 @@ export function computeCategory(tags: ImageRecord['tags'], settings: AppSettings
   }
   if (bestBad) return bestBad.dim
   if (anyMid) return CAT_REVIEW
-  // 中性维度高置信 -> 对应分类（同时属于成品库视图）
+  // 中性维度高置信 -> 对应分类（同时属于交付库视图）
   const neutrals = NEUTRAL_DIMENSIONS.filter((d) => {
     const t = tags[d]
     if (!t) return false
@@ -85,7 +85,7 @@ export function isNeutralCategory(cat: string): boolean {
   return (NEUTRAL_DIMENSIONS as string[]).includes(cat)
 }
 
-/** 是否属于成品库视图（导出"只导出成品库"的判定） */
+/** 是否属于交付库视图（导出"只导出交付库"的判定） */
 export function inLibrary(cat: string): boolean {
   return !isBadCategory(cat) && cat !== CAT_REVIEW && !isTrashLike(cat)
 }

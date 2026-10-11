@@ -1,16 +1,34 @@
 /**
  * 全局状态（zustand）
  * 覆盖：分类树与计数、当前视图图片、选择集（Shift/Ctrl 多选）、
- * 扫描进度事件流、一键修正、导出/设置对话框、视图模式快捷键 1-4
+ * 扫描进度事件流、一键修正、导出/设置对话框、视图快捷键 1-3 与大图 4
  */
 import { create } from 'zustand'
-import type { AppSettings, CategoryKey, ImageRecord, DimensionKey } from '../../shared/types'
-import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, DIMENSION_LABELS, isBadDim, isTrashLike, NEUTRAL_DIMENSIONS, guessMidDim, SUPPORTED_EXTS } from '../../shared/types'
+import type { AppSettings, CategoryKey, ImageRecord, DimensionKey, PerfHint } from '../../shared/types'
+import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, DIMENSION_LABELS, isBadDim, isTrashLike, NEUTRAL_DIMENSIONS, PERSON_DIMS, guessMidDim, SUPPORTED_EXTS } from '../../shared/types'
 import type { AuthState, BootstrapInfo, ConsumeResult, MoveRequest, UpdateInfo } from '../../shared/ipc'
 import type { ScanProgress } from '../../main/services/scanner'
 import type { ExportProgress } from '../../main/services/exporter'
 
 export type SortKey = 'default' | 'name' | 'name-desc' | 'conf-asc' | 'conf-desc' | 'time'
+
+/**
+ * 文件名过滤（纯展示层，不改库里任何数据）：大小写不敏感的子串匹配。
+ * 支持用空格/逗号/顿号/分号/换行分隔多个词，命中任意一个即保留——
+ * 开发者给的复查清单是一长串文件名，整段粘进来就能一次翻完。
+ */
+export function filterByQuery(images: ImageRecord[], query: string): ImageRecord[] {
+  const tokens = query
+    .toLowerCase()
+    .split(/[\s,，、;；\u3000]+/)
+    .map((t) => t.trim())
+    .filter(Boolean)
+  if (!tokens.length) return images
+  return images.filter((i) => {
+    const name = i.filename.toLowerCase()
+    return tokens.some((t) => name.includes(t))
+  })
+}
 
 /** 一次移动操作的撤回快照：保存移动前全部图片记录（分类/标签/categoryBy） */
 export interface UndoSnapshot {
@@ -22,21 +40,21 @@ export interface UndoSnapshot {
 }
 
 /**
- * 状态分类 = 成品库 / 待确认 / 自定义（不含维度分类与垃圾桶）。
- * 移动到状态分类 = 人工担保这张图，一并清掉全部坏维度/人数标签，让它从各坏图并集视图消失；
+ * 状态分类 = 交付库 / 待确认 / 自定义（不含维度分类与垃圾桶）。
+ * 移动到状态分类 = 人工担保这张图，清掉全部坏维度标签，让它从各坏图并集视图消失；
+ * 人数与黑白这类“客观事实”标签一律保留（导出按标签并集捞图，删了就再也选不回来）；
  * 移动到维度分类只补目标标签（其它维度证据保留），移入垃圾桶保留全部标签作为废弃原因。
  */
 function isStatusCat(cat: CategoryKey): boolean {
   return !isTrashLike(cat) && !isBadDim(cat) && !(NEUTRAL_DIMENSIONS as string[]).includes(cat)
 }
 
-/** 人数三维度互斥（与主进程 applyPersonTag 同口径） */
-const PERSON_DIMS: DimensionKey[] = ['single_person', 'group_photo', 'no_person']
+/** 人数四维度互斥表 PERSON_DIMS 直接从 shared/types 导入（与主进程同一份，不再各写一份） */
 
 /**
  * 标签增删的本地乐观更新：先把 store.images 里的记录改到位，界面立即变（芯片秒加/秒删），
  * 不等主进程写完再重拉整个分类列表（几千张时那才是“点了半天没反应”的根源）。
- * 主分类连带移出规则与后端 removeDimTag 一致：取剩余最高置信坏维度，没有则回成品库。
+ * 主分类连带移出规则与后端 removeDimTag 一致：取剩余最高置信坏维度，没有则回交付库。
  */
 function patchTagLocal(img: ImageRecord, dim: DimensionKey, add: boolean): ImageRecord {
   const tags = { ...img.tags }
@@ -51,14 +69,21 @@ function patchTagLocal(img: ImageRecord, dim: DimensionKey, add: boolean): Image
     }
     return { ...img, tags, category }
   }
-  if (PERSON_DIMS.includes(dim)) for (const d of PERSON_DIMS) if (d !== dim) delete tags[d]
-  tags[dim] = { confidence: 1, level: 'high', reason: '用户手动添加', method: 'user' }
-  return { ...img, tags, catChangedAt: Date.now() }
+  if (PERSON_DIMS.includes(dim)) {
+    for (const d of PERSON_DIMS) if (d !== dim) delete tags[d]
+    // 主分类是另一个人数分类时必须跟着换：维度相册是「主分类 ∪ 标签」的并集视图，
+    // 只换标签不换归属的话，旧相册仍会靠主分类命中它（一张图同时出现在单人照和多人合拍照）
+    if ((PERSON_DIMS as string[]).includes(category)) category = dim
+  }
+  // 与主进程 addDimTag 同口径：时间戳盖在标签上（taggedAt），只让图在目标分类排第一；
+  // 不刷 catChangedAt——那会把图在当前浏览的分类里也顶到顶部（加标签不是移动，位置不该动）
+  tags[dim] = { confidence: 1, level: 'high', reason: '用户手动添加', method: 'user', taggedAt: Date.now() }
+  return { ...img, tags }
 }
 
 /** 分类键 → 中文名（撤回提示用） */
 function catLabel(cat: CategoryKey, customs: Array<{ id: number; name: string }>): string {
-  if (cat === CAT_LIBRARY) return '成品库'
+  if (cat === CAT_LIBRARY) return '交付库'
   if (cat === CAT_REVIEW) return '待确认'
   if (cat === CAT_TRASH) return '垃圾桶'
   if (cat === CAT_DUP_TRASH) return '重复/连拍-废弃'
@@ -70,23 +95,35 @@ function catLabel(cat: CategoryKey, customs: Array<{ id: number; name: string }>
   return DIMENSION_LABELS[s as keyof typeof DIMENSION_LABELS] || s
 }
 
+/** 现存的主区布局（读回的老设置里可能出现已下线的 'large'，靠它白名单过滤） */
+const VIEW_MODES: string[] = ['grid', 'list', 'masonry']
+
 interface StoreState {
   ready: boolean
   settings: AppSettings
+  /** 低配精简模式生效中（第二档 A1，见 applyPerfLean）：渲染层选档/降级 UI 读它 */
+  perfLean: boolean
+  /** 机器性能探测原始结果（设置页展示本机档位用）：null=未探到/探测失败 */
+  perfHint: PerfHint | null
+  /** 纯按探测结果判“这台机器是不是低配”（不受手动档影响）：告诉用户自己的硬件级别用 */
+  perfAutoLean: boolean
   counts: Record<string, number>
   customCategories: Array<{ id: number; name: string }>
   activeCategory: CategoryKey | null
   images: ImageRecord[]
-  viewMode: 'grid' | 'list' | 'masonry' | 'large'
+  viewMode: 'grid' | 'list' | 'masonry'
   sortKey: SortKey
+  /** 文件名搜索词：只显示当前相册里匹配的图片，切相册自动清空 */
+  query: string
   /** 当前视图的展示顺序（id 序列，由 ImageView 在排序后同步）：点击索引必须按它映射，
    * 否则非默认排序下会选错图（选中样式“消失”） */
   displayIds: number[]
   selection: Set<number>
   anchorIndex: number
   previewId: number | null
+  /** 大图人脸框/关键点叠加：默认关。那是给校阈值的人看的诊断视图，
+   * 判片时框线只会遮住要看的细节；要看的人点顶部「标记叠加」打开，本次筛选全程记住 */
   previewOverlay: boolean
-  largeIndex: number
   scanProgress: ScanProgress | null
   importProgress: { done: number; total: number; current: string } | null
   /** 后台缩略图回填进度（生成完毕后为 null） */
@@ -123,11 +160,16 @@ interface StoreState {
   openCategory(cat: CategoryKey | null): Promise<void>
   refreshCounts(): Promise<void>
   refreshImages(): Promise<void>
+  /** 差量对账：操作后只重拉受影响的几张（移动/标签/撤回），替代整分类重拉；失败自动回退全量 */
+  refreshImagesFor(ids: number[]): Promise<void>
   setSort(k: SortKey): void
+  setQuery(q: string): void
   /** 视图层排序完成后同步展示序（内容未变时不重 set，避免渲染循环） */
   setDisplayIds(ids: number[]): void
-  setViewMode(m: 'grid' | 'list' | 'masonry' | 'large'): Promise<void>
+  setViewMode(m: 'grid' | 'list' | 'masonry'): Promise<void>
   handleClickSelect(index: number, e: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }): void
+  /** 网格空白处橡皮筋框选：把选中集整体设为框到的这批 id（additive=叠加到已有选中，否则全新选中） */
+  marqueeSelect(ids: number[], additive?: boolean): void
   toggleSelect(id: number): void
   selectAll(): void
   selectNone(): void
@@ -138,7 +180,7 @@ interface StoreState {
   reorder(ids: number[]): Promise<void>
   undoMove(): Promise<void>
   moveToTrash(): Promise<void>
-  /** 垃圾桶入口：单选直接移；多选（≥2）弹确认框（与大图模式垃圾桶确认同语义） */
+  /** 垃圾桶入口：单选直接移；多选（≥2）弹确认框（与放大弹窗的垃圾桶确认同语义） */
   askTrash(physical?: boolean): void
   confirmTrashAsk(): void
   dismissTrashAsk(): void
@@ -151,16 +193,18 @@ interface StoreState {
   addTag(ids: number[], dim: DimensionKey): Promise<void>
   /** 标签写入进行中的提示文案（null = 空闲）：卡片上的反馈 */
   tagBusy: string | null
-  /** 标签管理器：非大图视图下对单/多选图增删标签（null=关闭） */
+  /** 标签管理器：列表端对单/多选图增删标签（null=关闭；放大弹窗里的标签栏不走它） */
   tagManagerIds: number[] | null
+  /** 本次弹窗打开期间是否真正成功做过标签增删：关闭时据此清空多选 */
+  tagManagerTouched: boolean
   openTagManager(ids: number[]): void
   closeTagManager(): void
   openPreview(id: number): void
   closePreview(): void
   togglePreviewOverlay(): void
   stepPreview(delta: number): void
-  setLargeIndex(i: number): void
-  stepLarge(delta: number): void
+  /** 顶栏「大图」/ 快捷键 4：直接打开与双击小图同一个放大弹窗 */
+  openLargePreview(): void
   startScan(): Promise<void>
   stopScan(): Promise<void>
   rescanAll(): Promise<void>
@@ -182,7 +226,7 @@ interface StoreState {
   bindEvents(): void
 }
 
-/** 排序 key：坏标签最高置信度（用于成品库内优先抽查低置信度） */
+/** 排序 key：坏标签最高置信度（用于交付库内优先抽查低置信度） */
 function sortConf(img: ImageRecord): number {
   const vals = Object.values(img.tags || {})
   if (!vals.length) return 1
@@ -199,6 +243,102 @@ function applyTheme(t: 'light' | 'dark'): void {
 
 /** 启动更新检查只跑一次（bootstrap 可能因 HMR/重渲染重入） */
 let updateChecked = false
+
+/*
+ * 低配机自动降级（第二档 A1）：主进程探测（核数/内存/GPU 合成）+ 手动三档决定“是否进精简模式”。
+ * 砍的东西在 index.css 的 .perf-lean 规则里——只砍过渡动画、毛玻璃与装饰性 pulse；
+ * spin 加载转圈保留（不然用户分不清软件是卡死还是在忙），选中 ring 也不动。
+ * 探测线：<=4 核 / <8G 内存 / 软件渲染命中任意一条才降级，好机器 auto 下与从前完全一样。
+ */
+let perfHintCache: PerfHint | null = null
+function perfLeanFor(mode: 'auto' | 'full' | 'lean', hint: PerfHint | null): boolean {
+  if (mode === 'lean') return true
+  if (mode === 'full') return false
+  if (!hint) return false
+  return hint.cores <= 4 || hint.memGB < 7.5 || hint.gpuSoftware
+}
+function applyPerfLean(lean: boolean): void {
+  if (typeof document !== 'undefined') document.documentElement.classList.toggle('perf-lean', lean)
+}
+
+/*
+ * 标签写入合并（第二档 A2）：用户连续快点加/删标签时，上一笔还没写完库，后一笔的 id
+ * 并入同一批队列，一轮 drain 里每个（操作，维度）只发一次 IPC。乐观更新仍在点击瞬间
+ * 落到本地（芯片反馈不变），只是“写库+对账”按批发；toast 合并成一条；任一失败
+ * 回退全量对账列表（库里是真相，等价于把乐观态精确回滚）。
+ */
+interface TagOp {
+  kind: 'add' | 'remove'
+  dim: DimensionKey
+  ids: Set<number>
+  /** 排队时批量标签弹窗开着（成功后要标 tagManagerTouched） */
+  fromManager: boolean
+}
+const tagOpPending = new Map<string, TagOp>()
+let tagOpDraining: Promise<void> | null = null
+
+function queueTagOp(kind: 'add' | 'remove', dim: DimensionKey, ids: number[]): Promise<void> {
+  const key = `${kind}:${dim}`
+  let op = tagOpPending.get(key)
+  if (!op) {
+    op = { kind, dim, ids: new Set(), fromManager: !!useStore.getState().tagManagerIds }
+    tagOpPending.set(key, op)
+  }
+  for (const id of ids) op.ids.add(id)
+  if (!tagOpDraining) tagOpDraining = drainTagOps().finally(() => { tagOpDraining = null })
+  return tagOpDraining
+}
+
+async function drainTagOps(): Promise<void> {
+  const allIds = new Set<number>()
+  let opsSeen = 0
+  let last: TagOp | null = null
+  let managerTouched = false
+  let failed: unknown = null
+  while (tagOpPending.size && !failed) {
+    const batch = [...tagOpPending.values()]
+    tagOpPending.clear()
+    useStore.setState({
+      tagBusy: `${batch[0].kind === 'add' ? '正在标记' : '正在移除'}「${DIMENSION_LABELS[batch[0].dim]}」…`
+    })
+    for (const op of batch) {
+      opsSeen++
+      const ids = [...op.ids]
+      try {
+        if (op.kind === 'add') await window.api.addDimTag(ids, op.dim)
+        else await window.api.removeDimTag(ids, op.dim)
+        for (const id of ids) allIds.add(id)
+        if (op.fromManager) managerTouched = true
+        last = op
+      } catch (e) {
+        failed = e
+        break
+      }
+    }
+  }
+  if (failed || !last) {
+    if (failed) {
+      useStore.setState({ tagBusy: null, toast: { msg: `保存标签失败：${String(failed).slice(0, 180)}`, kind: 'error' } })
+      void useStore.getState().refreshImages()
+    } else {
+      useStore.setState({ tagBusy: null })
+    }
+    return
+  }
+  const single = opsSeen === 1
+  useStore.setState({
+    tagBusy: null,
+    toast: single
+      ? last.kind === 'add'
+        ? { msg: `已为 ${last.ids.size} 张图添加「${DIMENSION_LABELS[last.dim]}」标签，已出现在该分类第一张（记为漏检，已喂 AI 学习）`, kind: 'success', duration: 1600 }
+        : { msg: `已从 ${last.ids.size} 张图移除「${DIMENSION_LABELS[last.dim]}」标签（记为误判，已喂 AI 学习）`, kind: 'success', duration: 1400 }
+      : { msg: `已合并保存 ${allIds.size} 张图的标签改动（已喂 AI 学习）`, kind: 'success', duration: 1400 },
+    ...(managerTouched && useStore.getState().tagManagerIds ? { tagManagerTouched: true } : {})
+  })
+  // 一轮合并后统一对账受影响 id 与计数，不阻塞反馈：主分类连带移出等结果后台校正
+  const s = useStore.getState()
+  void Promise.all([s.refreshImagesFor([...allIds]), s.refreshCounts()])
+}
 
 export const useStore = create<StoreState>((set, get) => ({
   ready: false,
@@ -217,20 +357,24 @@ export const useStore = create<StoreState>((set, get) => ({
     lastImportDir: null
   },
   counts: {},
+  perfLean: false,
+  perfHint: null,
+  perfAutoLean: false,
   customCategories: [],
   activeCategory: null,
   images: [],
   viewMode: 'grid',
   // 默认按导入时间倒序：每次新导入/全量筛选后，新增图片排在每个分类最前面，方便优先复查新一批
   sortKey: 'time',
+  query: '',
   displayIds: [],
   selection: new Set<number>(),
   anchorIndex: -1,
   previewId: null,
   tagManagerIds: null,
+  tagManagerTouched: false,
   tagBusy: null,
-  previewOverlay: true,
-  largeIndex: 0,
+  previewOverlay: false,
   scanProgress: null,
   importProgress: null,
   thumbsProgress: null,
@@ -258,9 +402,25 @@ export const useStore = create<StoreState>((set, get) => ({
       counts: info.counts,
       customCategories: info.customCategories,
       scanProgress: info.progress?.total != null || info.progress?.running ? info.progress : info.progress,
-      viewMode: info.settings.viewMode,
+      // 设置是从库里读回来的，可能带着老版本的 viewMode='large'（独立大图视图已下线，
+      // 见 openLargePreview）：不兜一下主区三个分支都匹配不上，什么都不渲染，看着像图全没了
+      viewMode: VIEW_MODES.includes(info.settings.viewMode) ? info.settings.viewMode : 'grid',
       toast: info.engine.type === 'node' ? { msg: info.engine.message, kind: 'info' } : null
     })
+    // 低配机自动降级（第二档 A1）：探测一次并缓存，perfMode=auto 时据此进精简模式；不阻塞首屏
+    void window.api
+      .perfHint()
+      .then((h) => {
+        perfHintCache = h
+        const lean = perfLeanFor(info.settings.perfMode ?? 'auto', h)
+        // 探测结果与“纯硬件判档”一并存进 state：设置页要告诉用户自己的机器是什么级别，
+        // 这与用户选没选自动无关（perfAutoLean 只按探测线算，不受 perfMode 手动档影响）
+        set({ perfLean: lean, perfHint: h, perfAutoLean: perfLeanFor('auto', h) })
+        applyPerfLean(lean)
+      })
+      .catch(() => {
+        /* 探测失败保持全特效：宁可不降级，不能误伤好机器 */
+      })
     // 恢复登录态（不阻塞首屏）
     void window.api.authBootstrap().then((a) => set({ auth: a }))
     await get().openCategory(null)
@@ -390,7 +550,8 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   async openCategory(cat) {
-    set({ activeCategory: cat, selection: new Set(), anchorIndex: -1, largeIndex: 0 })
+    // 切相册时清空搜索：带着上一个相册的关键词进来，看着就像空库，最容易误判成“图没了”
+    set({ activeCategory: cat, selection: new Set(), anchorIndex: -1, query: '' })
     const images = await window.api.listImages(cat ? { category: cat } : {})
     set({ images })
     await get().refreshCounts()
@@ -404,10 +565,61 @@ export const useStore = create<StoreState>((set, get) => ({
     const { activeCategory } = get()
     const images = await window.api.listImages(activeCategory ? { category: activeCategory } : {})
     set({ images })
+    // 选中集必须跟着新列表裁剪：删标签（主分类连带移出）/ 移动等操作会把图送出当前分类，
+    // 不裁剪就会出现“5 张都已移走、底部工具栏还写着已选中 5 张”，而且这些残留 id 会被下一批
+    // 选中操作误作用。裁剪发生在拉完列表后（即对账时刻），所以乐观更新不会受影响。
+    const sel = get().selection
+    if (sel.size) {
+      const present = new Set(images.map((i) => i.id))
+      if ([...sel].some((id) => !present.has(id))) {
+        set({ selection: new Set([...sel].filter((id) => present.has(id))), anchorIndex: -1 })
+      }
+    }
+  },
+
+  /**
+   * 差量对账：操作（移动/加删标签/撤回）后只回拉受影响的那几张——就地更新、不再属于当前
+   * 视图的移除、新出现的追加（视图层 sorted 按 viewTime 把它排到最前；sortKey=default 的
+   * reorder 仍走全量）。这是低配机“点一下卡一下”的主要提速点；差量失败回退全量，对账语义不变。
+   */
+  async refreshImagesFor(ids) {
+    if (!ids.length) return
+    const { activeCategory } = get()
+    try {
+      const recs = await window.api.listByIds(activeCategory ?? 'all', ids)
+      // 在途期间用户切了相册：响应属于旧视图，丢弃（新相册的全量列表马上就到，不需补）
+      if (get().activeCategory !== activeCategory) return
+      const touched = new Set(ids)
+      const byId = new Map(recs.map((r) => [r.id, r]))
+      const next: ImageRecord[] = []
+      for (const img of get().images) {
+        if (!touched.has(img.id)) {
+          next.push(img)
+          continue
+        }
+        const rep = byId.get(img.id)
+        if (rep) next.push(rep)
+      }
+      const present = new Set(next.map((i) => i.id))
+      for (const r of recs) if (!present.has(r.id)) next.push(r)
+      set({ images: next })
+      // 选中集同步裁剪（与全量对账同规则）：被操作且已不在当前视图的 id 从选中里去掉，
+      // 不然“已选 5 张”里挂着 5 张早被移走的 id，下一批选中会误作用
+      const sel = get().selection
+      if (sel.size && [...sel].some((id) => touched.has(id) && !present.has(id))) {
+        set({ selection: new Set([...sel].filter((id) => !touched.has(id) || present.has(id))), anchorIndex: -1 })
+      }
+    } catch {
+      void get().refreshImages()
+    }
   },
 
   setSort(k) {
     set({ sortKey: k })
+  },
+
+  setQuery(q) {
+    set({ query: q })
   },
 
   setDisplayIds(ids) {
@@ -439,6 +651,15 @@ export const useStore = create<StoreState>((set, get) => ({
       set({ anchorIndex: index })
     }
     set({ selection: sel })
+  },
+
+  marqueeSelect(ids, additive = false) {
+    // 框选=整体替换（用户拍板 2026-10-11）：拖一个框就是把这批重新选出来，旧选中直接丢掉；
+    // 按住 Ctrl 拖才叠加。anchorIndex 置 -1：框不产生“连选锚点”，避免随后 Shift 连选
+    // 从一个莫名其妙的旧下标开始拉。
+    const sel = additive ? new Set(get().selection) : new Set<number>()
+    for (const id of ids) sel.add(id)
+    set({ selection: sel, anchorIndex: -1 })
   },
 
   toggleSelect(id) {
@@ -477,7 +698,7 @@ export const useStore = create<StoreState>((set, get) => ({
     }
     await window.api.moveImages(req)
     set({ selection: new Set() })
-    await get().refreshImages()
+    await get().refreshImagesFor(ids)
     await get().refreshCounts()
     set({ toast: { msg: `已移动 ${ids.length} 张 → ${catLabel(cat, get().customCategories)}`, kind: 'success', duration: 1000 } })
   },
@@ -489,7 +710,7 @@ export const useStore = create<StoreState>((set, get) => ({
   askTrash(physical = false) {
     const { selection } = get()
     if (!selection.size) return
-    // 单选（含大图/列表）直接移；多选必须确认，防止批量误废
+    // 单选（含放大弹窗/列表）直接移；多选必须确认，防止批量误废
     if (selection.size >= 2) set({ trashAsk: { physical } })
     else void get().moveTo(CAT_TRASH, physical)
   },
@@ -503,16 +724,16 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   async restoreFromTrash() {
-    // 从垃圾桶移出 = 判定错误修正，回成品库
+    // 从垃圾桶移出 = 判定错误修正，回交付库
     const { selection } = get()
     if (!selection.size) return
     const ids = [...selection]
     get().pushUndo(ids, CAT_LIBRARY)
     await window.api.moveImages({ ids, category: CAT_LIBRARY, clearBadTags: true })
     set({ selection: new Set() })
-    await get().refreshImages()
+    await get().refreshImagesFor(ids)
     await get().refreshCounts()
-    set({ toast: { msg: `已还原 ${ids.length} 张 → 成品库`, kind: 'success', duration: 1000 } })
+    set({ toast: { msg: `已还原 ${ids.length} 张 → 交付库`, kind: 'success', duration: 1000 } })
   },
 
   async moveIds(ids, cat) {
@@ -524,9 +745,9 @@ export const useStore = create<StoreState>((set, get) => ({
       physical: false,
       clearBadTags: isStatusCat(cat)
     })
-    await get().refreshImages()
+    await get().refreshImagesFor(ids)
     await get().refreshCounts()
-    // 大图模式判定栏（垃圾桶/移动到）同样给用户即时反馈，1 秒自动消失
+    // 放大弹窗判定栏（垃圾桶/移动到）同样给用户即时反馈，1 秒自动消失
     set({ toast: { msg: `已移动 ${ids.length} 张 → ${catLabel(cat, get().customCategories)}`, kind: 'success', duration: 1000 } })
   },
 
@@ -553,7 +774,7 @@ export const useStore = create<StoreState>((set, get) => ({
     if (!last) return
     set({ undoSnapshots: undoSnapshots.slice(0, -1), selection: new Set() })
     await window.api.restoreImages(last.recs)
-    await get().refreshImages()
+    await get().refreshImagesFor(last.ids)
     await get().refreshCounts()
     const fromCats = [...new Set(last.recs.map((r) => catLabel(r.category, get().customCategories)))]
     set({
@@ -585,66 +806,51 @@ export const useStore = create<StoreState>((set, get) => ({
       await get().refreshCounts()
     }
     if (req.action === 'correct') {
-      set({ toast: { msg: '已确认判定正确，记录用于阈值微调', kind: 'success' } })
+      // 待确认图点“此判定正确”不会离开待确认（它只写一条学习记录，不改归属），必须说清，
+      // 否则用户一路点下去会以为在清队列，而待确认计数一张没减
+      set({
+        toast: {
+          msg:
+            rec.category === CAT_REVIEW
+              ? '已记录“判定正确”（仅学习样本）：这张仍留在待确认，要放行请点 ✓ 合格 → 交付库'
+              : '已确认判定正确，记录用于阈值微调',
+          kind: 'success'
+        }
+      })
       // 预览层不关闭，自动看下一张（5.2）
       get().stepPreview(1)
     }
   },
 
-  /** 删除标签（可批量）：本地先改到位（芯片秒删）→ 写库→后台校准列表与计数 */
+  /** 删除标签（可批量）：本地先改到位（芯片秒删）→ 写入并入合并队列（第二档 A2） */
   async removeTag(ids, dim) {
     if (!ids.length) return
-    const label = DIMENSION_LABELS[dim]
     const idSet = new Set(ids)
-    set({
-      tagBusy: `正在移除「${label}」标签…`,
-      images: get().images.map((i) => (idSet.has(i.id) ? patchTagLocal(i, dim, false) : i))
-    })
-    try {
-      await window.api.removeDimTag(ids, dim)
-    } catch (e) {
-      // IPC 报错必须让用户看见，并回滚乐观结果，否则“提示成功但界面不变”无从判断哪里出错
-      set({ tagBusy: null, toast: { msg: `移除「${label}」失败：${String(e).slice(0, 180)}`, kind: 'error' } })
-      void get().refreshImages()
-      return
-    }
-    set({
-      tagBusy: null,
-      toast: { msg: `已从 ${ids.length} 张图移除「${label}」标签（记为误判，已喂 AI 学习）`, kind: 'success', duration: 1400 }
-    })
-    // 重拉列表与计数并行且不阻塞反馈：主分类连带移出等结果在后台对账
-    void Promise.all([get().refreshImages(), get().refreshCounts()])
+    set({ images: get().images.map((i) => (idSet.has(i.id) ? patchTagLocal(i, dim, false) : i)) })
+    await queueTagOp('remove', dim, ids)
   },
 
-  /** 添加标签（可批量）：本地先长出来（芯片秒加）→ 写库→后台把图排到目标分类第一并校准计数 */
+  /** 添加标签（可批量）：本地先长出来（芯片秒加）→ 写入并入合并队列，落库后后台对账位置与计数 */
   async addTag(ids, dim) {
     if (!ids.length) return
-    const label = DIMENSION_LABELS[dim]
     const idSet = new Set(ids)
-    set({
-      tagBusy: `正在标记「${label}」，请稍候…`,
-      images: get().images.map((i) => (idSet.has(i.id) ? patchTagLocal(i, dim, true) : i))
-    })
-    try {
-      await window.api.addDimTag(ids, dim)
-    } catch (e) {
-      set({ tagBusy: null, toast: { msg: `添加「${label}」标签失败：${String(e).slice(0, 180)}`, kind: 'error' } })
-      void get().refreshImages()
-      return
-    }
-    set({
-      tagBusy: null,
-      toast: { msg: `已为 ${ids.length} 张图添加「${label}」标签，已出现在该分类第一张（记为漏检，已喂 AI 学习）`, kind: 'success', duration: 1600 }
-    })
-    void Promise.all([get().refreshImages(), get().refreshCounts()])
+    set({ images: get().images.map((i) => (idSet.has(i.id) ? patchTagLocal(i, dim, true) : i)) })
+    await queueTagOp('add', dim, ids)
   },
 
   openTagManager(ids) {
     if (!ids.length) return
-    set({ tagManagerIds: ids })
+    set({ tagManagerIds: ids, tagManagerTouched: false })
   },
+  /**
+   * 关闭弹窗：只要期间真正成功做过加/删/换标签，就把多选整体清空。
+   * 被操作移走本分类的图已经在 refreshImages 里被裁剪掉了，但没被移走的还挂着选中——
+   * 用户接着点下一张选时会把旧多选累加上去（用户反馈 2026-10-11）。
+   * 没做过任何操作（只打开看了看）则保留选中，不剥夺用户原来的选择。
+   */
   closeTagManager() {
-    set({ tagManagerIds: null })
+    if (get().tagManagerTouched) set({ tagManagerIds: null, tagManagerTouched: false, selection: new Set<number>(), anchorIndex: -1 })
+    else set({ tagManagerIds: null })
   },
 
   /** 批量判定（多选工具条用）：对每张选中图按当前 AI 判定记录修正学习 */
@@ -670,9 +876,20 @@ export const useStore = create<StoreState>((set, get) => ({
         /* 单张失败不中断批量 */
       }
     }
-    await get().refreshImages()
+    await get().refreshImagesFor(ids)
     await get().refreshCounts()
-    set({ toast: { msg: `已对 ${n} 张图记录判定${action === 'correct' ? '（正确）' : '（错误→修正）'}`, kind: 'success' } })
+    // 与单张 correct() 同理：待确认图点“此判定正确”只写学习样本、不会离开待确认，
+    // 不写明的话用户会以为在清队列（一张没减）
+    const nReview =
+      action === 'correct' ? ids.filter((id) => images.find((i) => i.id === id)?.category === CAT_REVIEW).length : 0
+    set({
+      toast: {
+        msg: `已对 ${n} 张图记录判定${action === 'correct' ? '（正确）' : '（错误→修正）'}${
+          nReview ? `，其中 ${nReview} 张仍留在待确认（此按钮只记样本不改归属），放行请点 ✓ 好图 → 交付库` : ''
+        }`,
+        kind: 'success'
+      }
+    })
   },
 
   openPreview(id) {
@@ -692,15 +909,19 @@ export const useStore = create<StoreState>((set, get) => ({
     if (next) set({ previewId: next.id })
   },
 
-  setLargeIndex(i) {
-    const { images } = get()
-    if (!images.length) return
-    set({ largeIndex: Math.min(images.length - 1, Math.max(0, i)) })
-  },
-  stepLarge(delta) {
-    const { images, largeIndex } = get()
-    if (!images.length) return
-    set({ largeIndex: Math.min(images.length - 1, Math.max(0, largeIndex + delta)) })
+  /**
+   * 顶栏「大图」按钮与快捷键 4。
+   * 以前它是第四种布局（LargeView：左侧缩略图条 + 主图 + 底栏判定），与双击小图弹出的
+   * 放大弹窗功能几乎重叠——两套“大图”各有自己一套操作，用户得记两遍，还容易在两套之间迷路。
+   * 现在直接复用放大弹窗：← → 翻页、判定工具栏、标记叠加、双击缩放全都在。
+   * 从哪张开始：优先当前选中的第一张（按展示序，不是按导入序），没选中就从列表第一张。
+   */
+  openLargePreview() {
+    const { images, displayIds, selection } = get()
+    const order = displayIds.length === images.length ? displayIds : images.map((i) => i.id)
+    if (!order.length) return
+    const first = order.find((id) => selection.has(id)) ?? order[0]
+    set({ previewId: first })
   },
 
   async startScan() {
@@ -731,14 +952,27 @@ export const useStore = create<StoreState>((set, get) => ({
     set({ engineBusy: true })
     const r = await window.api.scanRescanAll()
     set({ engineBusy: false })
-    if (!r.started) set({ toast: { msg: r.message, kind: 'info' } })
+    if (!r.started) {
+      set({ toast: { msg: r.message, kind: 'info' } })
+      return
+    }
+    // 归位后立刻重拉列表与计数：不然界面要等第一张图检完才动，整轮开头看着像“数字死了”
+    await get().refreshImages()
+    await get().refreshCounts()
+    set({
+      toast: {
+        msg: `已开始重新筛选：上一轮 AI 判定已清零 ${r.reset ?? 0} 张，左侧数字会随进度重新涨起来；你手动放置与垃圾桶里的图未改动`,
+        kind: 'success',
+        duration: 4000
+      }
+    })
   },
 
+  /** 真正的清库动作：二次确认在 TopBar 的应用内弹窗里做（Electron 对原生 window.confirm
+   * 的支持不可依赖，旧守卫在不同版本下要么弹不出要么永远拦截），本函数不再自带确认 */
   async clearLibraryAll() {
-    const n = get().counts.all ?? 0
-    if (!confirm(`确定清空图库？将删除软件内 ${n} 条图片记录与全部修正记录（磁盘上的原始照片文件不会被删除），之后可重新导入。`)) return
     const r = await window.api.libraryClear()
-    set({ selection: new Set(), previewId: null, scanProgress: null, largeIndex: 0, undoSnapshots: [] })
+    set({ selection: new Set(), previewId: null, scanProgress: null, undoSnapshots: [] })
     void get().saveSettings({ lastImportDir: null }) // 清空图库后不再显示“当前筛选目录”
     await get().openCategory(get().activeCategory)
     set({ toast: { msg: `已清空图库（原 ${r.cleared} 张），可重新导入照片了`, kind: 'success' } })
@@ -754,6 +988,12 @@ export const useStore = create<StoreState>((set, get) => ({
     const s = await window.api.saveSettings(patch)
     set({ settings: s })
     if (patch.viewMode) set({ viewMode: patch.viewMode })
+    // 性能模式变更：立刻重判定精简模式（复用启动探测缓存，不再多一次 IPC）
+    if (patch.perfMode !== undefined) {
+      const lean = perfLeanFor(patch.perfMode, perfHintCache)
+      set({ perfLean: lean })
+      applyPerfLean(lean)
+    }
     if (reclassify) {
       await window.api.reclassify()
       await get().refreshImages()

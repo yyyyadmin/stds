@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-筛图大师 AI 引擎 PyInstaller 打包规范（onedir 模式）
+筛片大师 AI 引擎 PyInstaller 打包规范（onedir 模式）
 
 用途：把 ai-engine（main.py + engine 包 + OpenCV/numpy/onnxruntime 依赖 + Haar 级联数据）
 打成自包含可执行文件 `screener-engine`，随安装包分发，实现「每台设备（含 mac）免安装

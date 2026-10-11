@@ -2,7 +2,7 @@
  * Node 内置降级引擎：Python 不可用时的保底检测
  * 基于 sharp 像素级计算：画面模糊（Laplacian）、曝光异常（Lab 直方图规则）、黑白照（通道差）
  * 人脸类维度（闭眼/斜眼/狰狞/半截头/人数）无法在纯 Node 高精度完成 -> 不输出对应标签，
- * 这些图片按规则进入成品库并可按置信度排序抽查。
+ * 这些图片按规则进入交付库并可按置信度排序抽查。
  */
 import sharp from 'sharp'
 import { EventEmitter } from 'events'

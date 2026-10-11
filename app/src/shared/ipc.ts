@@ -1,7 +1,7 @@
 /**
  * IPC 通道与渲染层 API 契约（preload <-> renderer 共享）
  */
-import type { AppSettings, CategoryKey, DimensionKey, ImageRecord } from './types'
+import type { AppSettings, CategoryKey, DimensionKey, ImageRecord, PerfHint } from './types'
 import type { ScanProgress } from '../main/services/scanner'
 import type { ExportOptions, ExportProgress } from '../main/services/exporter'
 import type { EngineStatus } from '../main/engine'
@@ -74,7 +74,9 @@ export const CH = {
   listImages: 'images:list',
   listImagesByGroups: 'images:by-groups', // 按 dup_group 取整组成员（重复/连拍分组视图补全“第一张”）
   imageGet: 'images:get',
+  listByIds: 'images:list-by-ids', // 差量刷新：只重拉受影响 id 的精简记录（不含 details），并按当前分类视图判定去留
   categoryCounts: 'images:counts',
+  perfHint: 'perf:hint', // 机器性能探测（核数/内存/GPU 合成）：低配自动精简的依据
   moveImages: 'images:move',
   restoreImages: 'images:restore', // 撤回移动：按快照还原分类与标签
   reorderImages: 'images:reorder', // 手动拖拽排序：按传入 id 顺序写入 sort_order
@@ -152,7 +154,7 @@ export interface MoveRequest {
   ids: number[]
   category: CategoryKey
   physical?: boolean
-  /** 是否同时清除旧 AI 坏标签（移动到成品库/中性分类时） */
+  /** 是否同时清除旧 AI 坏标签（目标是交付库或中性维度—即侧栏「人物与影调」—时） */
   clearBadTags?: boolean
 }
 
@@ -175,7 +177,11 @@ export interface RendererApi {
   /** 按 dup_group 批量取整组全部成员（含不在当前分类的保留帧），供重复/连拍分组视图补全整组 */
   listImagesByGroups(gids: string[]): Promise<ImageRecord[]>
   getImage(id: number): Promise<ImageRecord | null>
+  /** 差量对账：按当前视图分类回拉受影响 id 的最新记录；不再属于该视图的 id 不会出现在返回里（调用方据此移除） */
+  listByIds(category: CategoryKey, ids: number[]): Promise<ImageRecord[]>
   categoryCounts(): Promise<Record<string, number>>
+  /** 机器性能探测（第二档 A1）：窗口出来后调一次，结合 perfMode 决定是否进精简模式 */
+  perfHint(): Promise<PerfHint>
   moveImages(req: MoveRequest): Promise<void>
   /** 撤回移动：把移动前的整批快照（分类/标签/categoryBy）原样还原 */
   restoreImages(snapshots: ImageRecord[]): Promise<void>
@@ -194,7 +200,7 @@ export interface RendererApi {
   saveSettings(s: Partial<AppSettings>): Promise<AppSettings>
   scanStart(): Promise<{ started: boolean; message: string }>
   scanStop(): Promise<void>
-  scanRescanAll(): Promise<{ started: boolean; message: string }>
+  scanRescanAll(): Promise<{ started: boolean; message: string; reset?: number }>
   reclassify(): Promise<void>
   exportPreview(opts: ExportOptions): Promise<{ will: number; total: number }>
   exportRun(opts: ExportOptions): Promise<ExportProgress['finished']>

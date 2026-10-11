@@ -91,7 +91,7 @@ export default function LoginDialog(): JSX.Element | null {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 fade-in" onClick={(e) => e.target === e.currentTarget && close()}>
       <div className="w-[380px] bg-panel border border-line rounded-2xl shadow-2xl p-5">
         <div className="flex items-center justify-between mb-1">
-          <h2 className="text-lg font-bold text-fg">欢迎使用筛图大师</h2>
+          <h2 className="text-lg font-bold text-fg">欢迎使用筛片大师</h2>
           <button className="btn-ghost text-fg3" onClick={close} title="关闭（Esc）">✕</button>
         </div>
         <p className="text-xs text-fg2 mb-4">登录后可开始 AI 筛选，1 张照片消耗 1 积分，会员不扣积分。</p>

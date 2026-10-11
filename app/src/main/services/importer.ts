@@ -3,12 +3,25 @@
  * - 递归遍历目录，去重（同路径不重复导入）
  * - sharp 读取尺寸 + 生成缩略图缓存；无法解码的文件标记 skip
  */
-import { readdirSync, statSync, unlinkSync } from 'fs'
+import { readdirSync, statSync, unlinkSync, existsSync } from 'fs'
 import { basename, extname, join } from 'path'
 import sharp from 'sharp'
 import { insertImage, imageExists, thumbDir, setImageMeta, setImageStatus, listPendingThumbs, countPendingThumbs, getDb } from '../db'
-import { SUPPORTED_EXTS } from '../../shared/types'
+import { SUPPORTED_EXTS, THUMB_MAX, THUMB_QUALITY, THUMB_SUFFIX, THUMB_SMALL_MAX, THUMB_SMALL_QUALITY, smallThumbPath } from '../../shared/types'
 import { orientedSharp } from './rawPreview'
+
+/**
+ * 缩略图双档：大档长边 960px + 质量 82（历史档位 256 → 640 → 960），小档 320px（见 shared/types 注释）。
+ * 为什么逐次提档：网格卡片是正方形且能用 Ctrl+滚轮放到 610 CSS px（GRID_MAX），<img> 是
+ * object-cover，真正决定清晰度的是**短边**像素——3:2 横片在 640 档下短边只有 427px，
+ * 放到一行三张时 100% 系统缩放就有 1.43 倍拉伸，能看出发软。960 档短边 640px：
+ * 610 格子在 100% 缩放回到约 1:1，125% 缩放也只差 1.2 倍；默认 160 格子更是大幅过足。
+ * 但“过足”在普通格子上就是浪费：解码开销随像素面积走，3000 张全用 960 解码是低配机
+ * 滚动卡顿大头，所以另生一层 320 小档给网格/列表用，渲染层按 格子×DPR 自动选档。
+ * 文件名里的大档后缀（THUMB_SUFFIX）就是版本号：改常量后旧档自动判“待重建”，
+ * 后台无感重刷，刷完 pruneUnreferencedThumbs 自动回收老档（小档按大档名派生，一并放行）；
+ * 设置里的「清除缓存」是推倒重来（连已重建的新档也删掉全量重建），一般用不着。
+ */
 
 function walk(dir: string, out: string[], stats: { filtered: number }, depth = 0): void {
   if (depth > 8) return
@@ -97,15 +110,23 @@ export async function importPaths(
   return { added, skipped: 0, existed, filtered: stats.filtered }
 }
 
-/** 单张图片：读尺寸 + 生成 256px 缩略图；RAW 解码失败时自动提取内嵌 JPEG 预览兜底；仍失败才标记 skip */
+/** 单张图片：读尺寸 + 生成缩略图双档（大档见 THUMB_MAX，小档由大档换后缀派生）；RAW 解码失败时自动提取内嵌 JPEG 预览兜底；仍失败才标记 skip */
 async function makeThumb(id: number, path: string): Promise<void> {
   try {
     const meta = await (await orientedSharp(path)).metadata()
-    const thumbPath = join(thumbDir(), `${Buffer.from(path).toString('base64url').replace(/[+/=]/g, '_')}.jpg`)
+    const thumbPath = join(thumbDir(), `${Buffer.from(path).toString('base64url').replace(/[+/=]/g, '_')}${THUMB_SUFFIX}`)
     await (await orientedSharp(path))
-      .resize({ width: 256, height: 256, fit: 'inside', withoutEnlargement: true })
-      .jpeg({ quality: 76 })
+      .resize({ width: THUMB_MAX, height: THUMB_MAX, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: THUMB_QUALITY })
       .toFile(thumbPath)
+    // 小档从已生成大档缩：不必再解一次原图（RAW 尤其贵）。小档失败无害——
+    // 渲染层 onError 自动回退大档，不影响正确性，所以不纳入 skip 判定。
+    try {
+      const sp = smallThumbPath(thumbPath)
+      if (sp) await sharp(thumbPath).resize({ width: THUMB_SMALL_MAX, height: THUMB_SMALL_MAX, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: THUMB_SMALL_QUALITY }).toFile(sp)
+    } catch {
+      /* 小档缺失由 backfillSmallThumbs 下次启动补 */
+    }
     setImageMeta(id, meta.width || 0, meta.height || 0, thumbPath)
   } catch {
     setImageStatus(id, 'skip')
@@ -126,10 +147,10 @@ export async function backfillThumbnails(
   backfilling = true
   try {
     let done = 0
-    let total = countPendingThumbs()
+    let total = countPendingThumbs(THUMB_SUFFIX)
     onProgress?.({ done, total })
     while (true) {
-      const rows = listPendingThumbs(24)
+      const rows = listPendingThumbs(24, THUMB_SUFFIX)
       if (!rows.length) break
       const CONCURRENCY = 3
       for (let i = 0; i < rows.length; i += CONCURRENCY) {
@@ -139,13 +160,47 @@ export async function backfillThumbnails(
       }
       done += rows.length
       // 回填期间可能有新导入，总数动态校准
-      total = Math.max(total, done + countPendingThumbs())
+      total = Math.max(total, done + countPendingThumbs(THUMB_SUFFIX))
       onProgress?.({ done, total })
       onBatch(rows.length)
     }
     onProgress?.({ done: total, total })
+    // 全部追上新档后，老 256px 文件（以及已删图残留）已无人指向，收掉腾回磁盘
+    if (done > 0) pruneUnreferencedThumbs()
   } finally {
     backfilling = false
+  }
+}
+
+let smallBackfilling = false
+
+/**
+ * 小档补齐（老库升级一次性成本）：已有当前大档但小档文件缺失的，直接从大档缩一张。
+ * 不报进度、不发 thumbsReady：回填期间渲染层请求小档失败会 onError 自动回退大档，
+ * 用户全程有图可看，事后新渲染的卡片自然用上小档，无需任何刷新。
+ */
+export async function backfillSmallThumbs(): Promise<void> {
+  if (smallBackfilling) return
+  smallBackfilling = true
+  try {
+    const rows = getDb().prepare(`SELECT thumb FROM images WHERE thumb != '' AND thumb LIKE ?`).all(`%${THUMB_SUFFIX}`) as Array<{ thumb: string }>
+    for (let i = 0; i < rows.length; i += 16) {
+      const slice = rows.slice(i, i + 16)
+      await Promise.all(
+        slice.map(async (r) => {
+          const sp = smallThumbPath(r.thumb)
+          if (!sp || existsSync(sp)) return
+          try {
+            await sharp(r.thumb).resize({ width: THUMB_SMALL_MAX, height: THUMB_SMALL_MAX, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: THUMB_SMALL_QUALITY }).toFile(sp)
+          } catch {
+            /* 单张损坏跳过，下次启动再试 */
+          }
+        })
+      )
+      await new Promise((res) => setImmediate(res))
+    }
+  } finally {
+    smallBackfilling = false
   }
 }
 
@@ -161,6 +216,38 @@ export function clearThumbCache(): number {
         n++
       } catch {
         /* 占用中的文件跳过 */
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return n
+}
+
+/**
+ * 删除缩略图目录里已无人指向的文件，返回清理个数。
+ * 以库里的 thumb 字段为准：正在用、以及“还没轮到重建”的老档图都还被某行指着，不会被误删；
+ * 小档不入库，按大档名派生白名单（否则会被当无主垃圾收掉，网格天天回退大档提速白做）；
+ * 只有升级后被彻底抛弃的老档文件（连同已删照片的残留）才会被收掉。
+ */
+export function pruneUnreferencedThumbs(): number {
+  const dir = thumbDir()
+  const keep = new Set<string>()
+  for (const r of getDb().prepare(`SELECT thumb FROM images WHERE thumb != ''`).all() as Array<{ thumb: string }>) {
+    const b = basename(r.thumb)
+    keep.add(b)
+    const s = smallThumbPath(b)
+    if (s) keep.add(s)
+  }
+  let n = 0
+  try {
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith('.jpg') || keep.has(f)) continue
+      try {
+        unlinkSync(join(dir, f))
+        n++
+      } catch {
+        /* 占用中的跳过，下次启动再清 */
       }
     }
   } catch {

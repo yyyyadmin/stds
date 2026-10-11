@@ -3,7 +3,7 @@
  */
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import { CH, type RendererApi, type CorrectRequest, type MoveRequest, type AuthState, type ConsumeResult } from '../shared/ipc'
-import type { AppSettings, ImageRecord } from '../shared/types'
+import type { AppSettings, CategoryKey, ImageRecord } from '../shared/types'
 import type { ExportOptions } from '../main/services/exporter'
 
 function sub<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -21,7 +21,9 @@ const api: RendererApi = {
   listImages: (filter) => ipcRenderer.invoke(CH.listImages, filter),
   listImagesByGroups: (gids: string[]) => ipcRenderer.invoke(CH.listImagesByGroups, gids),
   getImage: (id: number) => ipcRenderer.invoke(CH.imageGet, id),
+  listByIds: (category: CategoryKey, ids: number[]) => ipcRenderer.invoke(CH.listByIds, { category, ids }),
   categoryCounts: () => ipcRenderer.invoke(CH.categoryCounts),
+  perfHint: () => ipcRenderer.invoke(CH.perfHint),
   moveImages: (req: MoveRequest) => ipcRenderer.invoke(CH.moveImages, req),
   restoreImages: (snapshots: ImageRecord[]) => ipcRenderer.invoke(CH.restoreImages, snapshots),
   reorderImages: (ids: number[]) => ipcRenderer.invoke(CH.reorderImages, ids),

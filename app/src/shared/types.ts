@@ -13,7 +13,8 @@ export type DimensionKey =
   | 'half_head' // 半截头
   | 'duplicate' // 重复/连拍
   | 'single_person' // 单人照
-  | 'group_photo' // 多人合照
+  | 'group_photo' // 多人合拍照（规整摆拍，DB key 沿用历史值）
+  | 'mixed_photo' // 多人混合照（在场多人但非摆拍：接亲 / 游戏 / 仪式等互动情节）
   | 'no_person' // 无人物场景
   | 'black_white' // 黑白照
 
@@ -28,10 +29,11 @@ export const BAD_DIMENSIONS: DimensionKey[] = [
   'duplicate'
 ]
 
-/** 中性维度：仅作为分类标签 */
+/** 中性维度：仅作为分类标签（人数四分类按「少 → 多 → 无」排列，混合照紧跟合拍照） */
 export const NEUTRAL_DIMENSIONS: DimensionKey[] = [
   'single_person',
   'group_photo',
+  'mixed_photo',
   'no_person',
   'black_white'
 ]
@@ -45,9 +47,46 @@ export const DIMENSION_LABELS: Record<DimensionKey, string> = {
   half_head: '半截头',
   duplicate: '重复/连拍',
   single_person: '单人照',
-  group_photo: '多人合照',
+  group_photo: '多人合拍照',
+  mixed_photo: '多人混合照',
   no_person: '无人物场景',
   black_white: '黑白照'
+}
+
+/**
+ * 人数维度互斥表（单一来源）：一张图在同一时刻只能属于其中一个，
+ * 「多人合拍照」与「多人混合照」更是非此即彼（同一帧不可能既是规整摆拍又是扎堆抓拍）。
+ * 顺序即并列时的优先序：合拍照是五道几何闸全过的强结论，排前；混合照是兜底桶。
+ */
+export const PERSON_DIMS: DimensionKey[] = ['group_photo', 'mixed_photo', 'single_person', 'no_person']
+
+const PERSON_LEVEL_RANK: Record<ConfidenceLevel, number> = { high: 2, mid: 1, low: 0 }
+
+/**
+ * 人数标签互斥收口：tags 里同时出现多个人数维度时，只保留一个，其余删掉。
+ * 保留谁：① 用户手动标的优先（那是人工判定，不能悄悄丢掉）→ ② 级别更高 → ③ 置信度更高 → ④ 并列按 PERSON_DIMS 顺序。
+ * 所有写 tags 的出口（updateDetectResult / setDimTag）都必须过这里，否则一次旧数据残留
+ * 或一次合并写入，就会让同一张卡同时挂着「多人混合照 + 多人合拍照」两枚互相打脸的标签。
+ */
+export function enforcePersonMutex<T extends Record<string, { confidence: number; level: ConfidenceLevel; method?: string } | undefined>>(
+  tags: T
+): T {
+  const present = PERSON_DIMS.filter((d) => tags[d])
+  if (present.length <= 1) return tags
+  const keep = present.reduce((a, b) => {
+    const ta = tags[a]!
+    const tb = tags[b]!
+    const ua = ta.method === 'user' ? 1 : 0
+    const ub = tb.method === 'user' ? 1 : 0
+    if (ua !== ub) return ua > ub ? a : b
+    const la = PERSON_LEVEL_RANK[ta.level]
+    const lb = PERSON_LEVEL_RANK[tb.level]
+    if (la !== lb) return la > lb ? a : b
+    if (ta.confidence !== tb.confidence) return ta.confidence > tb.confidence ? a : b
+    return PERSON_DIMS.indexOf(a) <= PERSON_DIMS.indexOf(b) ? a : b
+  })
+  for (const d of present) if (d !== keep) delete tags[d]
+  return tags
 }
 
 /** 待确认图猜测存在中置信度的坏维度（修正记录用） */
@@ -85,12 +124,14 @@ export const DIMENSION_BIAS: Record<DimensionKey, DimBias> = {
   duplicate: 'recall',
   single_person: 'high',
   group_photo: 'high',
+  // 混合照是「凑不出规整主群」时的兜底桶，判定本身依赖构图几何，偏保守不主动放宽
+  mixed_photo: 'precise',
   no_person: 'high',
   black_white: 'high'
 }
 
 /** 特殊分类桶 */
-export const CAT_LIBRARY = 'library' // 成品库（导出用）
+export const CAT_LIBRARY = 'library' // 交付库（导出用）；库里存的 key 仍是 'library'，改的只是展示名
 export const CAT_REVIEW = 'review' // 待确认
 export const CAT_TRASH = 'trash' // 垃圾桶（永不导出）
 /** 重复/连拍专用废弃桶：从重复分组里被丢弃的图，像垃圾桶一样永不导出、不可被拖入，仅可移出 */
@@ -101,10 +142,22 @@ export function isTrashLike(cat: string): boolean {
   return cat === CAT_TRASH || cat === CAT_DUP_TRASH
 }
 
+/**
+ * 是否属于「交付库（导出用）」这个虚桶。与 db.virtualCategorySql(CAT_LIBRARY)、
+ * exporter.isLibrary 同一口径，三处必须一致。
+ * 重点：它是“不在瑕疵区/待确认/垃圾桶”的统称，不等于 category === 'library'——
+ * 单人照/多人合拍照/多人混合照/无人物/黑白照/自定义分类的图全都算在这里、全都正常导出。
+ * （多人混合照是接亲、做游戏这类互动情节片，属于可交付内容，任何时候都不要划进瑕疵维度。）
+ * 展示“这张在哪个库 / 会不会导出”时严禁直接比较枚举值（否则绝大多数图会错判成“不属于交付库”）。
+ */
+export function isLibraryBucket(cat: string): boolean {
+  return !isBadDim(cat) && cat !== CAT_REVIEW && !isTrashLike(cat)
+}
+
 /** 分类桶 key = 'library' | 'review' | 'trash' | DimensionKey | 'custom:<id>' */
 export type CategoryKey = string
 
-/** 置信度分级（第四章）默认阈值；缺省为“非常严格”档，用户可在设置中调整 */
+/** 置信度分级（第四章）默认阈值；缺省为"严格"档（旧名"非常严格"），用户可在设置中调整 */
 export const DEFAULT_HIGH_THRESHOLD = 0.8
 export const DEFAULT_MID_THRESHOLD = 0.55
 
@@ -113,10 +166,13 @@ export type ConfidenceLevel = 'high' | 'mid' | 'low'
 /** 检测程度：阈值组合的快捷档位（custom = 用户手动拉过滑条） */
 export type Strictness = 'normal' | 'strict' | 'very' | 'custom'
 
+// 档位文案面向客户改成结果导向（用户拍板 2026-10-11）：旧名"一般/严格/非常严格"客户读不出
+// 后果，下拉里的"（高 0.80 / 中 0.55）"小数只会吓人。key 不变，存量设置零迁移。
+// tip 直接描述"照片会被分到哪"，不出现阈值/置信度术语。
 export const STRICTNESS_PRESETS: Array<{ key: Exclude<Strictness, 'custom'>; label: string; high: number; mid: number; tip: string }> = [
-  { key: 'normal', label: '一般', high: 0.93, mid: 0.8, tip: '只抓把握很大的问题，误报最少，绝大多数照片直接留在成品库' },
-  { key: 'strict', label: '严格', high: 0.9, mid: 0.7, tip: '平衡模式：中等把握的可疑照片进待确认' },
-  { key: 'very', label: '非常严格', high: 0.8, mid: 0.55, tip: '稍有可疑就被拉进待确认/坏维度，待确认数量最多，宁多勿漏' }
+  { key: 'normal', label: '宽松（相信 AI，复核少）', high: 0.93, mid: 0.8, tip: '只抓把握很大的问题，误报最少，绝大多数照片直接留在交付库' },
+  { key: 'strict', label: '标准（平衡复核量）', high: 0.9, mid: 0.7, tip: '中等把握的可疑照片进【待确认】，交付前建议复核一遍' },
+  { key: 'very', label: '严格（宁多勿漏）', high: 0.8, mid: 0.55, tip: '稍有可疑就被拉进【待确认】/瑕疵分类，待确认数量最多' }
 ]
 
 /** 从当前阈值反推档位（浮点容差 0.005） */
@@ -143,6 +199,12 @@ export interface DimResult {
   reason?: string
   /** 引擎类型：onnx 模型 / 几何规则 / 传统算法 */
   method?: string
+  /**
+   * 用户手动补标这个维度的时刻（ms）。“最新在前”排序在维度分类里优先读它：
+   * 在单人照里加“闭眼”只该让图在闭眼分类排第一，不该把它在单人照里也顶到最前——
+   * 共享的 cat_changed_at 一个字段做不到按分类区分，时间戳必须挂在标签上。
+   */
+  taggedAt?: number
 }
 
 /** 人脸框与关键点（预览层叠加显示） */
@@ -162,6 +224,10 @@ export interface DetectResult {
   dims: Partial<Record<DimensionKey, DimResult>>
   faces: FaceInfo[]
   faceCount: number
+  /** 正面主体数（v2.0.65 新口径：人数只数正面露脸/头部完整的人）；旧版引擎无此字段 */
+  frontalCount?: number
+  /** 规整摆拍主群人数（v2.0.66：合拍照 / 多人混合照的分界依据）；旧版引擎无此字段 */
+  posedCount?: number
   /** 重复分组：同组内共享 groupId */
   dupGroup?: string
   /** 引擎内部耗时 ms */
@@ -183,7 +249,7 @@ export interface ImageRecord {
   status: 'pending' | 'done' | 'error' | 'skip'
   category: CategoryKey // 当前所在分类桶
   tags: Partial<Record<DimensionKey, DimResult>> // AI 检测标签
-  details: { faces?: FaceInfo[]; dupGroup?: string; engine?: string; faceCount?: number; phash?: string } | null
+  details: { faces?: FaceInfo[]; dupGroup?: string; engine?: string; faceCount?: number; frontalCount?: number | null; posedCount?: number | null; phash?: string } | null
   dupGroup: string | null
   scene: string | null
   addedAt: number
@@ -220,17 +286,29 @@ export const SCENE_PRESETS: ScenePreset[] = [
   { key: 'default', label: '通用', overrides: {} }
 ]
 
+/** 机器性能探测结果（主进程 perfHint）：auto 档据此决定是否开启精简模式 */
+export interface PerfHint {
+  /** CPU 逻辑核心数 */
+  cores: number
+  /** 物理内存 GB（保留一位小数） */
+  memGB: number
+  /** GPU 合成不可用（软件渲染/省电模式）——低配机最典型的信号 */
+  gpuSoftware: boolean
+}
+
 /** 全局设置 */
 export interface AppSettings {
   highThreshold: number
   midThreshold: number
-  /** 检测程度快捷档（一般/严格/非常严格，手动拉滑条后为 custom） */
+  /** 筛选力度快捷档（宽松/标准/严格，手动拉滑条后为 custom） */
   strictness: Strictness
   scene: string
   enginePreference: 'auto' | 'python' | 'node' // AI 引擎偏好
   devicePreference: 'auto' | 'cpu' | 'cuda' // GPU/CPU 模式
   /** 重复/连拍分组弹窗的选图模式（记忆用户习惯）：drop=点选要丢弃的（默认） / keep=点选要保留的 */
   dupPickMode?: 'drop' | 'keep'
+  /** 性能模式（第二档 A1）：auto=探测到低配自动精简 / full=始终全特效 / lean=始终精简。不设=auto */
+  perfMode?: 'auto' | 'full' | 'lean'
   /** 重复/连拍选图模式的首次使用引导是否已看过 */
   dupGuideSeen?: boolean
   /** 重复/连拍分组弹窗宫格密度（记忆）：false=每排 4 张（默认）/ true=每排 2 张大图 */
@@ -246,7 +324,9 @@ export interface AppSettings {
   autoTune: boolean
   /** 按维度的阈值微调覆盖（由修正记录学习得到） */
   tunedThresholds: Partial<Record<DimensionKey, [number, number]>>
-  viewMode: 'grid' | 'list' | 'masonry' | 'large'
+  /** 主区布局。老版本还有一个 'large'（独立大图视图），已下线为「大图 = 打开放大弹窗」，
+   * 库里残留的旧值由 store.bootstrap 兜成 grid */
+  viewMode: 'grid' | 'list' | 'masonry'
   /** 主题：简白（默认）/ 暗夜 */
   theme: 'light' | 'dark'
   lastExportDir: string | null
@@ -273,6 +353,27 @@ export const DEFAULT_SETTINGS: AppSettings = {
   skipUpdateVersion: null
 }
 
+/**
+ * 缩略图双档（低配机性能路径）：
+ * - 大档 960：放大弹窗、瀑布流、格子×DPR 超过 320 物理像素时用（历史 256 → 640 → 960 的当前档）；
+ * - 小档 320：常规网格格子 / 列表行用。解码内存与像素面积成正比，小档单张约为大档 1/9，
+ *   几千张滚动时是低配机不掉帧的关键。
+ * 大档路径存 DB thumb 列；小档不入库，由大档路径换后缀派生（因此 pruneUnreferencedThumbs
+ * 必须把派生出的小档名一并放行，否则会被当垃圾收掉）。大档后缀同时是版本号：
+ * 改 THUMB_MAX 后旧档自动判“待重建”，后台无感重刷。
+ */
+export const THUMB_MAX = 960
+export const THUMB_QUALITY = 82
+export const THUMB_SMALL_MAX = 320
+export const THUMB_SMALL_QUALITY = 80
+export const THUMB_SUFFIX = `@${THUMB_MAX}.jpg`
+export const THUMB_SMALL_SUFFIX = `@${THUMB_SMALL_MAX}.jpg`
+
+/** 大档路径 → 小档路径；后缀不是当前大档（如老库待重建的 @640）时返回空串，调用方回退大档 */
+export function smallThumbPath(bigPath: string): string {
+  return bigPath.endsWith(THUMB_SUFFIX) ? bigPath.slice(0, -THUMB_SUFFIX.length) + THUMB_SMALL_SUFFIX : ''
+}
+
 /** 支持的导入格式（第九章）：常见格式 + iPhone HEIC + 新格式 AVIF/JXL + 全相机 RAW（LibRaw 系）。
  *  设计/医疗/矢量格式（psd/ai/cdr/xcf/sketch/fig/dcm/nii/fits/exr/dpx/eps/svg/ico 等）不属于照片，
  *  无人脸/EXIF 语义，不予导入（导入只会产生无意义失败）。 */
@@ -293,6 +394,8 @@ export const PRECISION_TIERS: Record<string, { label: string; tip: string }> = {
 export function dimTier(dim: DimensionKey): 'trust' | 'review' | 'ref' {
   if (['single_person', 'group_photo', 'no_person', 'black_white', 'exposure'].includes(dim)) return 'trust'
   if (['eyes_closed', 'blur', 'duplicate'].includes(dim)) return 'review'
+  // mixed_photo 刻意留在 ref：合拍 / 混合的分界靠构图几何，是人数维度里最不稳的一环，
+  // 说它「99%+ 可直接信任」是假承诺
   return 'ref'
 }
 

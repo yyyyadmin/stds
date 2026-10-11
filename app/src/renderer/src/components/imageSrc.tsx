@@ -3,12 +3,33 @@
  * ImageView 导入了 DuplicateGroupsView，若 DuplicateGroupsView 反向 import ImageView
  * 会形成循环导入，故把 toSrc/viewSrc/useBigSrc/Spinner 提到此叶子模块，双方都从这里引。
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type CSSProperties } from 'react'
 import type { ImageRecord } from '../../../shared/types'
+import { smallThumbPath, THUMB_SMALL_MAX } from '../../../shared/types'
+import { useStore } from '../store'
 
 /** localfile 协议 URL（与 preload fileUrl 一致，渲染层直接同步构造） */
 export function toSrc(p: string): string {
   return 'localfile://x/' + encodeURIComponent(p)
+}
+
+/**
+ * 网格/列表瓦片图：按“格子物理边长（CSS px × DPR）”选缩略图档。
+ * ≤ THUMB_SMALL_MAX(320) 物理像素用 320 小档（解码内存约为大档 1/9，低配机滚动跟手的关键），
+ * 否则（Ctrl+滚轮放大到 300+ 格子、瀑布流宽卡）升回大档。
+ * 小档文件在老库回填完成前可能不存在：onError 自动回退大档，不白屏不闪烁；
+ * 换图 / 换档时重置回退态，回填完成后的新渲染自然用上小档。
+ */
+export function ThumbImg({ img, cellPx, className, style }: { img: ImageRecord; cellPx: number; className?: string; style?: CSSProperties }): JSX.Element {
+  const [smallErr, setSmallErr] = useState(false)
+  useEffect(() => setSmallErr(false), [img.thumb, cellPx])
+  // 低配精简模式（第二档 A1）：无条件走小档——大格子也吃 320，清晰度换帧率，
+  // 小档缺失时仍按 onError 回退大档，不白屏
+  const lean = useStore((s) => s.perfLean)
+  const dpr = window.devicePixelRatio || 1
+  const sp = !smallErr && img.thumb && (lean || cellPx * dpr <= THUMB_SMALL_MAX) ? smallThumbPath(img.thumb) : ''
+  const src = sp ? toSrc(sp) : img.thumb ? toSrc(img.thumb) : toSrc(img.path)
+  return <img src={src} loading="lazy" decoding="async" className={className} style={style} alt={img.filename} draggable={false} onError={() => sp && setSmallErr(true)} />
 }
 
 /** 浏览器 <img> 无法直接渲染的格式（RAW/HEIC）：展示时回退到已生成的缩略图预览 */

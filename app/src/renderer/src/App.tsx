@@ -1,6 +1,6 @@
 /**
  * 主工作台：左分类树 + 顶栏（导入/筛选/进度/视图/排序/导出/设置）+ 视图区 + 预览层 + 多选浮动栏
- * 全局快捷键：1/2/3/4 切换视图（9.2），空格开预览，Del 移垃圾桶，Ctrl+A 全选，Esc 关闭
+ * 全局快捷键：1/2/3 切视图（9.2），4 看大图（与双击小图同一个弹窗），Del 移垃圾桶，Ctrl+A 全选，Esc 关闭
  */
 import { useEffect, useState } from 'react'
 import { useStore } from './store'
@@ -29,12 +29,10 @@ export default function App(): JSX.Element {
   const tagManagerIds = useStore((s) => s.tagManagerIds)
   const closeTagManager = useStore((s) => s.closeTagManager)
   const tagBusy = useStore((s) => s.tagBusy)
-  const viewMode = useStore((s) => s.viewMode)
   const toast = useStore((s) => s.toast)
   const dismissToast = useStore((s) => s.dismissToast)
   const setViewMode = useStore((s) => s.setViewMode)
   const stepPreview = useStore((s) => s.stepPreview)
-  const stepLarge = useStore((s) => s.stepLarge)
   const closePreview = useStore((s) => s.closePreview)
   const [dragOver, setDragOver] = useState(false)
 
@@ -60,34 +58,19 @@ export default function App(): JSX.Element {
         if (e.key === '1') void setViewMode('grid')
         if (e.key === '2') void setViewMode('list')
         if (e.key === '3') void setViewMode('masonry')
-        if (e.key === '4') void setViewMode('large')
+        // 4 = 看大图：不再是第四种布局，直接开与双击小图同一个放大弹窗
+        if (e.key === '4') useStore.getState().openLargePreview()
         if (e.key === 'Delete') {
           const s = useStore.getState()
           if (s.selection.size) {
             if (s.activeCategory === 'trash') void s.restoreFromTrash()
-            else if (s.viewMode === 'large' || s.previewId != null) {
-              // 大图/弹窗下 SelectionBar 不渲染，确认框无处显示，保持直接移动
-              void s.moveToTrash()
-            } else {
-              // 单选直接移入垃圾桶；多选（≥2）走 SelectionBar 的确认框（与按钮行为一致）
-              s.askTrash()
-            }
+            // 单选直接移入垃圾桶；多选（≥2）走 SelectionBar 的确认框（与按钮行为一致）
+            else s.askTrash()
           }
         }
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
           e.preventDefault()
           useStore.getState().selectAll()
-        }
-        // 大图模式：← → ↑ ↓ 切换上/下一张
-        if (viewMode === 'large') {
-          if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
-            e.preventDefault()
-            stepLarge(-1)
-          }
-          if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
-            e.preventDefault()
-            stepLarge(1)
-          }
         }
       }
       if (previewId) {
@@ -103,12 +86,11 @@ export default function App(): JSX.Element {
         if (e.key === '1') void setViewMode('grid')
         if (e.key === '2') void setViewMode('list')
         if (e.key === '3') void setViewMode('masonry')
-        if (e.key === '4') void setViewMode('large')
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [previewId, showExport, showSettings, showLogin, showMember, showUpdate, tagManagerIds, closeTagManager, viewMode, setViewMode, stepPreview, stepLarge, closePreview])
+  }, [previewId, showExport, showSettings, showLogin, showMember, showUpdate, tagManagerIds, closeTagManager, setViewMode, stepPreview, closePreview])
 
   // toast 自动消失：移动类即时反馈 1 秒自收（调用方传 duration），其余默认 6 秒供读完错误信息
   useEffect(() => {

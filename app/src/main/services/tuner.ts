@@ -2,12 +2,12 @@
  * 修正记录与阈值微调（第五章 5.4）
  * 不重训练模型，只基于用户修正反馈调整各维度置信度阈值：
  * - 某维度累计修正 >= TUNE_MIN_CORRECTIONS 次后触发
- * - 误检比例高（用户频繁"判定错误"移回成品库）-> 上调该维度 high 阈值（少标）
- * - 漏检信号（用户从成品库/其他分类主动移入该坏维度）-> 下调 mid 阈值（更早召回）
+ * - 误检比例高（用户频繁"判定错误"移回交付库）-> 上调该维度 high 阈值（少标）
+ * - 漏检信号（用户从交付库/其他分类主动移入该坏维度）-> 下调 mid 阈值（更早召回）
  */
 import { correctionStats, getSettings, saveSettings, getDb } from '../db'
 import type { DimensionKey } from '../../shared/types'
-import { BAD_DIMENSIONS } from '../../shared/types'
+import { BAD_DIMENSIONS, isBadDim } from '../../shared/types'
 
 export const TUNE_MIN_CORRECTIONS = 200
 
@@ -39,6 +39,11 @@ export function autoTune(): TuneReport {
   }
   const next = { ...settings.tunedThresholds }
   for (const [dim, s] of Object.entries(stats)) {
+    // 只调“缺陷维度”的阈值。人数四分类的合影/混合分界不在阈值上——它是冻结引擎里
+    // 五道几何闸的硬结论，引擎给出的置信度是码内常量（0.86 / 0.88+score*0.1 等）。
+    // 给人数维度写 tunedThresholds 只会把这些常量静默推过 high 线，
+    // 标签降为 mid/low 后从视图与导出里凭空消失（之前就在 review 桶里发生过）。
+    if (!isBadDim(dim)) continue
     const fpRate = s.falsePositive / Math.max(1, s.truePositive + s.falsePositive)
     const miss = movedIn[dim] || 0
     const base = next[dim as DimensionKey] || [settings.midThreshold, settings.highThreshold]

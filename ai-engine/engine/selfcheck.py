@@ -87,6 +87,10 @@ def run():
         "e2e_person_conf": None,
         "merge_guard_ok": False,
         "merge_detail": "",
+        "frontal_run_ok": False,
+        "frontal_kept": None,
+        "frontal_detail": "",
+        "e2e_frontal_count": None,
         "skin_run_ok": False,
         "skin_gray_ok": False,
         "skin_blob_ok": False,
@@ -235,12 +239,14 @@ def run():
             eng2 = DetectEngine(log=lambda *a, **k: None)
             rr = eng2.detect(_fixture_or_synthetic())
             dd = rr.get("dims") or {}
-            for dim in ("single_person", "group_photo", "no_person"):
+            for dim in ("single_person", "group_photo", "mixed_photo", "no_person"):
                 if dim in dd:
                     out["e2e_person_dim"] = dim
                     out["e2e_person_method"] = (dd[dim] or {}).get("method")
                     out["e2e_person_conf"] = round(float((dd[dim] or {}).get("confidence") or 0), 4)
                     break
+            # v2.0.65 新口径：detect() 必须带 frontalCount（正面主体数），缺失即 app 侧回退旧逻辑
+            out["e2e_frontal_count"] = rr.get("frontalCount")
         except Exception as _e2:  # noqa: BLE001
             out["error"] = (out["error"] or "") + " |person-e2e: %s: %s" % (type(_e2).__name__, _e2)
     except Exception as _pe:  # noqa: BLE001
@@ -282,6 +288,71 @@ def run():
         out["skin_detail"] = "gray:%s blob:%s" % ((gray_why or "")[:40], (blob_why or "")[:40])
     except Exception as _sk:  # noqa: BLE001
         out["error"] = (out["error"] or "") + " |skin: %s: %s" % (type(_sk).__name__, _sk)
+    # --- v2.0.65 正面主体判定无模型单测（用户拍板 2026-10-11：合照只数正面主体）---
+    # 造六张纯几何脸：正脸/侧脸/低头/后脑（双眼重合）/半截头（贴顶）/小脸（<3% 图高），
+    # 只有正脸入选才算通过——侧脸/低头/后脑被误入会虚增合照，正脸被误杀会漏合照。
+    try:
+        from .person import frontal_faces
+        H = 600  # 图高
+        box = [100, 50, 60, 80]  # 脸框 60x80，占图高 13%，不贴顶
+
+        def face(lx, ly, rx, ry, nx, ny, b=None):
+            return {"box": b or box, "score": 0.9, "landmarks5": [(lx, ly), (rx, ry), (nx, ny)]}
+
+        cases = {
+            "frontal": face(115, 80, 145, 80, 130, 100),           # yaw=0 pitch=0.25 → 入选
+            "profile": face(115, 80, 145, 80, 160, 100),           # yaw=1.0 → 侧脸排除
+            "head_down": face(115, 80, 145, 80, 130, 84),          # pitch=0.05 → 低头排除
+            "backhead": face(129, 80, 131, 80, 130, 90),           # 眼距 2 < 7.2 → 不可判排除
+            "chopped": face(115, 80, 145, 80, 130, 100, [100, 0, 60, 80]),   # 贴顶 → 半截头排除
+            "tiny": face(115, 80, 145, 80, 130, 100, [100, 50, 30, 12]),     # 占图高 2% → 排除
+        }
+        kept = [k for k, v in cases.items() if frontal_faces([v], H)]
+        # 正脸单独入选；正脸+侧脸同框时也只留正脸
+        multi = frontal_faces([cases["frontal"], cases["profile"], cases["backhead"]], H)
+        out["frontal_kept"] = len(multi)
+        out["frontal_run_ok"] = kept == ["frontal"] and len(multi) == 1
+        out["frontal_detail"] = "kept:%s multi:%d" % (",".join(kept) or "-", len(multi))
+    except Exception as _fr:  # noqa: BLE001
+        out["frontal_run_ok"] = False
+        out["error"] = (out["error"] or "") + " |frontal: %s: %s" % (type(_fr).__name__, _fr)
+    # --- v2.0.66 合拍照 / 混合照分界的无模型单测（用户拍板 2026-10-11：合影看摆拍结构）---
+    # 五道几何闸各挡一类误判，逐闸造“只坏这一项”的样本：该过的必须判合影、该拦的必须判混合。
+    # 方框全用纯几何构造，不依赖 fixture 与网络；任一项翻脸即视为回归（要么把接亲扎堆放进了
+    # 合拍照——用户头号抱怨，要么把真合影拖进混合照——反向误判）。
+    try:
+        from .person import posed_group
+        W, H = 1200, 600
+
+        def pf(bx, by, bw, bh, yaw=0.0):
+            """造一张能过 frontal_faces 的正面主体脸：眼距固定 30px，鼻尖按 yaw 偏移，pitch 恒 0.25"""
+            ex = bw * 0.25
+            return {"box": [bx, by, bw, bh], "score": 0.9,
+                    "landmarks5": [(bx + ex, by + bh * 0.35), (bx + ex + 30, by + bh * 0.35),
+                                   (bx + ex + 15 + yaw * 30, by + bh * 0.60)]}
+
+        cases = {
+            # 沙发四人：并排、等高、同一基线、齐看镜头 → 合拍照
+            "row4": ([pf(200 + i * 90, 100, 70, 90) for i in range(4)], True),
+            # 双人摆拍：用户明确确认 ≥2 人规整就是合拍照，不单列双人 → 合拍照
+            "couple": ([pf(300, 120, 80, 100), pf(392, 120, 80, 100)], True),
+            # 接亲场景：新娘大前景 + 后排一排小脸。后排自己成得了排，但画面主体在簇外 → 混合照
+            "layered": ([pf(60, 260, 150, 200)] + [pf(500 + i * 70, 90, 50, 60) for i in range(3)], False),
+            # 同高但一人贴左一人贴右 → 散落不成群 → 混合照
+            "scattered": ([pf(60, 120, 80, 100), pf(1000, 120, 80, 100)], False),
+            # 一人侧头（yaw 0.27：过正面主体闸 0.30、不过合影闸 0.24）→ 混合照
+            "offgaze": ([pf(300, 120, 80, 100), pf(392, 120, 80, 100, yaw=0.27)], False),
+        }
+        bad = []
+        for name, (fs, want) in cases.items():
+            ok, _n, fails = posed_group(fs, W, H)
+            if ok != want:
+                bad.append("%s=%s(%s)" % (name, ok, "/".join(fails) or "all-pass"))
+        out["posed_run_ok"] = not bad
+        out["posed_detail"] = "cases:%d bad:%s" % (len(cases), ",".join(bad) or "-")
+    except Exception as _pg:  # noqa: BLE001
+        out["posed_run_ok"] = False
+        out["error"] = (out["error"] or "") + " |posed: %s: %s" % (type(_pg).__name__, _pg)
     return out
 
 

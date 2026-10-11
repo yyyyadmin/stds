@@ -1,9 +1,9 @@
 ﻿#Requires -Version 5.1
 <#
- 筛图大师 · 一键发布脚本
+ 筛片大师 · 一键发布脚本
  流程：提交本地改动 → 版本号自动 +1（patch）→ 更新 app/package.json 与 lock
        → git commit + tag → 推送 GitHub → 自动触发三平台安装包云构建
- 用法：双击桌面「一键发布筛图大师」快捷方式
+ 用法：双击桌面「一键发布筛片大师」快捷方式
        或命令行：powershell -ExecutionPolicy Bypass -File auto-release.ps1 [-DryRun]
        -DryRun 只显示将要发布的版本号，不做任何改动
 #>
@@ -29,7 +29,7 @@ try {
   # 仓库根 = 本脚本所在 scripts 目录的上一级
   $repoRoot = Split-Path -Parent $PSScriptRoot
   Set-Location $repoRoot
-  Say '=== 筛图大师 · 一键发布 ===' 'Cyan'
+  Say '=== 筛片大师 · 一键发布 ===' 'Cyan'
   Say "仓库：$repoRoot"
 
   # ---------- 1. 有改动先提交 ----------
@@ -93,7 +93,7 @@ try {
   Say ''
   Say "✅ v$next 发布成功！GitHub 云端已开始自动打包（约 5~15 分钟）：" 'Green'
   Say "   构建进度：https://github.com/$remote/actions" 'Green'
-  Say "   下载成品：https://github.com/$remote/releases （找 v$next）" 'Green'
+  Say "   下载交付包：https://github.com/$remote/releases （找 v$next）" 'Green'
   Pause-Exit 0
 } catch {
   Say "发生错误：$($_.Exception.Message)" 'Red'

@@ -1,7 +1,7 @@
 /**
  * 导出模块（第六章）
  * - 垃圾桶自动排除（任何模式）；待确认默认排除（可勾选包含）
- * - 模式：include 包含式 / exclude 排除式 / library 成品库 / all 全部（垃圾桶除外）
+ * - 模式：include 包含式 / exclude 排除式 / library 交付库 / all 全部（垃圾桶除外）
  * - 选项：目标目录、格式转换（sharp）、按分类建子文件夹、保留原名、重名处理、物理移动
  * - 进度事件 + 取消
  */
@@ -17,6 +17,7 @@ import {
   CAT_TRASH,
   CAT_DUP_TRASH,
   isTrashLike,
+  isLibraryBucket,
   DIMENSION_LABELS,
   NEUTRAL_DIMENSIONS
 } from '../../shared/types'
@@ -106,8 +107,9 @@ class Exporter extends EventEmitter {
     return r.category === cat // 自定义分类等按归属
   }
 
+  /** 交付库是虚桶：口径单一来源在 shared（isLibraryBucket），与列表 SQL、角标显示必须一致 */
   private isLibrary(cat: string): boolean {
-    return !(BAD_DIMENSIONS as string[]).includes(cat) && cat !== CAT_REVIEW && !isTrashLike(cat)
+    return isLibraryBucket(cat)
   }
 
   previewCount(opts: ExportOptions): { will: number; total: number } {
@@ -213,7 +215,7 @@ class Exporter extends EventEmitter {
     if ((BAD_DIMENSIONS as string[]).includes(cat) || (NEUTRAL_DIMENSIONS as string[]).includes(cat)) {
       return DIMENSION_LABELS[cat as keyof typeof DIMENSION_LABELS] || cat
     }
-    if (cat === CAT_LIBRARY) return '成品库'
+    if (cat === CAT_LIBRARY) return '交付库'
     if (cat === CAT_REVIEW) return '待确认'
     if (cat === CAT_TRASH) return '垃圾桶'
     if (cat === CAT_DUP_TRASH) return '重复废弃'

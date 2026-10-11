@@ -3,14 +3,14 @@
  * 引擎状态徽章（Python 完整引擎 / Node 基础引擎 / GPU-CPU）
  */
 import { useEffect, useRef, useState } from 'react'
-import { useStore } from '../store'
+import { useStore, filterByQuery } from '../store'
 import type { SortKey } from '../store'
 
-const VIEWS: Array<{ m: 'grid' | 'list' | 'masonry' | 'large'; label: string; key: string }> = [
+/** 三种主区布局。以前的第四种「大图」与双击小图的放大弹窗功能重叠，已合并到右边那个按钮 */
+const VIEWS: Array<{ m: 'grid' | 'list' | 'masonry'; label: string; key: string }> = [
   { m: 'grid', label: '网格', key: '1' },
   { m: 'list', label: '列表', key: '2' },
-  { m: 'masonry', label: '瀑布流', key: '3' },
-  { m: 'large', label: '大图', key: '4' }
+  { m: 'masonry', label: '瀑布流', key: '3' }
 ]
 
 /** 把剩余秒数格式化为“预计还需 ~X”文案 */
@@ -29,6 +29,11 @@ export default function TopBar(): JSX.Element {
   const isIndeterminate = isInit || p?.phase === 'dup-cluster'
   // 每秒重渲染一次，驱动倒计时刷新（仅运行中计时，停止即停）
   const [now, setNow] = useState(() => Date.now())
+  // 清空图库的确认弹窗开关：风险操作必须用户在应用内弹窗上点「确认清空」才执行。
+  // 不用 window.confirm：Electron 长期不支持原生对话框（官方曾标注 will not be supported，
+  // 不同版本下要么弹不出要么返回 undefined 让守卫形同虚设），行为不可依赖；应用内弹窗还能跟随主题。
+  // SettingsDialog 里的重扫 confirm 同样有这问题，待后续一并换
+  const [confirmClear, setConfirmClear] = useState(false)
   useEffect(() => {
     if (!running) return
     const id = setInterval(() => setNow(Date.now()), 1000)
@@ -75,7 +80,7 @@ export default function TopBar(): JSX.Element {
   return (
     <header className="shrink-0 bg-panel border-b border-line px-3 py-2 flex items-center gap-2 text-sm">
       <div className="font-bold text-fg mr-1 whitespace-nowrap">
-        筛图大师 <span className="text-[10px] font-normal text-fg3">v2.0</span>
+        筛片大师 <span className="text-[10px] font-normal text-fg3">v2.0</span>
       </div>
       <div className="relative" ref={importRef}>
         <button
@@ -220,7 +225,7 @@ export default function TopBar(): JSX.Element {
       <button
         className="btn-danger text-xs whitespace-nowrap"
         title="删光软件里的导入记录与修正记录（不会删除磁盘上的原始照片），导入错了想重新来时用"
-        onClick={() => void s.clearLibraryAll()}
+        onClick={() => setConfirmClear(true)}
         disabled={running || (s.counts.all ?? 0) === 0}
       >
         清空图库
@@ -238,6 +243,43 @@ export default function TopBar(): JSX.Element {
           </option>
         ))}
       </select>
+
+      <div className="relative flex items-center">
+        <input
+          className="input text-xs w-40 pr-5"
+          placeholder="搜文件名"
+          title="按文件名过滤当前相册（只影响显示，不改库里的分类与标签）。可以一次粘多个名字，用空格、逗号或换行分隔——比如从复查清单里整段粘过来。Esc 清空。"
+          value={s.query}
+          onChange={(e) => s.setQuery(e.target.value)}
+          onPaste={(e) => {
+            // 单行 input 粘多行文本时浏览器会把换行直接去掉，名字会粘成一串连着的字串→一个也搜不到，
+            // 所以粘贴带换行的清单时必须自己把换行换成空格
+            const text = e.clipboardData.getData('text')
+            if (/[\r\n]/.test(text)) {
+              e.preventDefault()
+              s.setQuery((s.query + ' ' + text.replace(/[\r\n]+/g, ' ')).trim())
+            }
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') s.setQuery('')
+          }}
+        />
+        {!!s.query && (
+          <button
+            className="absolute right-1 top-1/2 -translate-y-1/2 px-1 text-xs text-fg3 hover:text-fg"
+            title="清除搜索（或按 Esc）"
+            onClick={() => s.setQuery('')}
+          >
+            ✕
+          </button>
+        )}
+      </div>
+
+      {!!s.query.trim() && (
+        <span className="text-xs text-fg3 whitespace-nowrap" title="当前相册里命中的张数 / 本相册总张数">
+          命中 {filterByQuery(s.images, s.query).length}/{s.images.length}
+        </span>
+      )}
 
       <select
         className="input text-xs w-28"
@@ -269,11 +311,23 @@ export default function TopBar(): JSX.Element {
         ))}
       </div>
 
+      {/* 「大图」不再是一种布局，而是一个动作：直接打开与双击小图完全相同的放大弹窗。
+          两套“大图”各带一套操作太难记，而且原大图视图里的图不如弹窗清楚（弹窗会加载原图）。
+          仍放在视图组旁边，保留老用户“右上角切大图”的肌肉记忆（快捷键 4 也照旧）。 */}
+      <button
+        className="px-2 py-1 text-xs bg-panel2 hover:bg-line text-gray-400 border border-line rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-panel2"
+        onClick={() => s.openLargePreview()}
+        disabled={!s.images.length}
+        title="看大图（快捷键 4）：从当前选中的第一张开始，没选中就从列表第一张；← → 翻页，跟双击小图是同一个窗口"
+      >
+        大图
+      </button>
+
       <button
         className="btn-primary inline-flex items-center gap-1.5 disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-brand"
         onClick={() => void useStore.setState({ showExport: true })}
         disabled={s.counts.all === 0}
-        title="导出交付：把选中的分类导出为成品照片"
+        title="导出交付：把选中的分类导出到指定文件夹"
       >
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -347,6 +401,31 @@ export default function TopBar(): JSX.Element {
         <button className="btn-primary text-sm py-1.5" onClick={() => useStore.setState({ showLogin: true })}>
           登录 / 注册
         </button>
+      )}
+
+      {/* 清空图库二次确认：点遮罩/取消都是放弃，只有「确认清空」才调 clearLibraryAll */}
+      {confirmClear && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setConfirmClear(false)}>
+          <div className="w-[420px] rounded-xl border border-line bg-panel p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="text-base font-bold text-fg">确认清空图库？</div>
+            <div className="mt-2 text-sm leading-relaxed text-fg2">
+              将删除软件内 {(s.counts.all ?? 0).toLocaleString()} 条图片记录与全部修正/学习记录，
+              磁盘上的原始照片文件不会被删除。清空后需重新导入并重新筛选，此操作不可撤回。
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button className="btn text-sm" onClick={() => setConfirmClear(false)}>取消</button>
+              <button
+                className="btn-danger text-sm px-4 whitespace-nowrap"
+                onClick={() => {
+                  setConfirmClear(false)
+                  void s.clearLibraryAll()
+                }}
+              >
+                确认清空
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </header>
   )

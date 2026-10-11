@@ -137,7 +137,7 @@ class Scanner extends EventEmitter {
       } catch (e) {
         console.error('dup cluster failed', e)
       }
-      // 连拍组人数一致化：同一个瞬间不可能既是单人照又是多人合照，组内看到过的最多脸数就是现场人数下界
+      // 连拍组人数一致化：同一个瞬间不可能既是单人照又是多人照，组内看到过的最多脸数就是现场人数下界
       try {
         const fixed = harmonizePersonCount()
         for (const id of fixed) this.emit('image', getImage(id))
@@ -180,7 +180,7 @@ class Scanner extends EventEmitter {
         const detectPath = await ensureNormalizedJpeg(rec.path)
         const raw = (await engineManager.detect(detectPath, rec.id)) as unknown as DetectResult & { phash?: string; nodeEngine?: boolean; error?: string }
         // 引擎以 in-band error 返回（如无法解码：中文路径/RAW/HEIC）且无任何维度结果时，
-        // 绝不能当成“正常但无坏维度”静默判进成品库——必须走失败路径，让状态可见并计入熔断。
+        // 绝不能当成“正常但无坏维度”静默判进交付库——必须走失败路径，让状态可见并计入熔断。
         if (raw && raw.error && (!raw.dims || Object.keys(raw.dims).length === 0)) {
           throw new Error(String(raw.error))
         }
@@ -209,6 +209,12 @@ class Scanner extends EventEmitter {
   private handleResult(rec: ImageRecord, raw: DetectResult & { phash?: string }): void {
     const settings = getSettings()
     const { tags } = gradeDims(raw.dims as DetectDimsRaw, settings)
+    // 人工标注必须活过重筛：用户手动标过的维度（method:'user'）不被引擎结果覆盖。
+    // 不这样做的话，用户拿“手动标多人混合照 / 合拍照”攒出来的真值集会被下一次重筛全部磨掉，
+    // 阈值校准就永远拿不到“人怎么看 vs 引擎怎么看”的对照。重筛也不该抹掉人的判定，道理同 resetForRescan。
+    for (const [dim, tag] of Object.entries(rec.tags || {})) {
+      if (tag && tag.method === 'user') tags[dim as DimensionKey] = tag
+    }
     if (raw.phash) this.hashes.set(rec.id, raw.phash)
     // 垃圾桶/重复废弃桶中的图片：标签更新但不改分类
     let category: string = rec.category
@@ -220,6 +226,10 @@ class Scanner extends EventEmitter {
     const details = {
       faces: raw.faces || [],
       faceCount: raw.faceCount ?? (raw.faces || []).length,
+      // 正面主体数（v2.0.65 新口径）：连拍一致化与校准重放的计数单位；旧版引擎无此字段存 null
+      frontalCount: raw.frontalCount ?? null,
+      // 规整摆拍主群人数（v2.0.66）：连拍一致化靠它区分合拍照 / 混合照；旧版引擎无此字段存 null
+      posedCount: raw.posedCount ?? null,
       engine: engineManager.getStatus().type,
       phash: raw.phash
     }
@@ -353,7 +363,7 @@ export function reclassifyAll(): void {
   }
 }
 
-/** 单图分类重算（一键修正 / 手动移动后动态更新成品库归属） */
+/** 单图分类重算（一键修正 / 手动移动后动态更新交付库归属） */
 export function reclassifyImage(id: number): ImageRecord | null {
   const rec = getImage(id)
   if (!rec) return null

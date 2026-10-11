@@ -2,7 +2,7 @@
  * 校准数据自动落盘（开发者诊断用，完全无 UI、用户不可见）
  * - 每次筛选结束/停止、以及应用退出时，把全库图片的判定数值写成 JSONL：
  *   <logRoot>/calib/calib-v<版本>-<时间戳>.jsonl（logRoot 与 error.txt 同根：安装目录 log/ 优先，不可写回退 userData）
- * - 每行一张图：文件名 + AI 分类 + 是否被用户纠正 + 人脸数 + 各维度 [confidence, level, reason, method]。
+ * - 每行一张图：文件名 + AI 分类 + 是否被用户纠正 + 人脸数/正面主体数/摆拍主群数 + 各维度 [confidence, level, reason, method]。
  *   reason 里含引擎注入的诊断数值（ear=/blink=/占图高%/亮度/贴边距离等），是阈值校准的唯一真实分布来源。
  * - 隐私边界：只含文件名与数字文本，不含照片内容、目录路径；此文件仅私下传给开发者，严禁提交进仓库。
  * - 落盘失败绝不影响主流程（整体 try/catch 静默）。
@@ -75,8 +75,15 @@ export function dumpCalibration(): void {
         /* 单行解析失败跳过该图，不影响整体 */
       }
       let faceCount: number | null = null
+      let frontalCount: number | null = null
+      let posedCount: number | null = null
       try {
-        faceCount = r.details ? JSON.parse(r.details).faceCount ?? null : null
+        const det = r.details ? JSON.parse(r.details) : {}
+        faceCount = det.faceCount ?? null
+        // 人数四分类的校准依据：正面主体数 V 与规整摆拍主群 G。没有这两个数，
+        // 重筛后拿不到“引擎为什么把这组人判成混合照”，五道几何闸的阈值就无从校起。
+        frontalCount = det.frontalCount ?? null
+        posedCount = det.posedCount ?? null
       } catch {
         /* ignore */
       }
@@ -85,7 +92,7 @@ export function dumpCalibration(): void {
         if (!v || typeof v.confidence !== 'number') continue
         d[k] = [v.confidence, v.level || '', v.reason || '', v.method || '']
       }
-      lines.push(JSON.stringify({ f: r.filename, cat: r.category, by: r.category_by || 'ai', fc: faceCount, d }))
+      lines.push(JSON.stringify({ f: r.filename, cat: r.category, by: r.category_by || 'ai', fc: faceCount, vc: frontalCount, gc: posedCount, d }))
     }
     writeFileSync(file, lines.join('\n') + '\n', 'utf8')
     pruneOldCalib(dir)
