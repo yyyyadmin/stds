@@ -79,6 +79,12 @@ dmg:
       y: 220
       type: link
       path: /Applications
+    # 未签名阶段随 DMG 附带的"一键修复"脚本：客户拖完应用后双击它即可清除系统拦截标记，
+    # 免去敲终端命令。以后配置了开发者签名+公证（见 release.yml），此文件留着也无害。
+    - x: 270
+      y: 340
+      type: file
+      path: build/打不开请双击我.command
 
 linux:
   target: [AppImage, deb]

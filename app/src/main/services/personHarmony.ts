@@ -12,7 +12,7 @@
  *
  * 两条硬约束：
  *  1) 只上调不下调（少判人 → 多判人）。把本来正确的单人照推成多人是新增误判，反向才是修错。
- *  2) 归属只在"该图因人维度才待在该分类"时重算；交付库兜底帧、坏维度、垃圾桶、用户手动放置
+ *  2) 归属只在"该图因人维度才待在该分类"时重算；交付库兜底帧、坏维度、废弃库、用户手动放置
  *     一律不动分类（标签照样修正，避免同一组里两张卡说法不一致）。
  *
  * v2（用户拍板 2026-10-11 新口径）：合照升级门槛从"组内最多脸数"改为"组内最多正面主体数"
@@ -124,7 +124,7 @@ export function harmonizePersonCount(): number[] {
       delete nextTags[cur]
       nextTags[target] = newTag
 
-      // 归属重算：仅限"因人维度才待在该分类"的图；交付库兜底帧与坏维度/垃圾桶保持不动
+      // 归属重算：仅限"因人维度才待在该分类"的图；交付库兜底帧与坏维度/废弃库保持不动
       let category = p.row.category
       if (p.row.category_by !== 'user' && RANK[p.row.category] !== undefined) {
         category = computeCategory(nextTags as ImageRecord['tags'], settings, {

@@ -73,6 +73,7 @@ export const CH = {
   pickImages: 'dialog:pick-images',
   listImages: 'images:list',
   listImagesByGroups: 'images:by-groups', // 按 dup_group 取整组成员（重复/连拍分组视图补全“第一张”）
+  listErrorImages: 'images:list-error', // 失败图列表（顶栏徒章点开定位重跑）
   imageGet: 'images:get',
   listByIds: 'images:list-by-ids', // 差量刷新：只重拉受影响 id 的精简记录（不含 details），并按当前分类视图判定去留
   categoryCounts: 'images:counts',
@@ -119,6 +120,7 @@ export const CH = {
   libraryClear: 'data:library-clear',
   cacheClear: 'data:cache-clear',
   bigPreview: 'img:big-preview',
+  imgMeta: 'img:meta', // 原图拍摄参数（EXIF）：大图右栏“拍摄参数”区，CR3 等容器走字节解析兑底
   // 主 -> 渲染（send 事件）
   E_scanProgress: 'evt:scan-progress',
   E_thumbsProgress: 'evt:thumbs-progress',
@@ -140,6 +142,12 @@ export interface UpdateInfo {
   platform: 'windows' | 'mac' | 'arm'
 }
 
+/** 大图右栏“拍摄参数”区的一条键值（主进程统一格式化：中文名 + 可读值） */
+export interface MetaItem {
+  k: string
+  v: string
+}
+
 export interface BootstrapInfo {
   settings: AppSettings
   counts: Record<string, number>
@@ -156,6 +164,8 @@ export interface MoveRequest {
   physical?: boolean
   /** 是否同时清除旧 AI 坏标签（目标是交付库或中性维度—即侧栏「人物与影调」—时） */
   clearBadTags?: boolean
+  /** 目标为废弃库(trash)时：丢弃时用户正看着的来源栏 key，存进 trash_from 供按来源还原 */
+  source?: CategoryKey
 }
 
 export interface CorrectRequest {
@@ -176,6 +186,8 @@ export interface RendererApi {
   listImages(filter: { category?: CategoryKey; status?: string }): Promise<ImageRecord[]>
   /** 按 dup_group 批量取整组全部成员（含不在当前分类的保留帧），供重复/连拍分组视图补全整组 */
   listImagesByGroups(gids: string[]): Promise<ImageRecord[]>
+  /** 失败（status=error）图列表 */
+  listErrorImages(): Promise<Array<{ id: number; filename: string; dir: string }>>
   getImage(id: number): Promise<ImageRecord | null>
   /** 差量对账：按当前视图分类回拉受影响 id 的最新记录；不再属于该视图的 id 不会出现在返回里（调用方据此移除） */
   listByIds(category: CategoryKey, ids: number[]): Promise<ImageRecord[]>
@@ -202,7 +214,7 @@ export interface RendererApi {
   scanStop(): Promise<void>
   scanRescanAll(): Promise<{ started: boolean; message: string; reset?: number }>
   reclassify(): Promise<void>
-  exportPreview(opts: ExportOptions): Promise<{ will: number; total: number }>
+  exportPreview(opts: ExportOptions): Promise<{ will: number; total: number; byTier: Record<1 | 2 | 3, number>; sizeMB: number | null }>
   exportRun(opts: ExportOptions): Promise<ExportProgress['finished']>
   exportCancel(): Promise<void>
   engineStatus(): Promise<EngineStatus>
@@ -228,6 +240,8 @@ export interface RendererApi {
   cacheClear(): Promise<{ retried: number; files: number }>
   /** RAW/HEIC 等浏览器不可渲染格式的原图高清预览（主进程生成，返回磁盘路径；普通格式不需要调用） */
   bigPreview(id: number): Promise<string | null>
+  /** 读原图 EXIF 拍摄参数（有序键值；读不到返回 null），供大图右栏展示 */
+  imageMeta(path: string): Promise<MetaItem[] | null>
   // 事件订阅
   onScanProgress(cb: (p: ScanProgress) => void): () => void
   onThumbsProgress(cb: (p: { done: number; total: number } | null) => void): () => void

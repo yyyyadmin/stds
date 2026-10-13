@@ -31,7 +31,14 @@ on:
       - 'v*'
 
 env:
-  # 未配置 Apple/Windows 代码签名证书：跳过签名（未签名分发时首次打开需右键“打开”）
+  # 未配置 Apple 签名证书时跳过签名（未签名分发，客户按 DMG 内附的一键修复脚本放行）。
+  # 拿到开发者账号后：在仓库 Settings → Secrets → Actions 里配齐下面 5 个 Secret，
+  # 流水线会自动切换为 Developer ID 签名 + 苹果公证，客户双击直装零提示，无需改任何代码：
+  #   APPLE_CERT_P12_BASE64   —— Developer ID Application 证书导出的 p12 转 base64（mac 上 base64 -i cert.p12）
+  #   APPLE_CERT_PASSWORD     —— 导出 p12 时设的密码
+  #   APPLE_ID                —— 开发者 Apple ID（邮箱）
+  #   APPLE_APP_SPECIFIC_PASSWORD —— appleid.apple.com 生成的 App 专用密码
+  #   APPLE_TEAM_ID           —— 团队 ID（开发者后台 Membership 页）
   CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
 defaults:
@@ -102,8 +109,24 @@ jobs:
           ./engine-dist/mac/screener-engine --selfcheck
       - name: 构建前端与主进程（electron-vite，产出 out/）
         run: npm run build
-      - name: 打包 macOS arm64 DMG
-        run: npx electron-builder --mac --arm64 --publish never
+      - name: 打包 macOS arm64 DMG（配了签名 Secrets 则自动签名+公证，否则维持未签名）
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          ARGS=""
+          if [ -n "$APPLE_TEAM_ID" ] && [ -n "$APPLE_CERT_P12_BASE64" ]; then
+            export CSC_LINK="$APPLE_CERT_P12_BASE64" CSC_KEY_PASSWORD="$APPLE_CERT_PASSWORD"
+            unset CSC_IDENTITY_AUTO_DISCOVERY
+            ARGS="--config.mac.notarize.teamId=$APPLE_TEAM_ID"
+            echo "已启用 Developer ID 签名 + 公证"
+          else
+            echo "未配置苹果签名证书，产出未签名包（客户需按 DMG 内一键修复脚本操作）"
+          fi
+          npx electron-builder --mac --arm64 --publish never $ARGS
       - uses: actions/upload-artifact@v4
         with:
           name: mac-arm64
@@ -141,8 +164,24 @@ jobs:
           ./engine-dist/mac/screener-engine --selfcheck
       - name: 构建前端与主进程（electron-vite，产出 out/）
         run: npm run build
-      - name: 打包 macOS x64 DMG
-        run: npx electron-builder --mac --x64 --publish never
+      - name: 打包 macOS x64 DMG（配了签名 Secrets 则自动签名+公证，否则维持未签名）
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          ARGS=""
+          if [ -n "$APPLE_TEAM_ID" ] && [ -n "$APPLE_CERT_P12_BASE64" ]; then
+            export CSC_LINK="$APPLE_CERT_P12_BASE64" CSC_KEY_PASSWORD="$APPLE_CERT_PASSWORD"
+            unset CSC_IDENTITY_AUTO_DISCOVERY
+            ARGS="--config.mac.notarize.teamId=$APPLE_TEAM_ID"
+            echo "已启用 Developer ID 签名 + 公证"
+          else
+            echo "未配置苹果签名证书，产出未签名包（客户需按 DMG 内一键修复脚本操作）"
+          fi
+          npx electron-builder --mac --x64 --publish never $ARGS
       - uses: actions/upload-artifact@v4
         with:
           name: mac-x64
@@ -171,6 +210,8 @@ jobs:
           body: |
             筛图大师安装包（三平台）。均已内置完整 12 维 Python AI 引擎，用户机无需安装 Python。
             - Windows：ScreenerMaster-*-Setup.exe
-            - macOS Apple 芯片：ScreenerMaster-*-arm64.dmg
-            - macOS Intel：ScreenerMaster-*-x64.dmg
-            未做代码签名：首次打开请右键 →“打开”。
+            - macOS Apple 芯片（M1/M2/M3/M4）：ScreenerMaster-*-arm64.dmg
+            - macOS Intel（老款）：ScreenerMaster-*-x64.dmg
+
+            macOS 安装提示：拖进「应用程序」后若提示"已损坏/无法打开"，双击 DMG 窗口内的「打不开请双击我.command」一键修复（首次需右键→打开）。详见 docs/安装教程-macOS.md。
+            已配置开发者证书时本包会自动签名+公证，可直接双击安装、无任何提示。

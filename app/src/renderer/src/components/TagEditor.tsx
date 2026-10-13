@@ -1,38 +1,37 @@
 /**
- * 标签编辑器（大图右侧栏 / 列表端标签管理器共用）
+ * 标签编辑器（大图右侧栏 / 标签管理器弹窗共用）—— 单页三区布局（用户拍板 2026-10-12：
+ * 不做点击展开，一屏看全，少废话）
  *
- * 设计模型：一张图 = 一组标签 + 一个状态分类。
- * 维度分类页是「主分类 ∪ 中/高标签」的并集视图，所以：
- * - 添加标签 = 图同时出现在该维度分类并排到第一张（不是移动，原状态不变）
- *   例外：人数三分类（单人/多人/无人物）互斥，添加等于替换——旧标签清掉，
- *   旧标签是主分类时归属一并换过来（否则图会同时留在两个互斥相册），并先弹确认条
- * - 删除标签 = 从该维度分类消失；若图的主分类就是该维度，会连带移出该分类
- * 两者都记一条修正样本喂阈值自学习（删=误判→少标，加=漏检→更早召回）。
- * 支持多选批量：传入多张图时，添加/删除对全部图生效。
+ * ① 当前标签：人物分类永远排第一（实心蓝，只能切换不能删），其余标签带 ✕ 直接删；
+ * ② 人物分类：四个互斥按钮，点谁切谁（添加即替换，主进程 enforcePersonMutex 兜底）；
+ * ③ 其他标签：点一下加上，已有该标签的压暗打 ✓；删除动作统一回到第①区那枚 ✕。
  *
- * 添加面板一律用「文档流内展开」（不做 absolute/portal）：宿主容器都是 overflow 滚动区，
- * 浮层会被裁切且定位飘忽（历史上弹层跑到弹窗外面压住脚注），内联展开既不被裁也永远贴着按钮。
- * 所有面板都支持“点外面就关”；背景一律不透明（半透明白叠在照片上等于看不见）。
+ * 设计模型不变：一张图 = 一组标签 + 一个状态分类。维度分类页是「主分类 ∪ 中/高标签」
+ * 并集视图，所以添加标签 = 图同时出现在该维度分类并排第一（不是移动）；删除 = 从该
+ * 分类消失，主分类恰为该维度时连带移出。两者都记修正样本喂阈值自学习。
+ * 支持多选批量：传入多张图时按钮/芯片上的 n/m 计数说明覆盖几张。
+ *
+ * 背景一律不透明（半透明白叠在照片上等于看不见）；危险删除（当前分类锚点/批量多张）
+ * 保留一条就地确认，其余全部单击直达。
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useStore } from '../store'
 import { dimTagColor } from './Sidebar'
 import { toSrc } from './imageSrc'
-import { useOutsideClose } from './useOutsideClose'
 import {
   BAD_DIMENSIONS,
   DIMENSION_LABELS,
   NEUTRAL_DIMENSIONS,
   PERSON_DIMS,
-  isBadDim,
   type DimensionKey,
   type ImageRecord
 } from '../../../shared/types'
 
-/** 人数四维度互斥（一张图只能属于其中之一）：互斥表与主进程共用 shared/types 里的 PERSON_DIMS */
-
 /** 可手动添加的维度：重复由重复分组视图管理，不出现在这里 */
 const ADDABLE: DimensionKey[] = [...BAD_DIMENSIONS.filter((d) => d !== 'duplicate'), ...NEUTRAL_DIMENSIONS]
+
+/** 人物之外的可加标签（黑白是影调事实，跟瑕疵标签同区管理；人数四维走中间的切换按钮区） */
+const TAG_DIMS: DimensionKey[] = ADDABLE.filter((d) => !PERSON_DIMS.includes(d))
 
 /** 参与展示的标签（低置信度不标记，与视图/徽章口径一致） */
 function shownTags(img: ImageRecord): DimensionKey[] {
@@ -44,16 +43,26 @@ function shownTags(img: ImageRecord): DimensionKey[] {
 /**
  * 浏览中的分类若是“可打标维度”（坏维度/人数/黑白，重复除外）→ 返回该维度 = 当前列表的
  * 锚点标签：图靠它才出现在这个并集视图里，删了图就移出当前分类（TagEditor 据此标定位针 + 二次确认）。
- * 状态分类（交付库/待确认/垃圾桶/自定义）按主分类字段过滤，删标签不会移出列表 → 返回 null 不标。
+ * 状态分类（交付库/待确认/废弃库/自定义）按主分类字段过滤，删标签不会移出列表 → 返回 null 不标。
  */
 export function anchorDimOfCategory(category: string | null | undefined): DimensionKey | null {
   return category && (ADDABLE as string[]).includes(category) ? (category as DimensionKey) : null
 }
 
+/** 分类 key → 界面名（自定义分类取真实名字，null = 全部）：大图顶部计数器与标签管理器共用 */
+export function categoryDisplayName(cat: string | null | undefined, custom: Array<{ id: number; name: string }>): string {
+  if (!cat) return '全部文件'
+  if (cat.startsWith('custom:')) return custom.find((x) => `custom:${x.id}` === cat)?.name ?? cat
+  return (
+    (DIMENSION_LABELS as Record<string, string>)[cat] ??
+    ({ library: '交付库', review: '待确认', trash: '废弃库', dup_trash: '重复/连拍-废弃', flaws: '瑕疵片' } as Record<string, string>)[cat] ??
+    cat
+  )
+}
+
 /**
- * 当前分类锚点图标：地图定位针（“你在这里”的通用符号，比图钉📌语义准——
- * 图钉读作“置顶/固定”，而这里要表达的是“图就定位在这个分类里”）。
- * 用 SVG 不用 emoji：emoji 自带彩色不随主题，SVG 描维度色与左侧标签色块同源。
+ * 当前分类锚点图标：地图定位针（“你在这里”的通用符号）。删除它会把图移出正在浏览的
+ * 分类，所以带针的标签删除前要先确认。SVG 描维度色，与标签芯片同源。
  */
 export function CatPinIcon({ dim, color, className }: { dim?: DimensionKey; color?: string; className?: string }): JSX.Element {
   return (
@@ -73,12 +82,16 @@ export function CatPinIcon({ dim, color, className }: { dim?: DimensionKey; colo
   )
 }
 
-interface Row {
-  dim: DimensionKey
-  count: number
-  conf: number
-  level: 'high' | 'mid' | 'low'
-  reason: string
+const isPersonDim = (d: DimensionKey): boolean => (PERSON_DIMS as string[]).includes(d)
+
+/** 三区共用的节标题：小字浅色，主词后跟一句极短的操作提示，不解释机制 */
+function SectionLabel(props: { title: string; hint?: string }): JSX.Element {
+  return (
+    <div className="text-xs text-fg3 mb-1.5">
+      {props.title}
+      {props.hint && <span className="opacity-70"> · {props.hint}</span>}
+    </div>
+  )
 }
 
 export default function TagEditor({
@@ -91,31 +104,24 @@ export default function TagEditor({
   /** 当前分类对应的维度：删除它会把图移出当前分类，需二次确认 */
   anchorDim?: DimensionKey | null
   size?: 'sm' | 'lg'
-  /**
-   * 是否展开判定理由长句（“头部贴边出框（右），脸框占图高12%”这类）。**默认不展开**：
-   * 大图右栏、单个图右下角“标签管理”弹窗、底部工具条“批量标签管理”弹窗三个入口都不显示——
-   * 那是给调阈值的人看的，客户与摄影师复审时看不懂也不需要看。理由与置信度照旧写进库里的
-   * tags JSON（跟阈值自学习用的 corrections 一起留着），只是不渲染；要排查时显式传 true 即可恢复。
-   */
+  /** 是否展开判定理由长句（给调阈值的人看，默认关；三个客户入口都不显示） */
   showReason?: boolean
 }): JSX.Element {
   const addTag = useStore((s) => s.addTag)
   const removeTag = useStore((s) => s.removeTag)
   const tagBusy = useStore((s) => s.tagBusy)
-  const [picker, setPicker] = useState(false)
   const [confirmDim, setConfirmDim] = useState<DimensionKey | null>(null)
-  // 待确认的人数替换：点下带 ⇄ 的按钮先落到这里，确认条就在面板底部，不直接写库
-  const [pendingReplace, setPendingReplace] = useState<DimensionKey | null>(null)
-  const wrapRef = useRef<HTMLDivElement>(null)
-  const pickerWrapRef = useRef<HTMLDivElement>(null)
-  useOutsideClose(picker, () => setPicker(false), pickerWrapRef)
 
   const ids = useMemo(() => imgs.map((i) => i.id), [imgs])
   const multi = imgs.length > 1
+  const big = size === 'lg'
 
-  // 各标签汇总：批量时统计有几张图带该标签，取最高置信作为代表
-  const rows = useMemo<Row[]>(() => {
-    const m = new Map<DimensionKey, Row>()
+  // 某维度在这批图上已有几张
+  const hasCount = (dim: DimensionKey): number => imgs.filter((i) => shownTags(i).includes(dim)).length
+
+  // 当前标签汇总：人物排第一（永远），其余按最高置信降序；批量时计数 + 取最高置信做 tooltip
+  const rows = useMemo(() => {
+    const m = new Map<DimensionKey, { dim: DimensionKey; count: number; conf: number; reason: string }>()
     for (const img of imgs) {
       for (const d of shownTags(img)) {
         const t = img.tags[d]!
@@ -124,252 +130,208 @@ export default function TagEditor({
           cur.count += 1
           if (t.confidence > cur.conf) {
             cur.conf = t.confidence
-            cur.level = t.level
             cur.reason = t.reason ?? ''
           }
         } else {
-          m.set(d, { dim: d, count: 1, conf: t.confidence, level: t.level, reason: t.reason ?? '' })
+          m.set(d, { dim: d, count: 1, conf: t.confidence, reason: t.reason ?? '' })
         }
       }
     }
-    return [...m.values()].sort((a, b) => b.conf - a.conf)
+    return [...m.values()].sort((a, b) => {
+      const pa = isPersonDim(a.dim) ? 0 : 1
+      const pb = isPersonDim(b.dim) ? 0 : 1
+      if (pa !== pb) return pa - pb
+      return b.conf - a.conf
+    })
   }, [imgs])
 
-  // 换图 / 图数变化时收起展开态，避免带着上一张图的确认条继续操作
-  useEffect(() => {
-    setPicker(false)
-    setConfirmDim(null)
-    setPendingReplace(null)
-  }, [ids.join(',')])
+  // 换图 / 图数变化时收起确认条，避免带着上一张图的确认继续操作
+  useEffect(() => setConfirmDim(null), [ids.join(',')])
 
-  /**
-   * 该维度对这批图是否可加。人数三分类互斥不等于“不能加”，而是“换掉”：
-   * 旧分类的图删掉才能加新分类是死路（删了就离开当前相册，再也找不到入口），
-   * 所以这里把冲突当成一种可执行动作报出去，由确认条承担风险告知。
-   */
-  const addState = (
-    dim: DimensionKey
-  ): { ok: boolean; why: string; has: number; missing: number; replaceCount: number; oldLabels: string } => {
-    const has = imgs.length - imgs.filter((i) => !shownTags(i).includes(dim)).length
-    const missing = imgs.length - has
-    if (!PERSON_DIMS.includes(dim)) {
-      if (!missing) return { ok: false, why: '选中的图都已有该标签', has, missing, replaceCount: 0, oldLabels: '' }
-      return { ok: true, why: `为 ${missing} 张图补上该标签（已有该标签的 ${has} 张跳过）`, has, missing, replaceCount: 0, oldLabels: '' }
-    }
-    // 每张图冲突的旧分类可能不同（批量时既有单人照也有无人物），按维度分别计数
-    const others = PERSON_DIMS.filter((d) => d !== dim)
-    const hits = new Map<DimensionKey, number>()
-    for (const i of imgs) {
-      const o = shownTags(i).find((d) => others.includes(d))
-      if (o) hits.set(o, (hits.get(o) ?? 0) + 1)
-    }
-    const replaceCount = [...hits.values()].reduce((a, b) => a + b, 0)
-    const oldLabels = [...hits.keys()].map((d) => `「${DIMENSION_LABELS[d]}」`).join('、')
-    if (!missing && !replaceCount) return { ok: false, why: '选中的图都已有该标签', has, missing, replaceCount: 0, oldLabels: '' }
-    const parts: string[] = []
-    if (missing) parts.push(`为 ${missing} 张补上`)
-    if (replaceCount) parts.push(`把 ${replaceCount} 张的 ${oldLabels} 换成该标签`)
-    return {
-      ok: true,
-      why: parts.join('，') + (replaceCount ? '（被换的图会离开旧人数相册）' : ''),
-      has,
-      missing,
-      replaceCount,
-      oldLabels
-    }
-  }
+  const personRow = rows.find((r) => isPersonDim(r.dim))
+  const otherRows = rows.filter((r) => !isPersonDim(r.dim))
+  const present = new Set(rows.map((r) => r.dim))
 
-  const big = size === 'lg'
   const doRemove = (dim: DimensionKey): void => {
     setConfirmDim(null)
     void removeTag(ids, dim)
   }
+  /** 锚点标签（删了图就移出当前分类）和批量多张删除要先确认，其余单击直达 */
+  const tryRemove = (dim: DimensionKey, count: number): void => {
+    if (dim === anchorDim || (multi && count > 1)) setConfirmDim(dim)
+    else doRemove(dim)
+  }
+
+  const chipPad = big ? 'px-2.5 py-1.5 text-sm' : 'px-2 py-1 text-xs'
 
   return (
-    <div ref={wrapRef} className="flex flex-col gap-2 min-w-0">
-      {/* 写入中：进度提示（乐观更新已经先把标签加/删到位，这里只是让“正在喂 AI”这件事可见） */}
+    <div className="flex flex-col gap-3 min-w-0">
+      {/* 写入中：进度提示（乐观更新已先把标签加/删到位，这里让“正在落库”可见） */}
       {tagBusy && (
         <div className="flex items-center gap-2 rounded-lg border border-brand/40 bg-brand/10 px-2.5 py-1.5 text-xs text-brand">
           <span className="inline-block w-3.5 h-3.5 rounded-full border-2 border-brand border-t-transparent animate-spin shrink-0" />
           {tagBusy}
         </div>
       )}
-      {/* 已有标签：一行一张卡片，删除按钮带文字（纯图标太小、看不见也猜不到） */}
-      {rows.map((r) => {
-        const needConfirm = r.dim === anchorDim || (multi && r.count > 1)
-        return (
-          <div key={r.dim} className="rounded-lg border border-line bg-panel2 px-2.5 py-2">
-            <div className="flex items-center gap-2 min-w-0">
-              <span
-                className={'shrink-0 rounded px-2 py-1 leading-none font-medium text-white ' + (big ? 'text-sm' : 'text-[11px]')}
-                style={{ background: dimTagColor(r.dim) }}
-              >
-                {DIMENSION_LABELS[r.dim]}
-              </span>
-              {/* 定位针：当前分类的锚点标签——图就是靠这个标签才在正在浏览的分类里，删了就移出列表。
-                  以前只有点删除弹确认条才知道这件事，现在提前标在行上（悬停有解释） */}
-              {r.dim === anchorDim && (
+
+      {/* ① 当前标签：人物第一且不可删（只能切换），其余 ✕ 直接删 */}
+      <section>
+        <SectionLabel title="当前标签" hint="点 ✕ 删除" />
+        <div className="flex flex-wrap gap-1.5">
+          {personRow &&
+            (() => {
+              const c = dimTagColor(personRow.dim)
+              return (
                 <span
-                  className="shrink-0 inline-flex items-center"
-                  title={`图就定位在「${DIMENSION_LABELS[r.dim]}」分类里（靠这枚标签）——删除后图将移出当前分类`}
+                  className={
+                    'inline-flex items-center gap-1.5 rounded-md leading-none font-medium text-white shadow-sm cursor-default ' +
+                    chipPad
+                  }
+                  style={{ background: c }}
+                  title={`人物分类只能切换、不能删除——用下面的按钮换${multi ? `（${personRow.count}/${imgs.length} 张带此标签）` : ''}`}
                 >
-                  <CatPinIcon dim={r.dim} className={big ? 'w-4 h-4' : 'w-3 h-3'} />
+                  {DIMENSION_LABELS[personRow.dim]}
+                  {multi && <span className="text-white/70 text-[10px] tabular-nums">{personRow.count}/{imgs.length}</span>}
                 </span>
-              )}
-              <div className={'shrink-0 bg-line rounded-full overflow-hidden ' + (big ? 'w-20 h-2' : 'w-12 h-1.5')}>
-                <div className={isBadDim(r.dim) ? 'h-full bg-red-500' : 'h-full bg-blue-500'} style={{ width: `${r.conf * 100}%` }} />
-              </div>
-              <span className={'shrink-0 tabular-nums ' + (big ? 'text-sm text-fg2' : 'text-[11px] text-fg3')}>
-                {(r.conf * 100).toFixed(0)}%
-              </span>
-              {multi && (
-                <span className="shrink-0 text-[11px] text-fg3 tabular-nums" title={`选中的 ${imgs.length} 张里有 ${r.count} 张带该标签`}>
-                  {r.count}/{imgs.length}
-                </span>
-              )}
+              )
+            })()}
+          {otherRows.map((r) => {
+            const c = dimTagColor(r.dim)
+            return (
               <button
+                key={r.dim}
                 className={
-                  'ml-auto shrink-0 flex items-center gap-1 rounded-md border border-bad/60 text-bad ' +
-                  'hover:bg-bad/15 hover:border-bad cursor-pointer transition-colors ' +
-                  (big ? 'px-2.5 py-1.5 text-xs' : 'px-1.5 py-0.5 text-[11px]')
+                  'inline-flex items-center gap-1.5 rounded-md border leading-none font-medium transition-colors cursor-pointer hover:brightness-95 active:scale-95 ' +
+                  chipPad
                 }
-                title={`这标签不对：从 ${r.count} 张图移除「${DIMENSION_LABELS[r.dim]}」（记为误判，喂 AI 学习）`}
+                style={{ color: c, borderColor: c + '66', background: c + '14' }}
                 disabled={!!tagBusy}
-                onClick={() => (needConfirm ? setConfirmDim(r.dim) : doRemove(r.dim))}
+                title={`删除「${DIMENSION_LABELS[r.dim]}」标签${multi ? `（当前 ${r.count}/${imgs.length} 张带此标签）` : ''}；删掉后这张图不再算这一类`}
+                onClick={() => tryRemove(r.dim, r.count)}
               >
-                ✕ 删除
+                {r.dim === anchorDim && <CatPinIcon dim={r.dim} className="w-3.5 h-3.5 shrink-0" />}
+                {DIMENSION_LABELS[r.dim]}
+                {multi && <span className="opacity-60 text-[10px] tabular-nums">{r.count}/{imgs.length}</span>}
+                <span className="opacity-70">✕</span>
               </button>
-            </div>
-            {showReason && r.reason && (
-              <div className={'text-fg3 break-all leading-relaxed pl-0.5 ' + (big ? 'mt-1 text-xs' : 'mt-0.5 text-[11px]')}>{r.reason}</div>
-            )}
-            {confirmDim === r.dim && (
-              <div className="mt-1.5 rounded-md border border-warn/50 bg-warn/10 px-2.5 py-2 text-xs text-warn flex flex-wrap items-center gap-2">
-                <span className="flex-1 min-w-[180px]">
+            )
+          })}
+          {!rows.length && <span className="text-xs text-fg3">暂无标签（AI 认为没有问题，或置信度未过线）</span>}
+        </div>
+        {showReason &&
+          rows
+            .filter((r) => r.reason)
+            .map((r) => (
+              <div key={r.dim} className="text-[11px] text-fg3 mt-1 break-all leading-relaxed">
+                {DIMENSION_LABELS[r.dim]}：{r.reason}
+              </div>
+            ))}
+        {confirmDim &&
+          (() => {
+            const r = rows.find((x) => x.dim === confirmDim)
+            if (!r) return null
+            return (
+              <div className="mt-2 rounded-md border border-warn/50 bg-warn/10 px-2.5 py-2 text-xs text-warn">
+                <div>
                   {r.dim === anchorDim
                     ? `「${DIMENSION_LABELS[r.dim]}」是当前分类的标签——删除后这 ${r.count} 张图会移出当前分类${multi ? '' : '并自动切换到下一张图'}。`
                     : `将从选中的 ${r.count} 张图上删除「${DIMENSION_LABELS[r.dim]}」标签。`}
-                </span>
-                <button className="btn-danger !py-1 !text-xs" onClick={() => doRemove(r.dim)}>
-                  确认删除
-                </button>
-                <button className="btn !py-1 !text-xs" onClick={() => setConfirmDim(null)}>
-                  取消
-                </button>
-              </div>
-            )}
-          </div>
-        )
-      })}
-      {!rows.length && (
-        <div className={'rounded-lg border border-dashed border-line px-3 py-3 text-center ' + (big ? 'text-fg2 text-sm' : 'text-fg2 text-xs')}>
-          暂无标签（未筛选，或所有维度置信度低于阈值 → 视为正常图）
-        </div>
-      )}
-
-      {/* 添加标签：按钮 + 文档流内展开的面板（不浮动，永不被裁切） */}
-      <div ref={pickerWrapRef}>
-        <button
-        className={
-          'btn w-full border-dashed ' +
-          (picker ? 'border-brand text-brand' : 'border-line text-fg2 hover:border-brand hover:text-brand') +
-          (big ? ' !py-2.5 !text-sm' : ' !py-1.5 !text-xs')
-        }
-        onClick={() => setPicker((v) => !v)}
-        title="AI 漏检的维度手动补上：图会同时出现在该维度分类（不是移动）；人数/黑白这类互斥分类已存在的，点面板里带 ⇄ 的那枚就是替换（一次点一枚，先确认）"
-      >
-        {/* 按钮同时露出两个动作（添加/替换）：以前只写“添加标签”，用户找不到“替换”在哪——
-            其实互斥分类的替换就在这个面板里（带 ⇄ 的按钮），现在把入口语义直接写上。
-            图标用 ⇄ 字符不用 emoji：面板里替换按钮用的就是它，两处同一符号才能对上 */}
-        {picker ? '▴ 收起' : '＋ 添加标签 ｜ ⇄ 替换标签'}
-      </button>
-      {picker && (
-        <div className="rounded-lg border border-line bg-panel2 p-2.5 mt-2">
-          <div className="text-fg2 text-xs mb-2">
-            添加到{multi ? `全部 ${imgs.length} 张选中图` : '这张图'}——图同时出现在该维度分类并排到第一张，
-            <span className="text-fg">它当前所属分类不变</span>（人数三个分类例外：只能留一个，带 ⇄ 的就是替换）：
-          </div>
-          <div className="grid gap-1.5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(104px, 1fr))' }}>
-            {ADDABLE.map((d) => {
-              const st = addState(d)
-              const c = dimTagColor(d)
-              return (
-                <button
-                  key={d}
-                  className={
-                    'flex items-center justify-center gap-1 whitespace-nowrap rounded-md border px-2 py-1.5 text-xs font-medium transition-all ' +
-                    (st.ok ? 'cursor-pointer hover:brightness-95 active:scale-95' : 'opacity-40 cursor-not-allowed')
-                  }
-                  // 白底面板专用配色：维度色做文字/描边/浅同色底，比灰字灰底的 .btn 在白色面板上清楚得多
-                  style={
-                    st.ok
-                      ? { color: c, borderColor: c + '66', background: c + '14' }
-                      : { color: 'rgb(var(--c-fg3))', borderColor: 'rgb(var(--c-line))', background: 'rgb(var(--c-panel))' }
-                  }
-                  disabled={!st.ok || !!tagBusy}
-                  title={st.why}
-                  onClick={() => {
-                    if (!st.ok) return
-                    // 人数替换会连带把图送出旧相册，且标签操作不在 ↩ 撤回栈里，先确认再写
-                    if (st.replaceCount) {
-                      setPendingReplace(d)
-                      return
-                    }
-                    setPendingReplace(null)
-                    void addTag(ids, d)
-                  }}
-                >
-                  <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: c }} />
-                  {DIMENSION_LABELS[d]}
-                  {st.replaceCount > 0 && <span className="opacity-90">⇄</span>}
-                  {!st.ok && st.has > 0 && <span className="opacity-70">✓</span>}
-                </button>
-              )
-            })}
-          </div>
-          {pendingReplace &&
-            (() => {
-              const st = addState(pendingReplace)
-              if (!st.replaceCount) return null
-              return (
-                <div className="mt-2 rounded-md border border-warn/50 bg-warn/10 px-2.5 py-2 text-xs text-warn">
-                  <div>
-                    人数分类只能留一个：这 {st.replaceCount} 张会从 {st.oldLabels} 改成「{DIMENSION_LABELS[pendingReplace]}」，
-                    改完它们就离开 {st.oldLabels} 相册
-                    {st.missing ? `（另外 ${st.missing} 张是纯新增，不受影响）` : ''}。标签操作不能用顶栏 ↩ 撤回，只能再改回去。
-                  </div>
-                  {/* 说明占满一行，两个按钮单独一行右对齐：以前 flex-wrap 让“取消”被挤到
-                      第三行左对齐，读起来像两个按钮各管一摊 */}
-                  <div className="mt-2 flex items-center justify-end gap-2">
-                    <button
-                      className="btn !py-1 !text-xs bg-good/15 border-good/50 text-good"
-                      disabled={!!tagBusy}
-                      onClick={() => {
-                        void addTag(ids, pendingReplace)
-                        setPendingReplace(null)
-                      }}
-                    >
-                      确认替换
-                    </button>
-                    <button className="btn !py-1 !text-xs" onClick={() => setPendingReplace(null)}>
-                      取消
-                    </button>
-                  </div>
                 </div>
-              )
-            })()}
-          <div className="text-[11px] text-fg2 mt-2">
-            彩色 = 可添加；带 ⇄ = 会替换掉现有的人数标签（点一下先问确认）；灰显✓ = 已有该标签
-          </div>
+                <div className="mt-2 flex items-center justify-end gap-2">
+                  <button className="btn-danger !py-1 !text-xs" onClick={() => doRemove(r.dim)}>确认删除</button>
+                  <button className="btn !py-1 !text-xs" onClick={() => setConfirmDim(null)}>取消</button>
+                </div>
+              </div>
+            )
+          })()}
+      </section>
+
+      {/* ② 人物分类：四个互斥按钮，点谁切谁；替换语义由主进程互斥收口，不用先删再加 */}
+      <section>
+        <SectionLabel title="人物分类" hint="四选一，点一下切换" />
+        <div className="grid grid-cols-2 gap-1.5">
+          {PERSON_DIMS.map((d) => {
+            const n = hasCount(d)
+            const active = n === imgs.length && n > 0
+            const c = dimTagColor(d)
+            return (
+              <button
+                key={d}
+                className={
+                  'inline-flex items-center justify-center gap-1.5 rounded-md border leading-none font-medium transition-all ' +
+                  chipPad +
+                  (active ? ' cursor-default shadow-sm' : ' cursor-pointer hover:brightness-95 active:scale-95')
+                }
+                style={
+                  active
+                    ? { color: '#fff', borderColor: c, background: c }
+                    : { color: c, borderColor: c + '66', background: c + '14' }
+                }
+                disabled={active || !!tagBusy}
+                title={
+                  active
+                    ? '当前就是它'
+                    : n > 0
+                      ? `把这 ${imgs.length - n} 张换成「${DIMENSION_LABELS[d]}」（已有 ${n} 张不动）`
+                      : `设为「${DIMENSION_LABELS[d]}」${multi ? `（对全部 ${imgs.length} 张生效）` : ''}`
+                }
+                onClick={() => void addTag(ids, d)}
+              >
+                {DIMENSION_LABELS[d]}
+                {active && <span className="text-white/80">✓</span>}
+                {!active && multi && n > 0 && <span className="opacity-60 text-[10px] tabular-nums">{n}/{imgs.length}</span>}
+              </button>
+            )
+          })}
         </div>
-      )}
-      </div>
+      </section>
+
+      {/* ③ 其他标签：单击加上；这批图全都已有的压暗打 ✓（要删回第①区点 ✕） */}
+      <section>
+        <SectionLabel title="其他标签" hint="点一下加上" />
+        <div className="grid gap-1.5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(96px, 1fr))' }}>
+          {TAG_DIMS.map((d) => {
+            const n = hasCount(d)
+            const all = n === imgs.length && n > 0
+            const c = dimTagColor(d)
+            return (
+              <button
+                key={d}
+                className={
+                  'inline-flex items-center justify-center gap-1.5 rounded-md border leading-none font-medium transition-all ' +
+                  chipPad +
+                  (all ? ' cursor-not-allowed opacity-40' : ' cursor-pointer hover:brightness-95 active:scale-95')
+                }
+                style={
+                  all
+                    ? { color: 'rgb(var(--c-fg3))', borderColor: 'rgb(var(--c-line))', background: 'rgb(var(--c-panel))' }
+                    : { color: c, borderColor: c + '66', background: c + '14' }
+                }
+                disabled={all || !!tagBusy}
+                title={
+                  all
+                    ? '已有该标签（到上面删除）'
+                    : n > 0
+                      ? `为缺少的 ${imgs.length - n} 张补上「${DIMENSION_LABELS[d]}」（已有 ${n} 张不动）`
+                      : `加上「${DIMENSION_LABELS[d]}」标签${multi ? `（对全部 ${imgs.length} 张生效）` : ''}`
+                }
+                onClick={() => void addTag(ids, d)}
+              >
+                <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: all ? 'rgb(var(--c-fg3))' : c }} />
+                {DIMENSION_LABELS[d]}
+                {all && <span className="opacity-70">✓</span>}
+                {!all && multi && n > 0 && <span className="opacity-60 text-[10px] tabular-nums">{n}/{imgs.length}</span>}
+              </button>
+            )
+          })}
+        </div>
+      </section>
     </div>
   )
 }
 
 /**
- * 列表端标签管理器：网格/列表/瀑布流卡片上的 🏷 按钮打开，
+ * 标签管理器弹窗：网格/列表/瀑布流卡片上的「标签管理」按钮打开，
  * 不必进大图右侧栏也能给单张或多张图增删标签。
  * 取数双轨：优先用 store.images（带乐观更新，所以标签秒变），
  * 并用 getImage 逐张兑底权威值——删掉主分类标签后图已离开当前分类列表，
@@ -414,7 +376,7 @@ export function TagManagerModal(): JSX.Element | null {
     c.startsWith('custom:')
       ? customCategories.find((x) => `custom:${x.id}` === c)?.name ?? c
       : DIMENSION_LABELS[c as keyof typeof DIMENSION_LABELS] ??
-        ({ library: '交付库', review: '待确认', trash: '垃圾桶', dup_trash: '重复/连拍-废弃' } as Record<string, string>)[c] ??
+        ({ library: '交付库', review: '待确认', trash: '废弃库', dup_trash: '重复/连拍-废弃' } as Record<string, string>)[c] ??
         c
 
   return (
@@ -438,12 +400,10 @@ export function TagManagerModal(): JSX.Element | null {
             <div className="text-xs text-fg3 mt-0.5 flex items-center gap-1.5 flex-wrap">
               <span className="w-2 h-2 rounded-full shrink-0" style={{ background: dimTagColor(imgs[0].category) }} />
               当前分类：{catName(imgs[0].category)}
-              {imgs.length > 1 && <span className="text-fg2">· 增删标签对全部选中图生效</span>}
+              {imgs.length > 1 && <span className="text-fg2">· 操作对全部选中图生效</span>}
             </div>
           </div>
-          {/* 关闭按钮：以前是一枚 text-fg3 的淡灰小✕（无尺寸无底色，用户反馈“太小不明显”），
-              改成 36×36 带边框底色的按钮，悬停转红白——一眼看见、好点，红色也符合“关闭/退出”预期。
-              图标用 SVG 描边而非✕字符：字符在不同字体下粗细/居中不一致，SVG 线条干净且真正居中 */}
+          {/* 关闭按钮：36×36 带边框底色，悬停转红——一眼看见、好点 */}
           <button
             className="shrink-0 grid place-items-center w-9 h-9 rounded-lg border border-line bg-panel2 text-fg2 hover:bg-bad hover:border-bad hover:text-white transition-colors cursor-pointer"
             onClick={closeTagManager}
@@ -456,20 +416,9 @@ export function TagManagerModal(): JSX.Element | null {
           </button>
         </div>
 
-        {/* 已有标签 */}
-        <div className="px-4 pt-3">
-          <div className="text-xs text-fg3 mb-2 flex items-center gap-1.5">
-            <span className="uppercase tracking-wide">AI 标记的标签</span>
-          </div>
-        </div>
-        <div className="px-4">
+        {/* 单页三区：当前标签 / 人物切换 / 标签点加（无展开收起，无机制说明） */}
+        <div className="px-4 py-3">
           <TagEditor imgs={imgs} anchorDim={anchorDim} size="lg" />
-        </div>
-
-        {/* 脚注 */}
-        <div className="px-4 py-3 mt-2 border-t border-line text-[11px] text-fg3 leading-relaxed">
-          添加标签 → 图同时出现在该维度分类的第一张（不是移动，原分类不变）；删除标签 → 从该维度分类消失，
-          若它本来就归在该分类下则一并移出。
         </div>
       </div>
     </div>

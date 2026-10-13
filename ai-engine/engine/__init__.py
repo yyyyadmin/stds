@@ -80,17 +80,14 @@ class DetectEngine:
             dims["eyes_closed"] = {"confidence": round(closed_conf, 4), "reason": closed_reason, "method": self.eyes.method}
             dims["eyes_side"] = {"confidence": round(gaze_conf, 4), "reason": gaze_reason, "method": self.eyes.method}
 
-        # --- 面部狰狞（子特征综合） ---
-        closed_probs = []
-        for f in faces[:6]:
-            for roi in _eye_rois_safe(self.eyes, eye_bgr, f):
-                closed_probs.append(roi)
-        trig, ugly_conf, ugly_reason = self.expr.subfeatures(bgr, faces, closed_probs)
+        # --- 表情崩坏（blendshape：眼睛挤没为主，嘴/仰头佐证，侧脸降权）---
+        # 不再用旧像素启发式 subfeatures（"五官不对称"正是当年侧脸误判成狰狞的元凶）。
+        ugly_conf, ugly_reason = self.expr.expression_breakdown(faces)
         if face_count:
             dims["face_ugly"] = {
                 "confidence": round(ugly_conf, 4),
-                "reason": ugly_reason + (("，触发: " + "/".join(trig)) if trig else ""),
-                "method": "subfeatures",
+                "reason": ugly_reason or "眼睛未挤没",
+                "method": "blendshape+pose",
             }
 
         # --- 模糊 / 曝光 / 黑白 ---

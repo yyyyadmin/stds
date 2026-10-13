@@ -13,10 +13,12 @@ import { flushDb, closeDb } from './sqlite'
 import { registerIpc } from './ipc'
 import { engineManager } from './engine'
 import { pruneMissing } from './services/importer'
-import { getSettings } from './db'
+import { getSettings, saveSettings, backfillTiers } from './db'
 import { setupErrorLogger, getLogRoot, logRendererError } from './logger'
 import { dumpCalibration } from './services/calib'
 import { harmonizePersonCountOnce } from './services/personHarmony'
+import { reclassifyAll, regradeAll, reclusterStored } from './services/scanner'
+import { REGRADE_VERSION } from '../shared/types'
 
 // 尽早安装错误日志（捕获启动期异常），在所有逻辑之前
 setupErrorLogger()
@@ -60,6 +62,53 @@ if (!gotLock) {
       harmonizePersonCountOnce()
     } catch (e) {
       console.error('person harmony on startup failed', e)
+    }
+
+    // D2 一次性 recompute（版本门控，不重跑引擎）：把旧库"主分类=最坏瑕疵"的行按新规则从已存 tags
+    // 重算回人数身份，让 App 在整库重筛前就自洽（交付库/瑕疵片/待确认三档虚视图口径一致）。
+    try {
+      const st = getSettings()
+      if ((st.d2Migration ?? 0) < 1) {
+        reclassifyAll()
+        saveSettings({ d2Migration: 1 })
+        console.log('[d2] 主分类人数化 recompute 完成（旧库 category 从瑕疵维度回落到人数身份）')
+      }
+    } catch (e) {
+      console.error('d2 recompute on startup failed', e)
+    }
+
+    // D4 一次性 backfill（版本门控，不重跑引擎）：给存量行按已存 tags 补算交付库档位，
+    // 新列上线后旧库立刻有优质/良好/一般分布（重筛后的新行由 updateDetectResult 自动打分）。
+    try {
+      const st = getSettings()
+      if ((st.tierMigration ?? 0) < 1) {
+        const n = backfillTiers()
+        saveSettings({ tierMigration: 1 })
+        console.log(`[d4] 交付库档位 backfill 完成（补算 ${n} 行）`)
+      }
+    } catch (e) {
+      console.error('d4 tier backfill on startup failed', e)
+    }
+
+    // 阈值台阶基线一次性重算（版本门控，不重跑引擎）：存量 tags 里的瑕疵 level 是检测时写死的，
+    // 不重算的话新基线在界面上完全看不出来（用户会被迫整库重筛才能验证参数）。
+    // regrade 之后必须补跑一次重聚类：v4 改了“每组该留哪张”，而代表帧是靠 phash 成组选出来的，
+    // 不重聚类存量库里的旧代表帧不会自己换人（窗口建立前跑完，首屏读到的就是新结果）。
+    try {
+      const st = getSettings()
+      if ((st.regradeVersion ?? 0) < REGRADE_VERSION) {
+        const n = regradeAll()
+        saveSettings({ regradeVersion: REGRADE_VERSION })
+        console.log(`[regrade] 按台阶基线重算完成（改动 ${n} 行，未重跑引擎）`)
+        try {
+          const r = await reclusterStored()
+          console.log(`[dup-cluster] 按新权重重选代表帧完成（${r.groups} 组 / 改动 ${r.changed} 张，未重跑引擎）`)
+        } catch (e) {
+          console.error('dup recluster on startup failed', e)
+        }
+      }
+    } catch (e) {
+      console.error('threshold regrade on startup failed', e)
     }
 
     const iconCandidates = [

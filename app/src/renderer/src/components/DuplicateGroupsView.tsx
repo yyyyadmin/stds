@@ -1,28 +1,43 @@
 /**
- * 重复/连拍 分组视图（专用定制界面）
- * - 把同一 dupGroup 的重复/连拍图叠成一张"3D 堆叠卡"：后层向左上、前层向右下错开，
+ * 重复照片 分组视图（专用定制界面）
+ * - 把同一 dupGroup 的重复照片叠成一张"3D 堆叠卡"：后层向左上、前层向右下错开，
  *   每张都露出右下角，一眼看出这一组有几张。
- * - 整组成员 = 本分类的多余帧 + 其它分类里的同伴（聚类时每组最早的第一张 AI 默认保留帧留在交付库）。
+ * - 整组成员 = 本分类的多余帧 + 其它分类里的同伴（聚类时每组按用户权重挑出的代表帧留在交付库）。
  *   后者由主进程 listImagesByGroups 按 dup_group 补全，在弹窗里以锁定卡展示（虚线框 + “已在交付库”角标）：
  *   这样每组永远看得到完整上下文，2 张的组不会再退化成一张“未成组”孤帧（已彻底取消该分区）。
- * - 点击堆叠卡 → 弹窗平铺该组全部照片，逐张标记「留 / 废」：
- *   · keep 模式（在【重复/连拍】分类内）：支持两种选图习惯（全局设置记忆，切换一次永久保持）：
- *     - 选丢弃的（dupPickMode=drop，默认）/ 选保留的（dupPickMode=keep）
- *     两种模式都无默认选择；卡片三态：绿色=标保留、红色=标废弃、无边框=还没决定（留在重复类下次接着选）
- *     底部两个按钮分开执行：「处理已选」（drop=丢弃标红的→废弃桶 / keep=保留标绿的→交付库）
- *     与「处理未选」（把还没决定的批量定案），只点一次不强制对全组下结论
- *     回库/进桶同时清 duplicate 标签（重聚类不会再抓回来）
- *     首次使用弹窗内会显示一次性引导（dupGuideSeen 记忆，看过不再弹）
- *   · trash 模式（在【重复/连拍-废弃】分类内）：勾选要恢复的 → 确认还原回【重复/连拍】
- * - 每张卡片中心有「🔍 放大查看」：点它进入原图全屏查看器（键盘上下左右 / 滚轮切换、底部选中/关闭/上/下一张）；
- *   点卡片其它区域仍是默认的「留/废」切换（锁定卡不可点）。
+ * - 点击堆叠卡 → 弹窗平铺该组全部照片，这一页已简化成一条主线（用户 10-13 拍板“要简单易懂好操作”）：
+ *   · 排版：已入交付库的那几张永远排最前（绿框 + “✓ 已在交付库”角标），下面一条分割线隔开还没入库的；
+ *     只有已入库那张右上角标真实档位（优质/良好/一般）；还没入库的不标档位（免得被误认为已分好，用户 10-13），
+ *     它左上角只挂瑕疵标签（闭眼、半截头…），一眼看得懂它为什么没进去；选档时才在弹层里用★提示 AI 预估。
+ *   · keep 模式（在【重复照片】分类内）：每张未入库照片下面只有两个动作——
+ *     「要这张→选档加进库」（点后弹出优质/良好/一般三档，点其中一档才确认把这张加进交付库，并按你选的档手动定死；
+ *       不顶掉库里原来那张——一组可以同时交好几张）与「丢弃」（进废弃桶，永不导出）。
+ *     点一下立刻生效，没有标红标绿、没有选图模式切换、也没有批量按钮；点照片本身可放大对比原图。
+ *     已入库那张带「移出交付库」可退回本组（不自动顶别人上来）；没点过的先留着，下次接着挑。
+ *     改档/进库/丢弃都会清 duplicate 标签，重聚类不会再抓回来。
+ *   · trash 模式（在【重复照片-废弃】分类内）：仍是勾选 → 批量恢复回【重复照片】（这套本来就简单，保留）。
+ * - 点照片进入原图全屏查看器：键盘上下左右 / 滚轮切换，底部有「要这张（弹三档加库）/ 丢弃 / 移出交付库 / 恢复」按钮。
  * - 两个分类都不允许从别处拖入（在 Sidebar 已禁用 drop），只能经此流程进出。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { toSrc, useBigSrc, Spinner } from './imageSrc'
+import { dimTagColor } from './Sidebar'
 import type { ImageRecord } from '../../../shared/types'
-import { CAT_DUP_TRASH, CAT_LIBRARY, CAT_REVIEW, DIMENSION_LABELS, isBadDim, isTrashLike } from '../../../shared/types'
+import {
+  BAD_DIMENSIONS,
+  CAT_TRASH,
+  CAT_LIBRARY,
+  CAT_REVIEW,
+  DEFAULT_TIER_NAMES,
+  DIMENSION_LABELS,
+  estimateTier,
+  isBadDim,
+  isStructuralDim,
+  isTrashLike,
+  type DimensionKey,
+  type TierKey
+} from '../../../shared/types'
 
 /** 取缩略图地址：优先已生成的 thumb，回退原图 */
 function src(img: ImageRecord): string {
@@ -53,8 +68,10 @@ interface Group {
  * 也照样正常导出——角标写「交付库」而不是「多人合拍照」，否则会和顶部说明自相矛盾。
  */
 function catShort(cat: string): string {
-  if (isTrashLike(cat)) return cat === CAT_DUP_TRASH ? '废弃桶' : '垃圾桶'
+  if (isTrashLike(cat)) return '废弃库'
   if (cat === CAT_REVIEW) return '待确认'
+  // v2.0.67：重复照片从瑕疵表摘出去了，不单独判一下会被下面的“交付库”兜住（旧数据里 category=duplicate 的行）
+  if (isStructuralDim(cat)) return '重复照片'
   if (isBadDim(cat)) return DIMENSION_LABELS[cat] || '问题图区'
   return '交付库'
 }
@@ -72,20 +89,87 @@ function catFull(cat: string): string {
   return album ? `${catShort(cat)}（${album}）` : catShort(cat)
 }
 
+/**
+ * 这张是不是“已经在交付库里、会被导出去”的那类。
+ * 不能用 category==='library' 判：交付库是虚分类，人数图/黑白图/自定义相册里的干净图都算（与主进程
+ * exporter.isLibrary 同一口径）。分组详情页靠它把已入库的那几张挑出来排到最前。
+ */
+function inLibrary(img: ImageRecord): boolean {
+  if (isTrashLike(img.category) || img.category === CAT_REVIEW) return false
+  if (isBadDim(img.category) || isStructuralDim(img.category)) return false
+  // 它身上的冗余标签就是“同组已有代表帧、我这张不导出”——那它确实不在库里
+  return !img.tags.duplicate || img.tags.duplicate.level === 'low'
+}
+
+/** 右上角档位角标（优质/绿、良好/蓝、一般/灰）：与网格图右上角标同一命名与配色 */
+function TierBadge({ img, tierNames }: { img: ImageRecord; tierNames: string[] }): JSX.Element {
+  const tier = estimateTier(img.tags, img.tier)
+  const text = tier ? tierNames[tier - 1] || String(tier) : '未评档'
+  const cls = tier === 2 ? 'bg-blue-600/90' : tier === 3 ? 'bg-gray-500/90' : 'bg-good'
+  return (
+    <span
+      className={'absolute right-1.5 top-1.5 z-10 px-1.5 py-0.5 rounded text-[11px] font-bold text-white shadow-[0_1px_3px_rgba(0,0,0,0.65)] ' + cls}
+      title={
+        img.tier
+          ? img.tierBy === 'user'
+            ? `档位：${text}（你手动定过，重筛不会改）`
+            : `档位：${text}（按引擎实测清晰度分的）`
+          : `这张现在不在交付库，预计入库后档位：${text}（拿不到清晰度实测时归中间档）`
+      }
+    >
+      {text}
+    </span>
+  )
+}
+
+/**
+ * 卡片下沿的标签条：把“这张为什么没进库”直接写在图上（用户 10-13 指定：下面那批要显示瑕疵标签，比如闭眼）。
+ * 只读不折行：人数/黑白这类客观事实标签在这页不决定去留，占位反而噪，所以只取坏维度 + 冗余。
+ */
+function TagStrip({ img }: { img: ImageRecord }): JSX.Element | null {
+  const dims = (BAD_DIMENSIONS as string[]).filter((d) => {
+    const t = img.tags[d as DimensionKey]
+    return !!t && t.level !== 'low'
+  })
+  const dupTag = img.tags.duplicate
+  if (dupTag && dupTag.level !== 'low') dims.push('duplicate')
+  if (!dims.length) return null
+  return (
+    <span className="absolute left-1 top-1.5 z-10 flex flex-wrap gap-1 max-w-[72%] pointer-events-none">
+      {dims.map((d) => {
+        const c = dimTagColor(d)
+        const high = img.tags[d as DimensionKey]?.level === 'high'
+        return (
+          <span
+            key={d}
+            className="px-1.5 py-0.5 rounded-[5px] text-[11px] leading-none font-medium border shadow-[0_1px_3px_rgba(0,0,0,0.65)]"
+            style={{ color: '#fff', background: c + (high ? 'E6' : 'B3'), borderColor: 'rgba(255,255,255,.55)' }}
+            title={`${DIMENSION_LABELS[d as keyof typeof DIMENSION_LABELS] || d}：${img.tags[d as DimensionKey]?.reason || ''}`}
+          >
+            {DIMENSION_LABELS[d as keyof typeof DIMENSION_LABELS] || d}
+          </span>
+        )
+      })}
+    </span>
+  )
+}
+
 /** 单张堆叠卡：最多叠 4 层，右下角错开露出，营造 3D 层叠感 */
 function StackCard({ group, onOpen }: { group: Group; onOpen: () => void }): JSX.Element {
   const layers = group.arr.slice(0, 4)
   const n = group.arr.length
   const todo = n - group.locked.size
-  // 兜底帧到底在哪个“库”：不能写死交付库（它也可能停在待确认/垃圾桶），取第一张锁定帧的真实短名
-  const lockedFirst = group.arr.find((i) => group.locked.has(i.id))
+  // 堆叠卡直接展示整组第一张：列表与弹窗已统一成“已入交付库的排最前”，封面再拿最早导入那张会两头对不上
+  const libCount = group.arr.filter(inLibrary).length
+  // 库外同伴到底在哪个“库”：不能写死交付库（它也可能停在待确认/废弃库），取第一张非库成员的短名
+  const lockedFirst = group.arr.find((i) => group.locked.has(i.id) && !inLibrary(i))
   const step = 14
   return (
     <button
       className="relative text-left focus:outline-none group"
       style={{ width: 168 + step * (layers.length - 1), height: 168 + step * (layers.length - 1) }}
       onClick={onOpen}
-      title={`这一组共 ${n} 张重复/连拍，其中 ${todo} 张等你决定（其余已在${group.locked.size ? '其它分类' : '本分类'}），点击逐张处理`}
+      title={`这一组共 ${n} 张重复照片，${libCount ? `已入交付库 ${libCount} 张` : '一张都还没入交付库'}，其中 ${todo} 张等你决定，点击逐张处理`}
     >
       {layers.map((img, i) => (
         <span
@@ -106,9 +190,14 @@ function StackCard({ group, onOpen }: { group: Group; onOpen: () => void }): JSX
       <span className="absolute -right-1 -top-1 z-20 min-w-[22px] h-[22px] px-1 rounded-full bg-brand text-white text-[12px] font-bold flex items-center justify-center shadow ring-2 ring-base">
         {n}
       </span>
-      {/* 整组张数 vs 待你决定的张数；有兜底帧时直接写明它在哪个库 */}
+      {/* 整组张数 vs 已入库 / 待你决定的张数（用户 10-13：打开就该先看见“这组已经有张进库了”） */}
       <span className="absolute left-1/2 -translate-x-1/2 -bottom-2.5 z-20 whitespace-nowrap rounded-full bg-panel border border-line px-2 py-0.5 text-[11px] text-fg2 shadow">
-        {group.locked.size > 0 ? `🔒 ${lockedFirst ? catShort(lockedFirst.category) : '其它分类'}已有 ${group.locked.size} 张 · ` : ''}待你决定 {todo}
+        {libCount > 0 ? (
+          <span className="text-good font-bold">已入交付库 {libCount} 张</span>
+        ) : (
+          <span className="text-fg3">{lockedFirst ? `库里一张都没（有张停在${catShort(lockedFirst.category)}）· ` : '库里一张都没 · '}</span>
+        )}
+        待你决定 {todo}
       </span>
     </button>
   )
@@ -138,9 +227,13 @@ function ZoomViewer({
   index,
   mode,
   marked,
-  pickMode,
   locked,
+  tierNames,
   onToggle,
+  onKeep,
+  onTrash,
+  onUnkeep,
+  onRestore,
   onNav,
   onClose
 }: {
@@ -148,22 +241,29 @@ function ZoomViewer({
   index: number
   mode: 'keep' | 'trash'
   marked: Set<number>
-  pickMode: 'drop' | 'keep'
   locked: Set<number>
+  tierNames: string[]
   onToggle: (id: number) => void
+  onKeep: (id: number, tier: TierKey) => void
+  onTrash: (id: number) => void
+  onUnkeep: (id: number) => void
+  onRestore: (id: number) => void
   onNav: (delta: number) => void
   onClose: () => void
 }): JSX.Element {
   const img = arr[index]
   const big = useBigSrc(img)
   const lastWheel = useRef(0)
+  // 进库前先让用户在三档里点一档确认（用户 10-13：交付库保留优质/良好/一般三个子分类）
+  const [tierPick, setTierPick] = useState(false)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
-        onClose()
+        if (tierPick) setTierPick(false)
+        else onClose()
       } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
         e.preventDefault()
         e.stopPropagation()
@@ -176,7 +276,10 @@ function ZoomViewer({
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [onClose, onNav])
+  }, [onClose, onNav, tierPick])
+
+  // 换到别张时收起可能开着的选档面板
+  useEffect(() => setTierPick(false), [index])
 
   const onWheel = (e: React.WheelEvent): void => {
     const now = Date.now()
@@ -187,67 +290,52 @@ function ZoomViewer({
   }
 
   const on = marked.has(img.id)
+  const inLib = inLibrary(img)
   const isLocked = locked.has(img.id)
-  // keep 模式三态：drop 习惯下点击=标废（红），keep 习惯下点击=标留（绿），没点过=未决定（灰）；trash 模式：蓝=勾选恢复
-  const statusText = isLocked
-    ? `当前：已在${catFull(img.category)}（不参与本组选择）`
-    : mode !== 'keep'
-      ? on
-        ? '当前：已选中（将恢复）'
-        : '当前：未选中'
-      : on
-        ? pickMode === 'drop'
-          ? '当前：已标废弃'
-          : '当前：已标保留'
-        : '当前：未决定（留在重复类）'
-  const statusCls = isLocked
-    ? 'bg-white/10 text-white/60'
-    : mode !== 'keep'
-      ? on
-        ? 'bg-brand text-white'
+  const isTrash = isTrashLike(img.category)
+  // keep 主线：未入库且非废弃库的那张才能“加进库/丢弃”（含待确认/瑕疵分类，都就地可收）；已入库=移出；废弃库/废弃桶=恢复
+  const canKeep = mode === 'keep' && !inLib && !isTrash
+  const statusText = isLocked && !inLib
+    ? `当前：已在${catFull(img.category)}${mode === 'keep' ? '（可就地处理）' : '（不参与本组）'}`
+    : inLib
+      ? '当前：已在交付库（会被导出）'
+      : mode !== 'keep'
+        ? on
+          ? '当前：已勾选，将恢复'
+          : '当前：未勾选'
+        : '当前：待你决定'
+  const statusCls = inLib
+    ? 'bg-good/90 text-white'
+    : isLocked
+      ? 'bg-white/10 text-white/60'
+      : mode !== 'keep'
+        ? on
+          ? 'bg-brand text-white'
+          : 'bg-white/15 text-white/70'
         : 'bg-white/15 text-white/70'
-      : on
-        ? pickMode === 'drop'
-          ? 'bg-bad/90 text-white'
-          : 'bg-good/90 text-white'
-        : 'bg-white/15 text-white/70'
-  const selectLabel = isLocked
-    ? `🔒 已在${catShort(img.category)}`
-    : mode !== 'keep'
-      ? on
-        ? '取消选中'
-        : '选中恢复'
-      : on
-        ? '取消标记'
-        : pickMode === 'drop'
-          ? '标记为废'
-          : '标记为保留'
   const selectCls =
     'px-5 py-2 rounded-md text-lg font-bold border transition-colors ' +
     (isLocked
       ? 'bg-white/5 text-white/45 border-white/15 cursor-not-allowed'
-      : mode !== 'keep'
-        ? on
-          ? 'bg-brand text-white border-brand'
-          : 'bg-white/10 text-white/85 border-white/25 hover:border-white/70'
-        : on
-          ? pickMode === 'drop'
-            ? 'bg-bad text-white border-bad'
-            : 'bg-good text-white border-good'
-          : 'bg-white/10 text-white/85 border-white/25 hover:border-white/70')
+      : on
+        ? 'bg-brand text-white border-brand'
+        : 'bg-white/10 text-white/85 border-white/25 hover:border-white/70')
+  // AI 看这张像哪一档，给那一档加个★当推荐（不替用户拍板，只是提示）
+  const est = estimateTier(img.tags, img.tier)
+  const tierColor = (n: number): string => (n === 2 ? 'bg-blue-600 hover:bg-blue-700' : n === 3 ? 'bg-gray-500 hover:bg-gray-600' : 'bg-good hover:bg-[#15803d]')
 
   return (
     <div className="fixed inset-0 z-[60] bg-black/95 flex flex-col fade-in" onClick={(e) => e.target === e.currentTarget && onClose()} onWheel={onWheel}>
-      {/* 顶栏：居中大字显示“第 N / 总数 · 文件名”与当前留/废状态 */}
+      {/* 顶栏：居中大字显示“第 N / 总数 · 文件名”与当前状态 */}
       <div className="shrink-0 relative flex items-center gap-3 px-4 py-3 border-b border-white/10 bg-black/40">
-        <span className="text-white/90 font-bold text-lg">{mode === 'keep' ? '放大查看 · 选择保留' : '放大查看 · 选择恢复'}</span>
+        <span className="text-white/90 font-bold text-lg">{mode === 'keep' ? '放大对比' : '放大查看 · 选择恢复'}</span>
         <div className="flex-1" />
         <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-3 max-w-[50%]">
           <span className="text-white/90 text-lg truncate" title={img.path}>第 {index + 1} / {arr.length} 张 · {img.filename}</span>
           <span className={'px-2.5 py-1 rounded text-base font-bold whitespace-nowrap ' + statusCls}>{statusText}</span>
         </div>
         <div className="flex-1" />
-        <button className="btn-ghost-dark text-base text-white/85" onClick={onClose} title="关闭（ESC）">✕ 关闭</button>
+        <button className="px-3 py-1.5 rounded-md text-base font-bold text-white bg-bad hover:bg-red-600 transition-colors" onClick={onClose} title="关闭（ESC）">ESC关闭</button>
       </div>
 
       {/* 主图 */}
@@ -262,14 +350,56 @@ function ZoomViewer({
         <button className="absolute right-3 top-1/2 -translate-y-1/2 w-14 h-14 rounded-full bg-black/40 hover:bg-black/70 text-white text-4xl flex items-center justify-center transition-colors disabled:opacity-25 disabled:cursor-not-allowed" onClick={() => onNav(1)} disabled={index >= arr.length - 1} title="下一张（→ / ↓ / 滚轮下）">›</button>
       </div>
 
-      {/* 底栏：上一张 / 选中 / 下一张 / 关闭（文字加大） */}
-      <div className="shrink-0 flex items-center justify-center gap-3 px-4 py-3.5 border-t border-white/10 bg-black/50">
+      {/* 底栏：上一张 / 主操作 / 下一张 / 关闭。keep 模式点“要这张”先弹三档，点一档才确认进库 */}
+      <div className="shrink-0 flex items-center justify-center gap-3 px-4 py-3.5 border-t border-white/10 bg-black/50 flex-wrap">
         <button className="btn text-lg px-4 py-2" onClick={() => onNav(-1)} disabled={index <= 0}>← 上一张</button>
-        <button className={selectCls} onClick={() => onToggle(img.id)} disabled={isLocked}>{selectLabel}</button>
+        {mode === 'keep' ? (
+          canKeep ? (
+            <>
+              <button className="px-5 py-2 rounded-md text-lg font-bold text-white bg-good hover:bg-[#15803d] transition-colors" onClick={() => setTierPick(true)}>要这张 → 选档加进库</button>
+              <button className="px-5 py-2 rounded-md text-lg font-bold text-white bg-bad/90 hover:bg-bad transition-colors" onClick={() => onTrash(img.id)}>丢弃</button>
+            </>
+          ) : inLib ? (
+            <button className="px-5 py-2 rounded-md text-lg font-bold border border-brand text-brand hover:bg-brand hover:text-white transition-colors" onClick={() => onUnkeep(img.id)}>移出交付库</button>
+          ) : isTrash ? (
+            <button className="px-5 py-2 rounded-md text-lg font-bold text-white bg-amber-500 hover:bg-amber-600 transition-colors" onClick={() => onRestore(img.id)}>恢复回本组</button>
+          ) : (
+            <span className="px-5 py-2 rounded-md text-lg text-white/45 border border-white/15">🔒 已在{catShort(img.category)}</span>
+          )
+        ) : (
+          <button className={selectCls} onClick={() => onToggle(img.id)} disabled={isLocked}>{on ? '取消选中' : '选中恢复'}</button>
+        )}
         <button className="btn text-lg px-4 py-2" onClick={() => onNav(1)} disabled={index >= arr.length - 1}>下一张 →</button>
         <div className="w-3" />
         <button className="btn text-lg px-4 py-2" onClick={onClose}>关闭</button>
       </div>
+
+      {/* 点“要这张”后弹出的三档选择弹窗（用户 10-13：不再在底栏同行展开，改成居中弹窗）；白底面板，按钮文字一律非白 */}
+      {tierPick && canKeep && (
+        <div className="fixed inset-0 z-[65] bg-black/70 flex items-center justify-center p-6" onClick={(e) => e.target === e.currentTarget && setTierPick(false)}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm p-6">
+            <div className="text-lg font-bold text-gray-900 mb-1">放进交付库哪一档？</div>
+            <div className="text-sm text-gray-500 mb-5">选一档就把这张加进交付库，不会顶掉已入库那张。</div>
+            <div className="flex flex-col gap-2.5">
+              {tierNames.map((name, i) => {
+                const n = (i + 1) as TierKey
+                return (
+                  <button
+                    key={name}
+                    className={'w-full rounded-md px-4 py-3 text-base font-bold text-white transition-colors ' + tierColor(i + 1) + (est === n ? ' ring-2 ring-gray-900' : '')}
+                    onClick={() => { setTierPick(false); onKeep(img.id, n) }}
+                    title={est === n ? 'AI 按实测清晰度看这张像这一档' : undefined}
+                  >
+                    {name}
+                    {est === n ? ' ★ 推荐' : ''}
+                  </button>
+                )
+              })}
+            </div>
+            <button className="mt-4 w-full rounded-md px-4 py-2.5 text-base font-bold text-gray-700 bg-gray-100 hover:bg-gray-200 border border-gray-300 transition-colors" onClick={() => setTierPick(false)}>取消</button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -279,13 +409,13 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
   const moveIds = useStore((s) => s.moveIds)
   const settings = useStore((s) => s.settings)
   const saveSettings = useStore((s) => s.saveSettings)
-  // 选图模式（全局记忆）：drop=点选要丢弃的；keep=点选要保留的（仅 keep 分类弹窗有意义，废弃桶恢复模式不涉及）
-  const pickMode = settings.dupPickMode ?? 'drop'
-  // keep+drop：marked = 已标废弃（红）；keep+keep：marked = 已标保留（绿）；未点过的=未决定，留在重复类。
-  // trash：marked = 勾选恢复。两种选图模式都无默认选择。
+  // 简化后 marked 只服务 trash 模式（勾选→批量恢复）；keep 模式改成每张直接按钮，不再用它做三态。
   const [marked, setMarked] = useState<Set<number>>(() => new Set())
-  // 首次使用引导：只在看过的选图模式下弹一次，看过写进设置永久不再提示
-  const [guide, setGuide] = useState(() => mode === 'keep' && !settings.dupGuideSeen)
+  // keep 模式：点「要这张→选档进库」后，这张卡上弹出优质/良好/一般三档，点一档才确认。pickerId 记住是哪张在选档。
+  const [pickerId, setPickerId] = useState<number | null>(null)
+  // 就地确认（应用内弹窗，Electron 禁 window.confirm）：两种待确认动作——
+  //   removeLast：移出本组在库里的最后一张（删完这组库里 0 张）；restore：把废弃库/废弃桶里那张恢复回本组。
+  const [pending, setPending] = useState<{ id: number; kind: 'removeLast' | 'restore' } | null>(null)
   // 宫格密度（全局记忆）：默认每排 4 张；切换后每排 2 张大图，看得更清方便辨认
   const [bigGrid, setBigGrid] = useState(() => settings.dupGridBig ?? false)
   const toggleGrid = (): void => {
@@ -294,24 +424,48 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
     void saveSettings({ dupGridBig: next })
   }
   const [zoomIdx, setZoomIdx] = useState<number | null>(null)
-  // “换一张保留”：待替身选中期间记住哪张锁定帧要被换掉（仅 keep 模式）
-  const [swapFrom, setSwapFrom] = useState<number | null>(null)
-  // 硬不变式：每组任何时候至少一张留在交付库。所以“先升后降”——
-  // 顶替帧先进库，原兜底帧再退回本组重新由用户决定，中间不会出现一组空库的瞬间。
-  const doSwap = (targetId: number): void => {
-    const from = swapFrom
-    if (from === null || from === targetId) return
-    setSwapFrom(null)
-    setMarked((prev) => {
-      const next = new Set(prev)
-      next.delete(from)
-      next.delete(targetId)
-      return next
-    })
-    void (async () => {
-      await moveIds([targetId], CAT_LIBRARY) // 先进库（同时清 duplicate 标签）
-      await moveIds([from], 'duplicate') // 后退组（补用户 duplicate 标签，不删不改判）
-    })()
+  // 已入交付库的那几张（排在最前那段）：它们不是“锁定看不了”，而是可以随时被移出交付库（不自动顶别人上来）；
+  // 但在废弃桶视图里它们仍只作对比（那里的主流程是“勾选→移回重复照片”），不混进勾选。
+  const libImgs = useMemo(() => group.arr.filter(inLibrary), [group])
+  const restImgs = useMemo(() => group.arr.filter((i) => !inLibrary(i)), [group])
+  // 弹窗里“不可点选”的那几张：同组但不在本分类的同伴，加上废弃桶视图里已入库那张（那里只作对比）
+  const lockedIds = useMemo(() => {
+    const s = new Set<number>()
+    for (const img of group.arr) {
+      if (group.locked.has(img.id) || (mode !== 'keep' && inLibrary(img))) s.add(img.id)
+    }
+    return s
+  }, [group, mode])
+  // 卡片展示顺序：已入库的在前，其余按 id（= 导入顺序）；放大查看器跟着这个顺序走，两处序号不会打架
+  const ordered: ImageRecord[] = [...libImgs, ...restImgs]
+  const tierNames: string[] = settings.tierNames ?? DEFAULT_TIER_NAMES
+  // 把这张“加”进交付库的某一档（用户 10-13：交付库保留优质/良好/一般三个子分类，点进库先选档再确认）：
+  // moveIds 到 'tier:N' 走主进程档位分支——不在库的先清瑕疵/冗余标签、落回交付库、按你选的档手动定死（tier_by=user，重筛不改）。
+  // 这是“加一张”，不顶掉库里原来那张——同一组可以同时交好几张；哪张不想要了就点它的“移出交付库”。
+  const keepOne = (img: ImageRecord, tier: TierKey): void => {
+    void moveIds([img.id], `tier:${tier}`)
+  }
+  // 一键把这张丢进统一废弃库（永不导出）：下面那批除了“选档进库”，另一条路就是丢弃，一步到位。
+  // moveIds 会带上当前分类 duplicate 作为 source，后端据此不记冗余/误判样本，废弃库还原时又能“从哪来回哪去”回到本组。
+  const trashOne = (img: ImageRecord): void => {
+    void moveIds([img.id], CAT_TRASH)
+  }
+  // 把已入库这张移出交付库、退回本组（用户 10-13）：不自动顶别人上来，一组几张都人工自定，删到 0 张也允许
+  const removeFromLibrary = (img: ImageRecord): void => {
+    void moveIds([img.id], 'duplicate')
+  }
+  // 点“移出交付库”：若这是该组在库里的最后一张，先弹应用内确认（删完这组库里就 0 张），否则直接移
+  const requestRemove = (img: ImageRecord): void => {
+    if (libImgs.length <= 1) setPending({ id: img.id, kind: 'removeLast' })
+    else removeFromLibrary(img)
+  }
+  // 把废弃库/废弃桶里这张恢复回本组（用户 10-13：同组的图不必换个分类去捞）：moveIds 到 'duplicate' 把它捣回待选区，加回组
+  const doRestore = (img: ImageRecord): void => {
+    void moveIds([img.id], 'duplicate')
+  }
+  // 点“恢复”：低危但用户要求“+提示确实”，统一走应用内确认
+  const requestRestore = (img: ImageRecord): void => {
+    setPending({ id: img.id, kind: 'restore' })
   }
   const toggle = (id: number): void => {
     // 锁定帧（不在本分类，如交付库里的保留帧）不参与选择，只能看
@@ -328,74 +482,128 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
 
   // 可选成员（落在本分类的）：所有计数、“未选”批量定案都只算它们，锁定帧不背锅
   const catIds = useMemo(() => group.arr.filter((i) => !group.locked.has(i.id)).map((i) => i.id), [group])
-  // 还没决定的（未点过）：不强制对全组下结论，它们留在重复类里下次接着选
-  const unmarkedIds = useMemo(() => catIds.filter((id) => !marked.has(id)), [catIds, marked])
-
-  // 切换选图模式：两种模式都重置为“无默认选择”的自然起点（选丢弃=全绿；选保留=全红），
-  // 并把新习惯写进设置永久记忆。
-  const switchPickMode = (next: 'drop' | 'keep'): void => {
-    if (next === pickMode) return
-    setMarked(new Set())
-    void saveSettings({ dupPickMode: next })
-  }
-
-  const closeGuide = (): void => {
-    setGuide(false)
-    void saveSettings({ dupGuideSeen: true })
-  }
-
-  // 快捷标记：只改 marked（锁定帧除外），不执行移动；执行永远靠底部两个按钮
-  const markAll = (): void => setMarked(new Set(catIds))
-  const clearMarks = (): void => setMarked(new Set())
-
-  // 执行“已选”：drop 习惯下已标的是废帧→废弃桶；keep 习惯下已标的是保留帧→交付库
+  // trash 模式：把勾选的几张批量恢复回【重复照片】（keep 模式已改成每张直接按钮，不再走这里）
   const applyMarked = (): void => {
-    if (mode === 'keep') {
-      if (marked.size) void moveIds([...marked], pickMode === 'drop' ? CAT_DUP_TRASH : CAT_LIBRARY)
-    } else if (marked.size) {
-      void moveIds([...marked], 'duplicate')
-    }
+    if (marked.size) void moveIds([...marked], 'duplicate')
     onClose()
   }
-  // 执行“未选”（整组定案快捷键）：drop 习惯下未选=保留→交付库；keep 习惯下未选=废→废弃桶
-  const applyUnmarked = (): void => {
-    if (unmarkedIds.length) void moveIds(unmarkedIds, pickMode === 'drop' ? CAT_LIBRARY : CAT_DUP_TRASH)
-    onClose()
-  }
+
+  // 卡面渲染器（“要这张 / 丢弃”主线）：已入库一段、待处理一段共用同一套；base 是这一段在 ordered 里的起始偏移，保证放大查看器序号对齐
+  const renderGrid = (list: ImageRecord[], base: number): JSX.Element => (
+    <div className="grid gap-4" style={{ gridTemplateColumns: bigGrid ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))' }}>
+      {list.map((img, j) => {
+        const idx = base + j
+        const inLib = inLibrary(img)
+        const noClick = mode !== 'keep' && inLib
+        const locked = group.locked.has(img.id) || noClick
+        const on = marked.has(img.id)
+        // 用户 10-13：同组的图不管现在停在哪个分类，都就地可操作——
+        //   已在库→移出；在废弃库/废弃桶→恢复回本组；其余（本组待选 / 待确认 / 瑕疵分类）→要这张（选档加进库）/丢弃
+        const isTrash = isTrashLike(img.category)
+        const canKeep = mode === 'keep' && !inLib && !isTrash
+        const est = estimateTier(img.tags, img.tier)
+        return (
+          <div
+            key={img.id}
+            className={
+              'relative rounded-lg overflow-hidden border-2 aspect-square transition-all ' +
+              (inLib
+                ? 'border-good'
+                : mode === 'keep'
+                  ? isTrash
+                    ? 'border-dashed border-gray-500'
+                    : 'border-line'
+                  : locked
+                    ? 'border-dashed border-gray-500'
+                    : on
+                      ? 'border-brand'
+                      : 'border-line hover:border-gray-500')
+            }
+            title={inLib ? `${img.filename} · 已在交付库（会被导出），点「移出交付库」可退回本组` : mode === 'keep' && isTrash ? `${img.filename} · 已在${catFull(img.category)}，点「恢复」可捣回本组` : mode === 'keep' && group.locked.has(img.id) ? `${img.filename} · 已在${catFull(img.category)}，可就地收进库或丢弃` : img.filename}
+          >
+            {/* 图片本体：keep 模式点它放大对比；trash 模式点它切换勾选 */}
+            <button
+              className={'absolute inset-0 w-full h-full ' + (mode === 'keep' ? 'cursor-zoom-in' : locked ? 'cursor-default' : 'cursor-pointer')}
+              onClick={() => (mode === 'keep' ? setZoomIdx(idx) : toggle(img.id))}
+              aria-label={img.filename}
+            >
+              {bigGrid ? <BigCardImg img={img} /> : <img src={src(img)} loading="lazy" className="w-full h-full object-cover" alt={img.filename} draggable={false} />}
+            </button>
+            {/* 只有真进了交付库的那张才标档位（是事实）；待选那张不挂角标，免得被误认为已分好档（用户 10-13） */}
+            {inLib && <TierBadge img={img} tierNames={tierNames} />}
+            {inLib && (
+              <span className="absolute left-1.5 top-1.5 z-20 flex items-center gap-1 rounded-md bg-good px-2 py-1 text-[12px] font-bold text-white shadow-[0_2px_6px_rgba(0,0,0,0.55)] ring-2 ring-white/85">
+                ✓ 已在交付库
+              </span>
+            )}
+            {!inLib && group.locked.has(img.id) && (
+              <span className={'absolute left-1.5 top-1.5 z-20 px-1.5 py-0.5 rounded text-[11px] font-bold text-white shadow ' + (mode === 'keep' ? (isTrash ? 'bg-amber-600/90' : 'bg-gray-600/90') : 'bg-gray-600/90')}>{mode === 'keep' ? '在' + catShort(img.category) : '🔒 已在' + catShort(img.category)}</span>
+            )}
+            {mode !== 'keep' && on && !inLib && (
+              <span className="absolute left-1.5 top-1.5 z-20 px-1.5 py-0.5 rounded text-[11px] font-bold text-white shadow bg-brand">✓ 恢复</span>
+            )}
+            {/* 待收那张：左上挂瑕疵标签（它为什么没进库） */}
+            {canKeep && <TagStrip img={img} />}
+            {/* keep 底部操作条：已入库=移出交付库；废弃库/废弃桶=恢复回本组；其余=要这张（选档加进库，7）/丢弃（3） */}
+            {mode === 'keep' && (
+              <div className="absolute left-1 right-1 bottom-1 z-30 flex items-center gap-1">
+                {inLib ? (
+                  <button className="flex-1 rounded-md bg-panel/95 ring-1 ring-brand/70 px-2 py-2 text-[11px] font-bold text-brand shadow hover:bg-brand hover:text-white transition-colors whitespace-nowrap" onClick={() => requestRemove(img)} title="这张不交了：从交付库移回本组（不会自动顶别人上来）；若是本组最后一张会先问你一下">移出交付库</button>
+                ) : isTrash ? (
+                  <button className="flex-1 rounded-md bg-amber-500/95 ring-1 ring-white/70 px-2 py-2 text-[11px] font-bold text-white shadow hover:bg-amber-600 transition-colors whitespace-nowrap" onClick={() => requestRestore(img)} title={`这张现在在${catShort(img.category)}：恢复后回到本组，重新由你决定要不要进交付库`}>恢复回本组</button>
+                ) : (
+                  <>
+                    <button className="flex-[7] rounded-md bg-good/95 ring-1 ring-white/70 px-2 py-2 text-[11px] font-bold text-white shadow hover:bg-[#15803d] transition-colors whitespace-nowrap" onClick={() => setPickerId(img.id)} title="就要这张：先选放优质/良好/一般哪一档再确认——是往交付库里多加一张，不会顶掉上面那张">要这张→</button>
+                    <button className="flex-[3] rounded-md bg-bad/90 ring-1 ring-white/50 px-2 py-2 text-[11px] font-bold text-white shadow hover:bg-bad transition-colors whitespace-nowrap" onClick={() => trashOne(img)} title="这张不要了：丢进废弃桶，永不导出">丢弃</button>
+                  </>
+                )}
+              </div>
+            )}
+            {/* 点“要这张”后在这张卡上弹出三档，点其中一档才确认加进库（保留交付库三个子分类） */}
+            {canKeep && pickerId === img.id && (
+              <div className="absolute inset-0 z-40 bg-black/80 flex flex-col items-center justify-center gap-1.5 p-2">
+                <div className="text-[11px] text-white/85 font-medium">放进交付库哪一档？</div>
+                {tierNames.map((name, i) => {
+                  const n = (i + 1) as TierKey
+                  const bg = n === 2 ? 'bg-blue-600 hover:bg-blue-700' : n === 3 ? 'bg-gray-500 hover:bg-gray-600' : 'bg-good hover:bg-[#15803d]'
+                  return (
+                    <button
+                      key={name}
+                      className={'w-full rounded-md px-2 py-3 text-[13px] font-bold text-white transition-colors ring-1 ' + bg + (est === n ? ' ring-white' : ' ring-white/30 hover:ring-white/70')}
+                      onClick={() => { setPickerId(null); keepOne(img, n) }}
+                      title={est === n ? 'AI 按实测清晰度看这张像这一档' : undefined}
+                    >
+                      {name}
+                      {est === n ? ' ★' : ''}
+                    </button>
+                  )
+                })}
+                <button className="mt-0.5 text-[11px] text-white/60 hover:text-white" onClick={() => setPickerId(null)}>取消</button>
+              </div>
+            )}
+            {/* trash 底部：文件名 + 放大 */}
+            {mode !== 'keep' && (
+              <>
+                <span className="absolute left-1 bottom-1 right-9 z-10 truncate text-[10px] text-white/90 bg-black/45 rounded px-1 py-0.5 pointer-events-none">{img.filename}</span>
+                <button className="absolute right-1 bottom-1 z-20 flex items-center rounded-md bg-black/60 px-1.5 py-1 text-white hover:bg-brand transition-colors" onClick={() => setZoomIdx(idx)} title="放大看原图"><ZoomIcon /></button>
+              </>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-6" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="relative bg-panel border border-line rounded-xl shadow-2xl w-full max-w-6xl max-h-[90vh] flex flex-col fade-in">
+    <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-3" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="relative bg-panel border border-line rounded-xl shadow-2xl w-[95vw] max-w-[1600px] max-h-[94vh] flex flex-col fade-in">
         <div className="px-5 py-3 border-b border-line relative flex items-center">
           <h2 className="text-fg font-bold">
-            {mode === 'keep' ? '重复/连拍 · 选择保留' : '重复/连拍-废弃 · 选择恢复'}
+            {mode === 'keep' ? '重复照片 · 逐张挑谁进交付库' : '重复照片-废弃 · 选择恢复'}
             <span className="text-fg3 font-normal ml-2 text-sm">
-              本组 {group.arr.length} 张 · 待你决定 {catIds.length} 张
+              本组 {group.arr.length} 张 · 已入交付库 {libImgs.length} 张 · 待你决定 {catIds.length} 张
             </span>
           </h2>
-          {/* 选图模式切换：居中大字显示；习惯选留的还是选废的，选择会被永久记忆 */}
-          {mode === 'keep' && (
-            <div
-              className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-2"
-              title="切换选图习惯：有的人喜欢点选要保留的，有的人喜欢点选要丢弃的；选择会被记住"
-            >
-              <span className="text-sm text-fg3 whitespace-nowrap">选图模式</span>
-              <div className="flex rounded-lg border border-line overflow-hidden text-sm">
-                <button
-                  className={'px-4 py-1.5 whitespace-nowrap ' + (pickMode === 'drop' ? 'bg-brand text-white font-medium' : 'bg-panel2 text-fg2 hover:bg-line')}
-                  onClick={() => switchPickMode('drop')}
-                >
-                  点选要丢弃的
-                </button>
-                <button
-                  className={'px-4 py-1.5 border-l border-line whitespace-nowrap ' + (pickMode === 'keep' ? 'bg-good text-white font-medium' : 'bg-panel2 text-fg2 hover:bg-line')}
-                  onClick={() => switchPickMode('keep')}
-                >
-                  点选要保留的
-                </button>
-              </div>
-            </div>
-          )}
           <div className="flex-1" />
           {/* 宫格密度切换：每排 4 张 ↔ 每排 2 张大图（选择会被记住） */}
           <button
@@ -411,156 +619,36 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
         <div className="p-4 overflow-y-auto">
           <div className="text-sm text-fg3 mb-3">
             {mode === 'keep' ? (
-              <>
-                <div className="mb-1">
-                  说明：<b className="text-fg2">虚线框那张</b>是 AI 默认保留帧，已经在其它分类（正常导出），本弹窗只给你对比、不可点选；其余都是与它重复的多余连拍帧，由你逐张决定去留。不喜欢那张？点它上面的<span className="text-brand font-medium">「🔁 换一张保留」</span>顶一张上去，原那张会回到本组重新决定（否则交付库里这组就只剩它一张）。
-                </div>
-                {pickMode === 'drop' ? (
-                  <>点击不要的照片标<span className="text-bad font-medium">红色（废）</span>，再点取消；<b className="text-fg2">没点过的不算数</b>，会留在重复类里下次接着选。底部两按钮分开执行：<span className="text-bad font-medium">丢弃已选</span>→废弃桶，<span className="text-good font-medium">保留未选</span>→交付库（正常导出）。</>
-                ) : (
-                  <>逐张点击你喜欢的照片标<span className="text-good font-medium">绿色（保留）</span>，再点取消；<b className="text-fg2">没点过的不算数</b>，会留在重复类里下次接着选。底部两按钮分开执行：<span className="text-good font-medium">保留已选</span>→交付库（正常导出），<span className="text-bad font-medium">丢弃未选</span>→废弃桶。</>
-                )}
-              </>
+              <>绿框那张已在交付库；下面每张点<span className="text-good font-medium">「要这张→」</span>选一档就加进库，点<span className="text-bad font-medium">「丢弃」</span>进废弃桶；点图放大对比。</>
             ) : (
-              '点击卡片勾选要恢复的照片；点「放大查看」看原图。确认后勾选的移回【重复/连拍】，未勾选的继续留在废弃桶。（虚线框是同组里已在其它分类的照片，只作对比、不可勾选）'
+              '点卡片勾选要恢复的，点右下角放大镜看原图；确认后移回【重复照片】。'
             )}
           </div>
-          {/* “换一张保留”进行中的顶栏提示：选替身期间点任意一张即完成交换 */}
-          {swapFrom !== null && (
-            <div className="mb-3 rounded-lg border border-brand/50 bg-brand/10 px-3 py-2 text-sm text-fg flex items-center gap-3 sticky top-0 z-20 shadow">
-              <span>🔁 点下面任意一张顶替【交付库】里那张：新那张进交付库（正常导出），原那张回到本组重新由你决定。</span>
-              <button className="btn text-xs whitespace-nowrap ml-auto" onClick={() => setSwapFrom(null)}>
-                取消
-              </button>
+          {libImgs.length > 0 && (
+            <div className="mb-2 text-sm">
+              <span className="font-bold text-good">✓ 已入交付库 {libImgs.length} 张</span>
             </div>
           )}
-          <div className="grid gap-4" style={{ gridTemplateColumns: bigGrid ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))' }}>
-            {group.arr.map((img, idx) => {
-              // 三态：drop 习惯下 marked=标废（红）；keep 习惯下 marked=标保留（绿）；未点过=中性灰边（还没决定）；trash：蓝=勾选恢复
-              const locked = group.locked.has(img.id)
-              const on = marked.has(img.id)
-              return (
-                <button
-                  key={img.id}
-                  onClick={() => {
-                    // 选替身期间：点任意可选张即完成“换一张保留”；锁定帧自己不能顶替自己
-                    if (swapFrom !== null && !locked) void doSwap(img.id)
-                    else toggle(img.id)
-                  }}
-                  className={
-                    'relative rounded-lg overflow-hidden border-2 aspect-square transition-all ' +
-                    // 待废弃只标红框/红角标，不压暗：本来就要看清照片内容才能决定留废
-                    // 锁定帧用虚线框区分（不改透明度，照片保持清晰才能对比）
-                    (locked
-                      ? 'border-dashed border-gray-500 cursor-default'
-                      : swapFrom !== null
-                        ? 'border-brand'
-                        : mode === 'keep'
-                          ? on
-                            ? pickMode === 'drop'
-                              ? 'border-bad'
-                              : 'border-good'
-                            : 'border-line hover:border-gray-500'
-                          : on
-                            ? 'border-brand'
-                            : 'border-line hover:border-gray-500')
-                  }
-                  title={locked ? `${img.filename} · 已在${catFull(img.category)}，不参与本组选择` : img.filename}
-                >
-                  {bigGrid ? <BigCardImg img={img} /> : <img src={src(img)} loading="lazy" className="w-full h-full object-cover" alt={img.filename} draggable={false} />}
-                  {/* 锁定帧：告诉用户这张在哪里、为何不可点 */}
-                  {locked && (
-                    <span className="absolute left-1.5 top-1.5 px-1.5 py-0.5 rounded text-[11px] font-bold text-white shadow bg-gray-600/90">
-                      🔒 已在{catShort(img.category)}
-                    </span>
-                  )}
-                  {/* 不喜欢 AI 兜底的这张？先点它、再点任意一张顶替（只 keep 模式）：
-                      这是整组唯一的“换人”入口，做成实心蓝底 + 白描边，太小客户根本看不到 */}
-                  {locked && mode === 'keep' && swapFrom === null && (
-                    <span
-                      role="button"
-                      tabIndex={-1}
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setSwapFrom(img.id)
-                      }}
-                      className="absolute bottom-12 left-1/2 -translate-x-1/2 z-20 rounded-lg bg-brand hover:bg-blue-600 ring-2 ring-white/80 shadow-lg text-white px-4 py-2 text-sm font-bold backdrop-blur-sm transition-colors cursor-pointer whitespace-nowrap"
-                    >
-                      🔁 换一张保留
-                    </span>
-                  )}
-                  {/* 未决定不挂角标，避免满屏“未选”干扰；只有点过的才标红/绿 */}
-                  {on && (
-                    <span
-                      className={
-                        'absolute left-1.5 top-1.5 px-1.5 py-0.5 rounded text-[11px] font-bold text-white shadow ' +
-                        (mode === 'keep' ? (pickMode === 'drop' ? 'bg-bad' : 'bg-good') : 'bg-brand')
-                      }
-                    >
-                      {mode === 'keep' ? (pickMode === 'drop' ? '废' : '留') : '✓ 恢复'}
-                    </span>
-                  )}
-                  {/* 中心放大镜：点它看原图（stopPropagation 避免触发卡片的留/废切换）；
-                      锁定卡下方要让给放大的「换一张保留」，所以放大镜上移，窄窗口下两者不致重叠 */}
-                  <span
-                    role="button"
-                    tabIndex={-1}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setZoomIdx(idx)
-                    }}
-                    className={'absolute left-1/2 ' + (locked ? 'top-[34%]' : 'top-1/2') + ' -translate-x-1/2 -translate-y-1/2 z-10 flex items-center gap-1.5 rounded-lg bg-black/55 hover:bg-brand text-white px-3 py-2 text-xs font-medium backdrop-blur-sm transition-colors cursor-zoom-in'}
-                  >
-                    <ZoomIcon />
-                    放大查看
-                  </span>
-                  <span className="absolute right-1 bottom-1 left-1 truncate text-[10px] text-white/90 bg-black/45 rounded px-1 py-0.5">{img.filename}</span>
-                </button>
-              )
-            })}
-          </div>
+          {renderGrid(libImgs, 0)}
+          {libImgs.length > 0 && restImgs.length > 0 && <div className="my-3 border-t border-line" />}
+          {restImgs.length > 0 && (
+            <div className="mb-2 text-sm">
+              <span className="font-bold text-fg2">还没入交付库 {restImgs.length} 张</span>
+            </div>
+          )}
+          {renderGrid(restImgs, libImgs.length)}
         </div>
 
         <div className="px-5 py-3 border-t border-line flex items-center gap-2 flex-wrap">
-          {mode === 'keep' ? (
-            <>
-              {pickMode === 'drop' ? (
-                <button className="btn text-xs" onClick={markAll} title="把本组待选的全部标废（只标记、不执行；交付库那张保留帧不受影响）">全标废（只留交付库那张）</button>
-              ) : (
-                <button className="btn text-xs" onClick={markAll} title="把待选的全部标保留（只标记，不执行）">全部标保留</button>
-              )}
-              <button className="btn text-xs" onClick={clearMarks} disabled={!marked.size} title="清除本弹窗内所有红/绿标记">清除标记</button>
-            </>
-          ) : (
+          {mode !== 'keep' && (
             <>
               <button className="btn text-xs" onClick={() => setMarked(new Set(catIds))}>全选</button>
               <button className="btn text-xs" onClick={() => setMarked(new Set())}>全不选</button>
             </>
           )}
           <div className="flex-1" />
-          <button className="btn" onClick={onClose} title="不执行任何移动，未处理的图留在重复类里">稍后再说</button>
-          {mode === 'keep' ? (
-            <>
-              {/* 处理未选（整组定案）：drop 习惯下未选=保留→交付库；keep 习惯下未选=废→废弃桶 */}
-              <button
-                className={'text-xs whitespace-nowrap ' + (pickMode === 'drop' ? 'btn-good' : 'btn-danger')}
-                disabled={!unmarkedIds.length}
-                onClick={applyUnmarked}
-                title={pickMode === 'drop' ? '这一组不用再挑了：把没点过的全部移回交付库（正常导出）' : '这一组定案：把没点到的全部移入废弃桶（永不导出）'}
-              >
-                {pickMode === 'drop' ? `保留未选 ${unmarkedIds.length} 张→交付库` : `丢弃未选 ${unmarkedIds.length} 张→废弃桶`}
-              </button>
-              {/* 处理已选（主按钮）：只动点过的，没点过的留在重复类 */}
-              <button
-                className={pickMode === 'drop' ? 'btn-danger whitespace-nowrap' : 'btn-good whitespace-nowrap'}
-                disabled={!marked.size}
-                onClick={applyMarked}
-                title={pickMode === 'drop' ? '只把标红的移入废弃桶，没点过的不动' : '只把标绿的移回交付库，没点过的不动'}
-              >
-                {pickMode === 'drop' ? `丢弃已选 ${marked.size} 张→废弃桶` : `保留已选 ${marked.size} 张→交付库`}
-              </button>
-            </>
-          ) : (
+          <button className="btn" onClick={onClose} title="不执行任何移动，未处理的照片留在重复照片里">{mode === 'keep' ? '关闭' : '稍后再说'}</button>
+          {mode !== 'keep' && (
             <button className="btn-primary" disabled={!marked.size} onClick={applyMarked}>
               恢复 {marked.size} 张
             </button>
@@ -570,48 +658,50 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
 
       {zoomIdx !== null && (
         <ZoomViewer
-          arr={group.arr}
+          arr={ordered}
           index={zoomIdx}
           mode={mode}
           marked={marked}
-          pickMode={pickMode}
-          locked={group.locked}
+          locked={lockedIds}
+          tierNames={tierNames}
           onToggle={toggle}
+          onKeep={(id, tier) => { const im = group.arr.find((x) => x.id === id); if (im) keepOne(im, tier) }}
+          onTrash={(id) => { const im = group.arr.find((x) => x.id === id); if (im) trashOne(im) }}
+          onUnkeep={(id) => { const im = group.arr.find((x) => x.id === id); if (im) requestRemove(im) }}
+          onRestore={(id) => { const im = group.arr.find((x) => x.id === id); if (im) requestRestore(im) }}
           onNav={nav}
           onClose={() => setZoomIdx(null)}
         />
       )}
 
-      {/* 首次使用引导：讲解两种选图模式与红绿语义，看过一次永久不再提示 */}
-      {guide && mode === 'keep' && (
-        <div className="absolute inset-0 z-[55] bg-black/70 rounded-xl flex items-center justify-center p-6" onClick={closeGuide}>
-          <div
-            className="bg-panel border border-line rounded-xl shadow-2xl w-full max-w-lg p-6 fade-in cursor-default"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="text-lg font-bold text-fg mb-1">👋 第一次整理重复/连拍？两种选图方式随你</div>
-            <div className="text-sm text-fg2 leading-relaxed mb-4">每组最早的那张 AI 已默认放进【交付库】兜底（就算你一张没整理，这组也不会整组漏导），弹窗里会把它用<b className="text-fg2">虚线框</b>一起显示供对比，其余多余连拍帧由你决定。选一次习惯就会永远记住（可随时在顶部切换）：</div>
-            <div className="grid grid-cols-2 gap-3 mb-4">
-              <div className="rounded-lg border border-line bg-panel2 p-3">
-                <div className="text-sm font-bold text-brand mb-1">点选要丢弃的</div>
-                <div className="text-xs text-fg2 leading-relaxed">
-                  点击你不要的照片标<span className="text-bad font-medium">红色（废）</span>，底部<b className="text-fg2">两个按钮分开执行</b>：<span className="text-bad font-medium">丢弃已选</span>→废弃桶，<span className="text-good font-medium">保留未选</span>→交付库。没点过的不算数，下次接着选。
-                </div>
+      {/* 就地确认（应用内弹窗，Electron 禁 window.confirm）：移出最后一张 / 从废弃库恢复 */}
+      {pending !== null && (() => {
+        const img = group.arr.find((x) => x.id === pending.id)
+        if (!img) return null
+        const isRestore = pending.kind === 'restore'
+        return (
+          <div className="fixed inset-0 z-[70] bg-black/70 flex items-center justify-center p-6" onClick={(e) => e.target === e.currentTarget && setPending(null)}>
+            <div className="bg-panel border border-line rounded-xl shadow-2xl w-full max-w-md p-6 fade-in">
+              <div className="text-base font-bold text-fg mb-2">{isRestore ? '把这张从废弃库恢复回本组？' : '这是本组在交付库里的最后一张'}</div>
+              <div className="text-sm text-fg2 leading-relaxed mb-5">
+                {isRestore ? (
+                  <>《{img.filename}》现在在<span className="font-bold">{catFull(img.category)}</span>。恢复后它会回到【重复照片】本组，重新由你决定要不要进交付库。</>
+                ) : (
+                  <>移除后，这一组在交付库里就<span className="text-bad font-bold"> 0 张</span>了（整组不会被导出）。确定要把《{img.filename}》移出交付库、退回本组吗？</>
+                )}
               </div>
-              <div className="rounded-lg border border-line bg-panel2 p-3">
-                <div className="text-sm font-bold text-good mb-1">点选要保留的</div>
-                <div className="text-xs text-fg2 leading-relaxed">
-                  逐张点击你喜欢的照片标<span className="text-good font-medium">绿色（保留）</span>，同样<b className="text-fg2">两个按钮分开执行</b>：<span className="text-good font-medium">保留已选</span>→交付库，<span className="text-bad font-medium">丢弃未选</span>→废弃桶。这一组没挑完可以先关窗，剩下的明天接着挑。
-                </div>
+              <div className="flex items-center gap-2 justify-end">
+                <button className="btn text-sm" onClick={() => setPending(null)}>取消</button>
+                {isRestore ? (
+                  <button className="px-4 py-2 rounded-md text-sm font-bold text-white bg-amber-500 hover:bg-amber-600 transition-colors" onClick={() => { setPending(null); doRestore(img) }}>确认恢复</button>
+                ) : (
+                  <button className="px-4 py-2 rounded-md text-sm font-bold text-white bg-bad/90 hover:bg-bad transition-colors" onClick={() => { setPending(null); removeFromLibrary(img) }}>确认移除</button>
+                )}
               </div>
             </div>
-            <div className="text-xs text-fg3 leading-relaxed mb-4">
-              颜色含义永远一致：<span className="text-good font-medium">绿 = 保留 → 回交付库，正常导出</span>；<span className="text-bad font-medium">红 = 废弃 → 进废弃桶，永不导出</span>；<span className="text-fg2 font-medium">没点过 = 还没决定</span>，留在组里下次接着选；<span className="text-fg2 font-medium">虚线框 = 那张兜底帧</span>（已在交付库，只作对比），<span className="text-brand font-medium">不喜欢它就点「🔁 换一张保留」</span>换一张上去。拿不准就点卡片中间的「放大查看」对比原图再定。
-            </div>
-            <button className="btn-primary w-full text-sm" onClick={closeGuide}>知道了，开始使用</button>
           </div>
-        </div>
-      )}
+        )
+      })()}
     </div>
   )
 }
@@ -624,6 +714,10 @@ export default function DuplicateGroupsView({ images, mode }: { images: ImageRec
     [images]
   )
   const [partners, setPartners] = useState<ImageRecord[]>([])
+  // 数据对账版本号：组内某成员被要进交付库后会离开当前分类列表，但它的 dup_group 还在（同组别几张仍在），
+  // gidsKey 不变 → 光靠它不会重拉整组成员，弹窗就会拿着那条旧记录（还带着冗余标签）一直卡在下面。
+  // 靠 dataRev 变化补一次重拉，拿回它移动后的新状态（已清冗余标签、category=交付库），才会正确升到上面。
+  const dataRev = useStore((s) => s.dataRev)
   useEffect(() => {
     const gids = gidsKey ? gidsKey.split('|') : []
     if (!gids.length) {
@@ -642,7 +736,7 @@ export default function DuplicateGroupsView({ images, mode }: { images: ImageRec
     return () => {
       alive = false
     }
-  }, [gidsKey])
+  }, [gidsKey, dataRev])
 
   const groups = useMemo<Group[]>(() => {
     const catIds = new Set(images.map((i) => i.id))
@@ -666,13 +760,13 @@ export default function DuplicateGroupsView({ images, mode }: { images: ImageRec
         locked: new Set(arr.filter((i) => !catIds.has(i.id)).map((i) => i.id))
       })
     }
-    // 待你决定多的排前面（越需要处理的越靠前），同数量时整组大的靠前
+    // 待你决定多的排前面（越需要处理的越靠前），同数量时整组大的靠前（组内展示序在弹窗里另定：已入库的在前）
     gs.sort((a, b) => b.arr.length - b.locked.size - (a.arr.length - a.locked.size) || b.arr.length - a.arr.length)
     return gs
   }, [images, partners])
 
-  // 弹窗只记 gid，不存 Group 快照：移动成员后父组件重算出的新组才是最新状态（否则“换一张保留”
-  // 之后弹窗里还挂着已经离开的旧卡）；整组处理完时 find 不到 → 弹窗自动关闭
+  // 弹窗只记 gid，不存 Group 快照：移动成员后父组件重算出的新组才是最新状态（否则换人之后
+  // 弹窗里还挂着已经离开的旧卡）；整组处理完时 find 不到 → 弹窗自动关闭
   const [openGid, setOpenGid] = useState<string | null>(null)
   const open = openGid ? groups.find((g) => g.gid === openGid) ?? null : null
 
@@ -692,8 +786,8 @@ export default function DuplicateGroupsView({ images, mode }: { images: ImageRec
     return (
       <div className="h-full overflow-auto flex flex-col items-center justify-center text-fg2 p-6">
         <div className="text-5xl mb-3">{mode === 'keep' ? '✨' : '🗑'}</div>
-        <div className="text-lg text-fg">{mode === 'keep' ? '没有检测到重复/连拍照片' : '废弃桶是空的'}</div>
-        <div className="text-xs text-fg3 mt-1">{mode === 'keep' ? '筛选完成后，连拍与近似重复会自动归到这里' : '在【重复/连拍】分组里丢弃的多余图会集中到这里，永不导出'}</div>
+        <div className="text-lg text-fg">{mode === 'keep' ? '没有检测到重复照片' : '废弃桶是空的'}</div>
+        <div className="text-xs text-fg3 mt-1">{mode === 'keep' ? '筛选完成后，同一瞬间多出来的那几张会自动归到这里（每组已挑一张进交付库）' : '在【重复照片】分组里丢弃的多余图会集中到这里，永不导出'}</div>
       </div>
     )
   }
@@ -708,7 +802,7 @@ export default function DuplicateGroupsView({ images, mode }: { images: ImageRec
             {/* 收起态只留这一行极简摘要，和标题挤在同一行，不再单独占版面 */}
             {!bannerOpen && (
               <span className="text-fg3">
-                每组最早那张已在<b className="text-fg2">交付库</b>兜底；虚线框=它，<span className="text-brand font-medium">可换一张保留</span>；
+                每组已挑一张<b className="text-good">进交付库</b>（排在最前、绿角标），<span className="text-brand font-medium">可再加也可移出</span>；
                 <span className="text-good font-medium">绿→交付库</span>·<span className="text-bad font-medium">红→废弃桶</span>·没点过的下次接着挑
               </span>
             )}
@@ -729,26 +823,29 @@ export default function DuplicateGroupsView({ images, mode }: { images: ImageRec
           {bannerOpen && (
             <ul className="space-y-1 mt-1.5 leading-relaxed">
               <li>
-                · 每一组连拍/重复，AI 已经先把<b className="text-fg2">最早的那张自动放进【交付库】兜底</b>——你一张都不整理，这组也至少有一张会被导出，<b className="text-fg2">不会整组丢</b>。
+                · 每一组重复照片，AI 已经先把<b className="text-fg2">最干净的那张自动放进【交付库】兜底</b>——你一张都不整理，这组也至少有一张会被导出，<b className="text-fg2">不会整组丢</b>。
               </li>
               <li>
-                · 所以点开分组会看到一张<span className="text-fg2 font-medium">虚线框、写着「🔒 已在交付库」</span>的：它就是那张兜底帧，在这里只给你对比，不占“待决定”名额。
+                · 所以点开分组会看到<span className="text-good font-medium">横线上面</span>是已入库的那几张（绿框 + <b className="text-good">✓ 已在交付库</b>），横线下面才是还没入库、由你挑的。
               </li>
               <li>
-                · <b className="text-fg2">不喜欢 AI 挑的这张？</b>点它上面的<span className="text-brand font-medium">「🔁 换一张保留」</span>，再点任意一张顶上去：新那张进交付库，原那张自动回到本组，跟其它帧一样重新由你决定。
+                · 想再多收一张进库：点横线下面那张卡片下面的<span className="text-good font-medium">「要这张→」</span>，选优质/良好/一般一档，它就<span className="text-good font-medium">加进交付库</span>（不影响上面已入库那张，一组可以同时交好几张）。
               </li>
               <li>
-                · 剩下的多余帧由你定：<span className="text-good font-medium">标绿 → 回交付库（一起导出）</span>；<span className="text-bad font-medium">标红 → 进废弃桶（永不导出）</span>；没点过的留在组里，下次接着挑。
+                · <b className="text-fg2">不想要库里某张？</b>点它下面的<span className="text-brand font-medium">「移出交付库」</span>：它退回横线下面重新由你挑，不会自动顶别人上来；一组几张全由你定。
               </li>
               <li>
-                · 为什么要有这张兜底：怕你还没整理到这一组就去导出，结果整组一张不剩。真想全清也可以（全标红→废弃桶，随时能恢复），只是那样交付库里这组就没图了。
+                · 横线下面那批由你定：<span className="text-good font-medium">「要这张→」选一档加进交付库（一起导出）</span>；<span className="text-bad font-medium">「丢弃」→ 进废弃桶（永不导出）</span>；没点过的留在组里，下次接着挑。它们右上角不标档位（还没定），身上写的是它被判到的<span className="text-fg2 font-medium">瑕疵</span>（闭眼、模糊这些）。
+              </li>
+              <li>
+                · 为什么要有这张兜底：怕你还没整理到这一组就去导出，结果整组一张不剩。真想一张都不要也可以（把库里那张「移出交付库」，系统会先提示你这组就 0 张了），移出的随时能找回来。
               </li>
             </ul>
           )}
         </div>
       ) : (
         <div className="mb-5 rounded-lg bg-panel2/60 border border-line px-4 py-2.5 text-sm text-fg2">
-          废弃桶共 {groups.length} 组、{images.length} 张。点击叠卡可把照片恢复到【重复/连拍】；此分类永不导出。
+          废弃桶共 {groups.length} 组、{images.length} 张。点击叠卡可把照片恢复到【重复照片】；此分类永不导出。
         </div>
       )}
 

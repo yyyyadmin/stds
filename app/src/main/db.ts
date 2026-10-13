@@ -12,20 +12,30 @@ import type {
   CorrectionRecord,
   DimResult,
   DimensionKey,
-  ImageRecord
+  ImageRecord,
+  TierKey
 } from '../shared/types'
 import {
   BAD_DIMENSIONS,
   NEUTRAL_DIMENSIONS,
+  STRUCTURAL_DIMENSIONS,
   PERSON_DIMS,
   CAT_LIBRARY,
+  CAT_FLAWS,
   CAT_REVIEW,
   CAT_TRASH,
   CAT_DUP_TRASH,
   isTrashLike,
+  isBadDim,
+  flawLevel,
+  isDeliverable,
   enforcePersonMutex,
+  tierOfCat,
+  isDupRedundant,
+  DUP_REDUNDANT_KEY,
   DEFAULT_SETTINGS
 } from '../shared/types'
+import { scoreTier } from './classify'
 
 import { openDb, type SqlDb } from './sqlite'
 
@@ -92,6 +102,24 @@ export async function initDbAsync(): Promise<void> {
   } catch {
     /* 列已存在，忽略 */
   }
+  // 一次性迁移（D4）：交付库档位第三条轴。tier 1/2/3，tier_by 区分 AI 预分与人工改档；
+  // 默认 NULL，存量行由启动时 backfillTiers 按已存 tags 补算（不重跑引擎）。
+  try {
+    db.exec(`ALTER TABLE images ADD COLUMN tier INTEGER`)
+    db.exec(`ALTER TABLE images ADD COLUMN tier_by TEXT`)
+  } catch {
+    /* 列已存在，忽略 */
+  }
+  // 一次性迁移（统一废弃库）：trash_from 记录图片被丢弃时所在的来源栏（如
+  // library/review/duplicate/flaws/eyes_closed/custom:3），供废弃库按来源还原。
+  try {
+    db.exec(`ALTER TABLE images ADD COLUMN trash_from TEXT`)
+  } catch {
+    /* 列已存在，忽略 */
+  }
+  // 把历史的“重复照片-废弃”(dup_trash) 并入统一废弃库(trash)，来源标为 duplicate；
+  // 还原时可回到重复分组。历史 trash 行 trash_from 保持 NULL，页面归入“其他来源”。
+  db.exec(`UPDATE images SET category = 'trash', trash_from = 'duplicate' WHERE category = 'dup_trash'`)
   // 一次性迁移：产品决策取消“双人照”类型，2 人并入“多人合拍照”。老库中归在 two_person 桶的图片迁到 group_photo，
   // 避免出现无对应 tab 的孤儿图片。（tags 里残留的 two_person 键被 classify 忽略，重扫即覆盖，无需单独处理）
   db.exec(`UPDATE images SET category = 'group_photo' WHERE category = 'two_person'`)
@@ -132,13 +160,16 @@ function rowToImage(r: Record<string, unknown>, slim = false): ImageRecord {
     addedAt: r.added_at as number,
     catChangedAt: (r.cat_changed_at as number) ?? null,
     scannedAt: (r.scanned_at as number) || null,
-    categoryBy: (r.category_by as ImageRecord['categoryBy']) || null
+    categoryBy: (r.category_by as ImageRecord['categoryBy']) || null,
+    tier: ((r.tier as number) === 1 || (r.tier as number) === 2 || (r.tier as number) === 3 ? (r.tier as TierKey) : null),
+    tierBy: (r.tier_by as ImageRecord['tierBy']) || null,
+    trashFrom: (r.trash_from as string) ?? null
   }
 }
 
 // ---------- 图片 ----------
 
-export function insertImage(rec: Omit<ImageRecord, 'id' | 'tags' | 'details' | 'categoryBy' | 'dupGroup' | 'scene' | 'scannedAt'> & { tags?: ImageRecord['tags'] }): number {
+export function insertImage(rec: Omit<ImageRecord, 'id' | 'tags' | 'details' | 'categoryBy' | 'dupGroup' | 'scene' | 'scannedAt' | 'tier' | 'tierBy'> & { tags?: ImageRecord['tags'] }): number {
   const stmt = db.prepare(`
     INSERT INTO images (path, filename, dir, width, height, format, file_size, thumb, status, category, tags, added_at)
     VALUES (@path, @filename, @dir, @width, @height, @format, @file_size, @thumb, @status, @category, @tags, @added_at)
@@ -189,23 +220,24 @@ export function listImages(filter: { category?: CategoryKey; status?: string; di
 }
 
 /**
- * 交付库 / 待确认 / 垃圾桶 是"虚拟桶"：
- * 交付库 = category 不在坏维度、不在待确认、不在垃圾桶
+ * 交付库 / 瑕疵片 / 待确认 / 废弃库 是“虚拟桶”：
+ * D2 后前三档由“主分类(人数) + 瑕疵等级(flawLevel)”派生，SQL 只取候选集，
+ * 精确门槛交给 matchesView（与 categoryCounts / exporter 同一口径）。
  */
 function virtualCategorySql(cat: CategoryKey): string {
   if (cat === 'all') return '1=1'
-  if (cat === CAT_LIBRARY) {
-    const bads = [...BAD_DIMENSIONS, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH].map((b) => `'${b}'`).join(',')
-    return `category NOT IN (${bads})`
-  }
-  if (cat === CAT_REVIEW || cat === CAT_TRASH || cat === CAT_DUP_TRASH) {
-    return `category = '${cat}'`
-  }
+  if (cat === CAT_TRASH || cat === CAT_DUP_TRASH) return `category = '${cat}'`
+  // 交付库候选：非 review/trash 的行（人数图都带瑕疵标签、由 matchesView 筛掉）
+  if (cat === CAT_LIBRARY) return `category NOT IN ('${CAT_REVIEW}','${CAT_TRASH}','${CAT_DUP_TRASH}')`
+  // 档位子视图（D4）：候选集同交付库，精确按 tier 交给 matchesView
+  if (tierOfCat(cat)) return `category NOT IN ('${CAT_REVIEW}','${CAT_TRASH}','${CAT_DUP_TRASH}')`
+  // 瑕疵片/待确认候选：需含“主分类=人数但带瑕疵标签”的行，只排除废弃库
+  if (cat === CAT_FLAWS || cat === CAT_REVIEW) return `category NOT IN ('${CAT_TRASH}','${CAT_DUP_TRASH}')`
   return `category = @cat_${cat.replace(/[^a-z0-9]/gi, '')}`
 }
 
 export function categoryParams(cat: CategoryKey, params: Record<string, unknown>): Record<string, unknown> {
-  if (cat === CAT_LIBRARY || cat === CAT_REVIEW || cat === CAT_TRASH) return params
+  if (cat === CAT_LIBRARY || cat === CAT_FLAWS || cat === CAT_REVIEW || cat === CAT_TRASH || tierOfCat(cat)) return params
   params[`cat_${cat.replace(/[^a-z0-9]/gi, '')}`] = cat
   return params
 }
@@ -213,7 +245,7 @@ export function categoryParams(cat: CategoryKey, params: Record<string, unknown>
 export function listByCategory(cat: CategoryKey): ImageRecord[] {
   const where = virtualCategorySql(cat)
   const params: Record<string, unknown> = {}
-  if (cat !== 'all' && cat !== CAT_LIBRARY && cat !== CAT_REVIEW && cat !== CAT_TRASH && cat !== CAT_DUP_TRASH) {
+  if (cat !== 'all' && cat !== CAT_LIBRARY && cat !== CAT_FLAWS && cat !== CAT_REVIEW && cat !== CAT_TRASH && cat !== CAT_DUP_TRASH && !tierOfCat(cat)) {
     params[`cat_${cat.replace(/[^a-z0-9]/gi, '')}`] = cat
   }
   const tagLike = '%"' + cat + '":{%'
@@ -223,20 +255,38 @@ export function listByCategory(cat: CategoryKey): ImageRecord[] {
 }
 
 function isDimCat(cat: CategoryKey): boolean {
-  return (BAD_DIMENSIONS as string[]).includes(cat) || (NEUTRAL_DIMENSIONS as string[]).includes(cat)
+  // 结构维度（重复/连拍）也算视图维度：它不是瑕疵，但侧栏要能点开它、要能计数
+  return (BAD_DIMENSIONS as string[]).includes(cat) || (NEUTRAL_DIMENSIONS as string[]).includes(cat) || (STRUCTURAL_DIMENSIONS as string[]).includes(cat)
 }
 
 /**
  * 一张图是否属于 cat 视图的单一真源：listByCategory（全量）和 listByCategoryIds（差量）共用，
- * 避免两处口径漂移——否则操作后“该消失的还挂着 / 该出现的没出现”。
- * 坏/中性维度分类是“标签并集视图”：一张图同时模糊+斜眼时两个分类都该看到它，
- * 但仅当该标签达到高/中置信度（未被过滤）才展示，且垃圾桶内的图不在其它视图出现。
+ * 避免两处口径漂移。D2 三档状态视图互斥可求和，内容维度视图为标签并集：
+ * - 交付库：非 trash/review/坏维度 且无任何中/高瑕疵（干净人数图；干净的自定义相册图也归在这里，保证上段可求和）
+ * - 瑕疵片：非 trash 且有高置信瑕疵（flaw high）
+ * - 待确认：非 trash 且非 flaw high，且（手动停泊 review ∪ 有中置信瑕疵 mid）
+ * - 内容维度（坏/中性）：主分类===dim ∪ 该 dim 非 low 标签（并集，允许重叠）
  */
 function matchesView(r: ImageRecord, cat: CategoryKey): boolean {
+  if (cat === 'all') return true
+  if (isTrashLike(cat)) return r.category === cat
+  const fl = flawLevel(r.tags)
+  if (cat === CAT_LIBRARY) {
+    // 单一真源 isDeliverable（与导出闸门完全同一函数）：非 trash/review/flaws/坏维度且 flaw none
+    return isDeliverable(r.category, r.tags)
+  }
+  // 档位子视图（D4）：交付库 ∩ 档位相等（档位在 isDeliverable 内部，不另判 trash/review）
+  const tierN = tierOfCat(cat)
+  if (tierN) return isDeliverable(r.category, r.tags) && r.tier === tierN
+  if (cat === CAT_FLAWS) return !isTrashLike(r.category) && fl === 'high'
+  if (cat === CAT_REVIEW) {
+    if (isTrashLike(r.category) || fl === 'high') return false
+    return r.category === CAT_REVIEW || fl === 'mid'
+  }
   if (isDimCat(cat)) {
     return r.category === cat || (!isTrashLike(r.category) && !!r.tags[cat as DimensionKey] && r.tags[cat as DimensionKey]!.level !== 'low')
   }
-  return !isTrashLike(r.category) || cat === CAT_TRASH || cat === CAT_DUP_TRASH || cat === 'all'
+  return r.category === cat // 自定义分类等按归属精确匹配（SQL 已限定）
 }
 
 /**
@@ -252,7 +302,7 @@ export function listByCategoryIds(cat: CategoryKey, ids: number[]): ImageRecord[
   for (let i = 0; i < ids.length; i += 500) {
     const chunk = ids.slice(i, i + 500)
     const params: Record<string, unknown> = { tagLike }
-    if (cat !== 'all' && cat !== CAT_LIBRARY && cat !== CAT_REVIEW && cat !== CAT_TRASH && cat !== CAT_DUP_TRASH) {
+    if (cat !== 'all' && cat !== CAT_LIBRARY && cat !== CAT_FLAWS && cat !== CAT_REVIEW && cat !== CAT_TRASH && cat !== CAT_DUP_TRASH && !tierOfCat(cat)) {
       params[`cat_${cat.replace(/[^a-z0-9]/gi, '')}`] = cat
     }
     chunk.forEach((id, j) => {
@@ -283,11 +333,15 @@ export function updateDetectResult(
   // 人数标签互斥收口：不管上游是引擎新结果、连拍一致化还是聚类补标，落库前再过一次闸，
   // 杜绝同一张图带着两个互斥人数标签进库（卡片上会同时挂「合拍照 + 混合照」两枚打脸的标签）。
   const safeTags = enforcePersonMutex(tags)
+  // 档位随新 tags 重算（D4）；人工改过的档位（tier_by='user'）永不被重筛/重算覆盖
+  const tier = status === 'done' ? scoreTier(safeTags, getSettings()) : null
   db.prepare(`
     UPDATE images SET tags = ?, details = ?, dup_group = ?, category = ?, category_by = ?, status = ?, scanned_at = ?,
-      cat_changed_at = COALESCE(?, cat_changed_at)
+      cat_changed_at = COALESCE(?, cat_changed_at),
+      tier = CASE WHEN tier_by = 'user' THEN tier ELSE ? END,
+      tier_by = CASE WHEN tier_by = 'user' THEN tier_by ELSE ? END
     WHERE id = ?
-  `).run(JSON.stringify(safeTags), JSON.stringify(details), dupGroup, category, categoryBy, status, Date.now(), prev === category ? null : Date.now(), id)
+  `).run(JSON.stringify(safeTags), JSON.stringify(details), dupGroup, category, categoryBy, status, Date.now(), prev === category ? null : Date.now(), tier, tier ? 'ai' : null, id)
 }
 
 export function setCategory(id: number, category: CategoryKey, categoryBy: 'ai' | 'user' | null): void {
@@ -339,7 +393,14 @@ export function setDimTag(id: number, dim: DimensionKey, tag: DimResult | null):
   // 写入人数维度时自动顶掉其它人数维度（互斥），调用方不必各自记这份清单。
   // 黑白照与人数正交，不在这组里，不受影响。
   enforcePersonMutex(tags)
-  db.prepare('UPDATE images SET tags = ? WHERE id = ?').run(JSON.stringify(tags), id)
+  // 标签变了就重算档位（D4）；人工改档不覆盖
+  const tier = scoreTier(tags, getSettings())
+  db.prepare(
+    `UPDATE images SET tags = ?,
+       tier = CASE WHEN tier_by = 'user' THEN tier ELSE ? END,
+       tier_by = CASE WHEN tier_by = 'user' THEN tier_by ELSE ? END
+     WHERE id = ?`
+  ).run(JSON.stringify(tags), tier, tier ? 'ai' : null, id)
 }
 
 /**
@@ -449,7 +510,7 @@ export function countImages(): { total: number; done: number; pending: number } 
  *
  * 三条不动的边界：
  * - status='skip'：非图片 / 不支持的文件，本来就不参与检测
- * - 人工垃圾桶（trash 且 category_by='user'）：整轮跳过不再重复耗检测，沿用旧行为
+ * - 人工废弃库（trash 且 category_by='user'）：整轮跳过不再重复耗检测，沿用旧行为
  * - trash-like / category_by='user'：只重测更新标签，归属一律不动
  *   （能进两个桶的图全是用户手工丢弃的，AI 无权把它们“还魂”）
  *
@@ -489,16 +550,47 @@ export function resetForRescan(): number {
   return moved
 }
 
+/**
+ * D4 一次性 backfill：给存量 status=done 行按已存 tags 补算 tier（不重跑引擎），
+ * 让新列上线后旧库立刻有档位分布。幂等；人工改过的行（tier_by='user'）不覆盖。
+ */
+export function backfillTiers(): number {
+  const rows = db.prepare(`SELECT id, tags FROM images WHERE status = 'done'`).all() as Array<{ id: number; tags: string | null }>
+  const settings = getSettings()
+  const stmt = db.prepare(`UPDATE images SET tier = ?, tier_by = 'ai' WHERE id = ? AND tier_by IS NOT 'user'`)
+  let written = 0
+  const tx = db.transaction(() => {
+    for (const r of rows) {
+      let parsed: ImageRecord['tags'] = {}
+      try {
+        parsed = JSON.parse(r.tags || '{}') as ImageRecord['tags']
+      } catch {
+        continue
+      }
+      const tier = scoreTier(parsed, settings)
+      stmt.run(tier, r.id)
+      written += 1
+    }
+  })
+  tx()
+  return written
+}
+
 // ---------- 分类计数（侧栏徽章） ----------
 
 export function categoryCounts(): Record<string, number> {
-  const rows = db.prepare('SELECT id, category, tags, status FROM images').all() as Array<{ id: number; category: string; tags: string | null; status: string }>
+  const rows = db.prepare('SELECT id, category, tags, tier, status FROM images').all() as Array<{ id: number; category: string; tags: string | null; tier: number | null; status: string }>
   const map: Record<string, number> = {}
-  let library = 0
-  // 维度分类徽章必须与 listByCategory（点开分类看到的缩略图）以及导出清单“三数一致”：
-  // 一张图属于该维度分类 ⇔ 主分类===该维度 ∪ 该维度标签为中/高置信。用 Set 去重取并集，
-  // 不能用 max(主分类数, 标签数)——那样会漏掉“主分类在此、但无对应中/高标签”的图（手动归入/
-  // 阈值边界），导致徽章 < 导出数（“选后多几张”）。
+  // 上段四档互斥可求和（= 全部）：交付库(好片) / 瑕疵片 / 重复多余 / 待确认 / 废片。
+  // 优先级：废弃库 > 瑕疵片(flaw high) > 重复多余(带可见 duplicate 标签) > 待确认(review 停泊 ∪ flaw mid) > 交付库(其余无瑕疵图，含干净自定义相册)
+  // 重复多余排在待确认前：组内冗余帧不需要用户“复核 AI 拿不准的判定”，它要的是去分组里选留哪张。
+  let lib = 0
+  let flaws = 0
+  let review = 0
+  let dupRedundant = 0
+  // 交付库内档位（D4）：优质/良好/一般互斥，三数和 ≤ lib（差的是尚未 backfill 的 NULL 行）
+  const tierCount: Record<TierKey, number> = { 1: 0, 2: 0, 3: 0 }
+  // 下段内容维度（人数 / 瑕疵 / 黑白 / 自定义相册）：标签并集（主分类===dim ∪ 非 low 标签），Set 去重、允许重叠
   const dimSets: Record<string, Set<number>> = {}
   const addDim = (d: string, id: number): void => {
     if (!dimSets[d]) dimSets[d] = new Set()
@@ -507,27 +599,46 @@ export function categoryCounts(): Record<string, number> {
   map.all = rows.length
   for (const r of rows) {
     map[r.category] = (map[r.category] || 0) + 1
-    const isBad = (BAD_DIMENSIONS as string[]).includes(r.category)
-    if (!isBad && r.category !== CAT_LIBRARY && r.category !== CAT_REVIEW && !isTrashLike(r.category)) {
-      // 中性/自定义分类同样属于交付库（垃圾桶与重复废弃桶除外）
-      library += 1
-    }
-    if (isTrashLike(r.category)) continue // 垃圾桶/废弃桶不出现在任何维度并集视图
-    if (isDimCat(r.category)) addDim(r.category, r.id) // 主分类命中
-    if (r.status === 'done' && r.tags) {
-      try {
-        const tags = JSON.parse(r.tags) as Record<string, { level?: string }>
-        for (const [d, t] of Object.entries(tags)) {
-          if (t && t.level !== 'low' && isDimCat(d)) addDim(d, r.id) // 标签命中
-        }
-      } catch {
-        /* ignore */
+    const tags = parseRowTags(r)
+    const fl = flawLevel(tags)
+    if (!isTrashLike(r.category)) {
+      if (fl === 'high') flaws += 1
+      else if (isDupRedundant(tags)) dupRedundant += 1
+      else if (r.category === CAT_REVIEW || fl === 'mid') review += 1
+      else if (isDeliverable(r.category, tags)) {
+        lib += 1 // 与交付库视图/导出同一函数口径，含旧坏维度孤儿排除
+        if (r.tier === 1 || r.tier === 2 || r.tier === 3) tierCount[r.tier] += 1
       }
+    }
+    if (isTrashLike(r.category)) continue // 废弃库/废弃桶不入任何内容并集视图
+    if (isDimCat(r.category)) addDim(r.category, r.id) // 主分类命中
+    for (const [d, t] of Object.entries(tags)) {
+      if (t && t.level !== 'low' && isDimCat(d)) addDim(d, r.id) // 标签命中
     }
   }
   for (const [d, set] of Object.entries(dimSets)) map[d] = set.size
-  map[CAT_LIBRARY] = (map[CAT_LIBRARY] || 0) + library
+  map[CAT_LIBRARY] = lib
+  map[CAT_FLAWS] = flaws
+  map[CAT_REVIEW] = review
+  // 侧栏“重复多余”行：只数“单因冗余被拦下、本身没拍坏”的那批（与上档互斥求和同口径）；
+  // 点开后进的是整组视图，那里的张数按标签并集算（map['duplicate']），两个数不同义，不并列显示。
+  map[DUP_REDUNDANT_KEY] = dupRedundant
+  map['tier:1'] = tierCount[1]
+  map['tier:2'] = tierCount[2]
+  map['tier:3'] = tierCount[3]
+  // 失败图计数（status='error'）：顶栏徒章与失败定位弹窗的数据源
+  map.error = rows.reduce((n, r) => n + (r.status === 'error' ? 1 : 0), 0)
   return map
+}
+
+/** 侧栏计数专用：行 tags JSON 解析（非 done / 空 -> {}），供 flawLevel 与并集命中复用 */
+function parseRowTags(r: { tags: string | null; status: string }): Record<string, { level?: string }> {
+  if (r.status !== 'done' || !r.tags) return {}
+  try {
+    return JSON.parse(r.tags) as Record<string, { level?: string }>
+  } catch {
+    return {}
+  }
 }
 
 // ---------- 修正记录 ----------

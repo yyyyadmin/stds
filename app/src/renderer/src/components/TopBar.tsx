@@ -52,7 +52,6 @@ export default function TopBar(): JSX.Element {
           return fmtRemain(est - (now - p.phaseStartedAt!) / 1000)
         })()
       : ''
-  const sceneLabels: Record<string, string> = { wedding: '婚礼跟拍', studio: '棚拍写真', kids: '儿童抓拍', default: '通用' }
   const auth = s.auth
   const user = auth.user
   const isMember = auth.loggedIn && (user?.membership.level || 'free') !== 'free' && !user?.membership.is_expired
@@ -78,10 +77,7 @@ export default function TopBar(): JSX.Element {
   }, [importMenu])
 
   return (
-    <header className="shrink-0 bg-panel border-b border-line px-3 py-2 flex items-center gap-2 text-sm">
-      <div className="font-bold text-fg mr-1 whitespace-nowrap">
-        筛片大师 <span className="text-[10px] font-normal text-fg3">v2.0</span>
-      </div>
+    <header className="shrink-0 bg-panel border-b border-line px-3 py-2 flex flex-wrap xl:flex-nowrap items-center gap-x-2 gap-y-1.5 text-sm">
       <div className="relative" ref={importRef}>
         <button
           className="btn"
@@ -149,10 +145,25 @@ export default function TopBar(): JSX.Element {
           停止
         </button>
       )}
-      {!running && (
-        <span className="chip bg-panel2 text-fg2 border border-line tabular-nums whitespace-nowrap" title="当前图库共导入多少张照片">
-          图库 {s.counts.all ?? 0} 张
-        </span>
+      {/* 图库张数 + 失败张数：大屏一行并排（xl 及以上，维持原样），小屏叠成两行省横向空间；无失败时只剩图库一行 */}
+      {(!running || (s.counts.error ?? 0) > 0) && (
+        <div className="flex flex-col items-start gap-1 xl:flex-row xl:items-center xl:gap-2">
+          {!running && (
+            <span className="chip bg-panel2 text-fg2 border border-line tabular-nums whitespace-nowrap" title="当前图库共导入多少张照片">
+              图库 {s.counts.all ?? 0} 张
+            </span>
+          )}
+          {/* 失败照片徒章：本轮筛选没跑成（无法解码/文件损坏等）的张数，常驻至 error 归零；点开定位并重试 */}
+          {(s.counts.error ?? 0) > 0 && (
+            <button
+              className="chip bg-bad/15 text-bad border border-bad/40 tabular-nums whitespace-nowrap hover:bg-bad/25 transition-colors"
+              title={`有 ${s.counts.error} 张没跑成（读不出/已移动删除），点开查看并重试`}
+              onClick={() => void useStore.setState({ showFailedImages: true })}
+            >
+              ⚠ {s.counts.error} 张没跑成
+            </button>
+          )}
+        </div>
       )}
       {(running || (p && p.total > 0)) && (
         <div className="flex items-center gap-2 min-w-0 flex-1 max-w-md" title={p?.message || ''}>
@@ -187,12 +198,12 @@ export default function TopBar(): JSX.Element {
         </div>
       )}
       {!running && p?.message && !p.total && <span className="text-xs text-gray-500 truncate flex-1">{p.message}</span>}
-      <div className="flex-1" />
+      <div className="flex-1 max-xl:hidden" />
 
       {/* 当前筛选目录：仅当本次导入来自“选择/拖入目录”时显示（纯选照片不显示） */}
       {s.settings.lastImportDir && (
         <span
-          className="inline-flex items-center max-w-[280px] px-2 py-1 rounded-md text-xs bg-panel2 text-fg2 border border-line"
+          className="inline-flex items-center max-w-[280px] px-2 py-1 rounded-md text-xs bg-panel2 text-fg2 border border-line max-xl:hidden"
           title={`当前筛选目录：${s.settings.lastImportDir}`}
         >
           <span className="shrink-0">📂 当前筛选目录：</span>
@@ -230,19 +241,6 @@ export default function TopBar(): JSX.Element {
       >
         清空图库
       </button>
-
-      <select
-        className="input text-xs w-24"
-        title="场景预设：针对婚礼/棚拍/儿童摄影等场景，对部分维度的判定阈值做针对性微调（在设置→高级设置里可看具体覆盖项）"
-        value={s.settings.scene}
-        onChange={(e) => void s.saveSettings({ scene: e.target.value }, true)}
-      >
-        {Object.entries(sceneLabels).map(([k, v]) => (
-          <option key={k} value={k}>
-            {v}
-          </option>
-        ))}
-      </select>
 
       <div className="relative flex items-center">
         <input

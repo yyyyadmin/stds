@@ -35,11 +35,13 @@ import { scanner, reclassifyAll, type ScanProgress } from './services/scanner'
 import { exporter, type ExportOptions } from './services/exporter'
 import { importPaths, backfillThumbnails, backfillSmallThumbs, clearThumbCache } from './services/importer'
 import { ensureBigPreview, clearBigCache } from './services/big'
+import { readImageMeta } from './services/exifMeta'
 import { clearEngineInputCache } from './services/rawPreview'
 import { authManager } from './services/auth'
 import { engineManager } from './engine'
 import { autoTune, resetTuned, TUNE_MIN_CORRECTIONS } from './services/tuner'
-import { CAT_LIBRARY, isBadDim, isTrashLike, BAD_DIMENSIONS, SUPPORTED_EXTS, PERSON_DIMS, type CategoryKey, type DimensionKey, type ImageRecord } from '../shared/types'
+import { CAT_LIBRARY, CAT_TRASH, CAT_FLAWS, CAT_REVIEW, isBadDim, isStructuralDim, isTrashLike, BAD_DIMENSIONS, SUPPORTED_EXTS, PERSON_DIMS, guessMidDim, tierOfCat, isDeliverable, type CategoryKey, type DimensionKey, type ImageRecord } from '../shared/types'
+import { computeCategory } from './classify'
 
 /**
  * 人数维度互斥：一张图只能属于 单人照/多人合拍照/多人混合照/无人物场景 之一。
@@ -139,6 +141,10 @@ export function registerIpc(win: BrowserWindow): void {
   // 整组重复/连拍成员：分组视图要把留在交付库的“第一张”也显示出来，否则短组退化成孤帧
   ipcMain.handle(CH.listImagesByGroups, (_e, gids: string[]) => listImagesByDupGroups(gids))
 
+  ipcMain.handle(CH.listErrorImages, () =>
+    getDb().prepare(`SELECT id, filename, dir FROM images WHERE status = 'error' ORDER BY id`).all() as Array<{ id: number; filename: string; dir: string }>
+  )
+
   ipcMain.handle(CH.categoryCounts, () => categoryCounts())
 
   // 机器性能探测（第二档 A1）：渲染层启动时调一次，结合 perfMode 决定是否进精简模式。
@@ -155,12 +161,74 @@ export function registerIpc(win: BrowserWindow): void {
   // 移动（逻辑/物理），9.3
   ipcMain.handle(CH.moveImages, async (_e, req: MoveRequest) => {
     const s = getSettings()
-    void s
     // 单图移动处理（第二档 A3）：旧内联 for 逐条 auto-commit 全程占住主进程事件循环，
     // 几千 id 时窗口连缩放都卡；现在每 500 条一个事务、块间让出，单条读改写仍在一块内同步完成
     const moveOne = (id: number): void => {
       const rec = getImage(id)
       if (!rec) return
+      // 瑕疵片是"高置信瑕疵标签"派生的虚视图，不是一个可移入的归属（拖入侧栏已 noDrop）；
+      // 防御性忽略，避免把 category 写成 'flaws' 破坏"主分类=人数"不变式。
+      if (req.category === CAT_FLAWS) return
+      // 档位目标（D4 + 用户 10-13 规则：交付库不再是可直接移入的栏，只能移入它下面三个档位之一）。
+      // 于是“移入档位”按图当前是否已在交付库分两种语义：
+      //  · 已在交付库：只是改档（第三条轴 tier），不碰 category/tags/学习样本——与旧行为一致；
+      //  · 还不在交付库（瑕疵片/待确认/废片里拖入或移动到档位）：等同“人工担保放行 + 归档”，
+      //    走与 moveTo(交付库) 完全相同的放行口径——清掉全部坏维度标签（并记误判样本喂自学习）、
+      //    落回交付库，再定档；人数/黑白等客观事实标签一律保留（导出按标签并集捞图，删了捞不回）。
+      // 档位只做逻辑改档/放行，不搬物理文件（改档不代表换目录）。
+      const tierN = tierOfCat(req.category)
+      if (tierN) {
+        if (!isDeliverable(rec.category, rec.tags)) {
+          for (const dim of Object.keys(rec.tags || {})) {
+            if (!isBadDim(dim) && !isStructuralDim(dim)) continue
+            const tag = rec.tags[dim]
+            setDimTag(id, dim as DimensionKey, null)
+            // 结构维度（重复/连拍）不记误判样本：拖进档位 = “这张我要留”，不等于“AI 判错了”
+            if (!isBadDim(dim)) continue
+            if (tag && tag.method !== 'user') {
+              addCorrection({
+                imageId: id,
+                origDim: dim as DimensionKey,
+                origConfidence: tag.confidence,
+                newCategory: CAT_LIBRARY,
+                action: 'wrong',
+                timestamp: Date.now()
+              })
+            }
+          }
+          // 主分类落回交付库：与 moveTo(CAT_LIBRARY) 同一 setCategory 路径，categoryBy=user
+          setCategory(id, CAT_LIBRARY, 'user')
+        }
+        getDb().prepare(`UPDATE images SET tier = ?, tier_by = 'user' WHERE id = ?`).run(tierN, id)
+        return
+      }
+      // 丢进废弃库 = 用户对这张图最明确的“不要”表态：若它带着 AI 判的瑕疵标签，等于认可了这条瑕疵
+      // → 给每个 AI 瑕疵维度记一条 action='correct'（判对/truePositive）样本。这是“此判定正确”按钮
+      // 下线后（用户 10-13：真实用户只用“要→交付库 / 不要→废弃库”两个动作）判对信号的新来源，
+      // 与“放行→交付库记 wrong（误判）”配成一对，喂 tuner 的误检率 = 误判 /(判对 + 误判)。
+      // 只记 AI 标的（method!=='user'）中/高置信瑕疵：用户自己手动加的标签不算 AI 判对，低置信不可见不记。
+      // 只针对普通废弃库；重复/连拍-废弃桶是按“冗余”丢弃，与瑕疵质量无关，不记。
+      if (req.category === CAT_TRASH && rec.category !== CAT_TRASH) {
+        // 从重复分组丢弃（source==='duplicate'）是按“冗余”丢弃，与瑕疵质量无关，不记 correct
+        // 样本，维持旧 dup_trash 不产冗余/误判样本的口径（避免行为回归）。
+        if (req.source !== 'duplicate') {
+          for (const [dim, tag] of Object.entries(rec.tags || {})) {
+            if (!isBadDim(dim) || !tag || tag.method === 'user' || tag.level === 'low') continue
+            addCorrection({
+              imageId: id,
+              origDim: dim as DimensionKey,
+              origConfidence: tag.confidence,
+              newCategory: CAT_TRASH,
+              action: 'correct',
+              timestamp: Date.now()
+            })
+          }
+        }
+        setCategory(id, CAT_TRASH, 'user')
+        // 记录丢弃时所在来源栏，供废弃库“从哪来回哪去”还原；历史/未知来源存 null
+        getDb().prepare(`UPDATE images SET trash_from = ? WHERE id = ?`).run(req.source ?? null, id)
+        return
+      }
       if (req.physical && !isTrashLike(req.category)) {
         // 物理移动：移动到 <原目录>/筛图结果/<分类名>/
         try {
@@ -182,12 +250,16 @@ export function registerIpc(win: BrowserWindow): void {
       // 人数三标签与黑白**一律保留**：它们是“这张图里有几个人/是不是黑白”的客观事实，不是缺陷。
       // 导出“只导出勾选分类”对维度分类走标签并集口径（exporter.matchesCat），删了就永久捞不出来——
       // 把一张单人照放行进交付库，不该顺手让它再也进不了“单独导出单人照”的清单。
-      // 垃圾桶不清任何标签（保留废弃原因）；目标是坏维度时再补一个用户高置信标签。
+      // 废弃库不清任何标签（保留废弃原因）；目标是坏维度时再补一个用户高置信标签。
       if (req.clearBadTags !== false) {
         for (const dim of Object.keys(rec.tags)) {
-          if (!isBadDim(dim)) continue
+          if (!isBadDim(dim) && !isStructuralDim(dim)) continue
           const tag = rec.tags[dim]
           setDimTag(id, dim as DimensionKey, null)
+          // v2.0.67：结构维度（重复/连拍）只清标签、不记误判样本。“这张我也要不要”是选片意图，
+          // 不是“AI 把不重复的当重复了”；早先批量点“保留”把全库刷出上千条 duplicate=wrong
+          // 假负样本（污染自学习）就是这个坑，不能因为把 duplicate 摘出瑕疵表就叉回来。
+          if (!isBadDim(dim)) continue
           // 误判样本：AI 判了该维度有缺陷（只记 AI 标的，method=user 的是用户自己放的，不算 AI 误判），
           // 人工担保移出。旧注释声称“误判样本已经另记进 corrections”但这条路径根本没写——
           // 人工复审最强的信号一直在丢，这里补上（撤回移动不回滚样本：它记录的是用户当时的真实意图）
@@ -203,12 +275,13 @@ export function registerIpc(win: BrowserWindow): void {
           }
         }
       }
-      if (isBadDim(req.category)) {
+      if (isBadDim(req.category) || isStructuralDim(req.category)) {
         const had = rec.tags[req.category]
-        setDimTag(id, req.category as DimensionKey, { confidence: 1, level: 'high', reason: '用户手动放置', method: 'user' })
+        setDimTag(id, req.category as DimensionKey, { confidence: 1, level: 'high', reason: isStructuralDim(req.category) ? '用户判定：这张是同组多余帧' : '用户手动放置', method: 'user', taggedAt: Date.now() })
         // 漏检样本：AI 没标（或只标了不可见的低置信）这个缺陷维度，用户却手动把图移进来
-        // → 与 addDimTag 补标同口径计入 movedInCounts，驱动该维度下调召回阈值
-        if (!had || had.level === 'low') {
+        // → 与 addDimTag 补标同口径计入 movedInCounts，驱动该维度下调召回阈值。
+        // 结构维度不记：重复组是聚类算出来的结构结论，用户把图挪进重复类不等于 AI 漏判了某个缺陷。
+        if (isBadDim(req.category) && (!had || had.level === 'low')) {
           addCorrection({
             imageId: id,
             origDim: null,
@@ -218,6 +291,11 @@ export function registerIpc(win: BrowserWindow): void {
             timestamp: Date.now()
           })
         }
+        // D2：瑕疵只作标签、绝不充当主分类。写高置信瑕疵标签后，category 用最新 tags 重算回人数身份
+        // （图随即由 flawLevel=high 落入瑕疵片视图、退出交付库，无需把 category 设成坏维度）。
+        const fresh = getImage(id)
+        if (fresh) setCategory(id, computeCategory(fresh.tags, s, { ...fresh, categoryBy: null } as ImageRecord), 'user')
+        return
       }
       // 人数维度互斥换标 + 学习样本。样本必须在这里也写：以前只有 addDimTag（标签路径）写，
       // 侧栏拖进人数分类走的是这条移动路径，“换了标但没学习”——用户拿来攒真值的两个入口只剩一半管用。
@@ -255,12 +333,13 @@ export function registerIpc(win: BrowserWindow): void {
     send(CH.E_scanProgress, scanner.getProgress())
   })
 
-  // 撤回移动：按移动前快照原样还原分类/标签/categoryBy（不做反向推断）
+  // 撤回移动：按移动前快照原样还原分类/标签/categoryBy/档位（不做反向推断）；
+  // tier 两列一并还原，改档/移入被撤回后档位随之回到移动前（含 user 标记）
   ipcMain.handle(CH.restoreImages, async (_e, snapshots: ImageRecord[]) => {
     await processChunked(snapshots, (rec) => {
       getDb()
-        .prepare('UPDATE images SET category = ?, category_by = ?, tags = ?, status = ?, cat_changed_at = ? WHERE id = ?')
-        .run(rec.category, rec.categoryBy, JSON.stringify(rec.tags), rec.status, Date.now(), rec.id)
+        .prepare('UPDATE images SET category = ?, category_by = ?, tags = ?, status = ?, cat_changed_at = ?, tier = ?, tier_by = ? WHERE id = ?')
+        .run(rec.category, rec.categoryBy, JSON.stringify(rec.tags), rec.status, Date.now(), rec.tier ?? null, rec.tierBy ?? null, rec.id)
     })
   })
 
@@ -274,15 +353,28 @@ export function registerIpc(win: BrowserWindow): void {
     const rec = getImage(req.imageId)
     if (!rec) return null
     if (req.action === 'correct') {
-      // 判定正确：保留分类，写修正记录，积累学习
+      // D1 一步结案（修"只记不动"缺口）：待确认里的图，AI 判定正确 → 把中置信瑕疵提为高置信（确认瑕疵），
+      // 图随即由 flawLevel=high 落入瑕疵片、退出待确认（不导出）；若只是手动停泊无瑕疵则原样仅记样本。
+      const midDim = guessMidDim(rec.tags || {})
+      let promoted = false
+      if (midDim && isBadDim(midDim)) {
+        setDimTag(rec.id, midDim as DimensionKey, { confidence: 1, level: 'high', reason: '用户确认判定', method: 'user', taggedAt: Date.now() })
+        promoted = true
+      }
       addCorrection({
         imageId: rec.id,
-        origDim: req.origDim,
+        origDim: req.origDim ?? (promoted ? ((midDim as DimensionKey) ?? null) : null),
         origConfidence: req.origConfidence,
         newCategory: rec.category,
         action: 'correct',
         timestamp: Date.now()
       })
+      if (promoted) {
+        const fresh = getImage(rec.id)
+        if (fresh) setCategory(rec.id, computeCategory(fresh.tags, getSettings(), { ...fresh, categoryBy: null } as ImageRecord), 'user')
+        send(CH.E_scanProgress, scanner.getProgress())
+        return getImage(rec.id)
+      }
       return rec
     }
     // 判定错误：按目标面板选择移动
@@ -324,10 +416,11 @@ export function registerIpc(win: BrowserWindow): void {
       setDimTag(id, dim, null)
       let newCat = rec.category
       if (rec.category === dim) {
-        const rest = Object.entries({ ...rec.tags })
-          .filter(([d, v]) => d !== dim && v && v.level !== 'low' && isBadDim(d))
-          .sort((a, b) => (b[1]?.confidence || 0) - (a[1]?.confidence || 0))
-        newCat = rest.length ? rest[0][0] : CAT_LIBRARY
+        // D2：category 恒为人数身份。删掉的若正是当前主分类（人数维或旧数据坏维度），
+        // 用剩余 tags 重算回人数（无人数标签则回落待确认），不再挪到"剩余坏维度/library"。
+        const nextTags = { ...rec.tags }
+        delete nextTags[dim]
+        newCat = computeCategory(nextTags as ImageRecord['tags'], getSettings(), { ...rec, categoryBy: null } as ImageRecord)
         setCategory(id, newCat, 'user')
       }
       addCorrection({
@@ -477,6 +570,9 @@ export function registerIpc(win: BrowserWindow): void {
 
   // RAW/HEIC 大图原图高清预览（普通格式直接用原文件，不走这里）
   ipcMain.handle(CH.bigPreview, (_e, id: number) => ensureBigPreview(id))
+
+  // 原图拍摄参数（EXIF）：大图右栏「拍摄参数」区（主进程按路径缓存，见 services/exifMeta）
+  ipcMain.handle(CH.imgMeta, (_e, path: string) => readImageMeta(path))
 
   // 一次性迁移：旧版缩略图未应用 EXIF 方向（竖拍被显示成横拍）。升级后清空缩略图缓存
   // 并重置指向，触发全量重建为正确方向；仅跑一次（thumbOrientVersion 记录已迁移）。

@@ -1,11 +1,14 @@
 /**
  * 多选浮动操作栏（第九章 9.3）：选中后底部浮出
  * - "已选中 N 张" + 取消选择 / 反选 / 全选
- * - 移动到：只负责状态分类（交付库/待确认/自定义/垃圾桶），维度归类交给🏷 标签管理器
- * - 垃圾桶：单选（1 张）直接移；多选（≥2 张）弹确认框（与放大弹窗同语义），防批量误废
+ * - 移动到：只负责状态归属（交付库需选一个档位 / 待确认 / 自定义 / 废弃库），维度归类交给🏷 标签管理器
+ * - 废弃库：单选（1 张）直接移；多选（≥2 张）弹确认框（与放大弹窗同语义），防批量误废
  * - 🏷 标签：对全部选中图批量增删标签（加标签=同时出现在该维度分类，不是移动）
- * - 待确认区快捷操作："确认好图"（进交付库）/ "确认坏图"（移入命中的维度/垃圾桶）
- *   其中“进交付库”不限待确认页——在任意坏图分类里判图合格都是最高频动作，常驻（垃圾桶/重复废弃桶除外，那里已有“还原”）
+ * - 待确认区快捷操作："确认好图"（选档进交付库）/ "确认坏图"（移入命中的维度/废弃库）
+ *   其中“进交付库”不限待确认页——在任意坏图分类里判图合格都是最高频动作，常驻（废弃库/重复废弃桶除外，那里已有“还原”）
+ * - 待确认页（D2 §8）只留三个出口：好图→交付库 / 坏图→瑕疵维度 / 此判定错误·重判。
+ *   “此判定正确”按钮已下线（用户只用“要/不要”两动作）；它的学习职能改由放行(=误判 wrong)、丢废弃库(=判对 correct) 两个真实动作隐式采集（见 ipc.ts moveOne）。
+ *   废弃库、移动到、标签管理在此页隐藏：出口已互斥穷举，真废弃可拖侧栏或放大弹窗判定栏，标签能力被重判面板覆盖。
  * - 物理移动开关 + 快捷键提示
  */
 import { useEffect, useRef, useState } from 'react'
@@ -17,7 +20,10 @@ import {
   CAT_REVIEW,
   CAT_TRASH,
   CAT_DUP_TRASH,
-  DIMENSION_LABELS
+  DEFAULT_TIER_NAMES,
+  DIMENSION_LABELS,
+  type CategoryKey,
+  type TierKey
 } from '../../../shared/types'
 
 export default function SelectionBar(): JSX.Element | null {
@@ -31,18 +37,23 @@ export default function SelectionBar(): JSX.Element | null {
   const askTrash = useStore((s) => s.askTrash)
   const confirmTrashAsk = useStore((s) => s.confirmTrashAsk)
   const dismissTrashAsk = useStore((s) => s.dismissTrashAsk)
-  const correctBatch = useStore((s) => s.correctBatch)
   const openTagManager = useStore((s) => s.openTagManager)
+  const openReviewPanel = useStore((s) => s.openReviewPanel)
   const selectNone = useStore((s) => s.selectNone)
   const invertSelection = useStore((s) => s.invertSelection)
   const selectAll = useStore((s) => s.selectAll)
   const [panel, setPanel] = useState(false)
   const [physical, setPhysical] = useState(false)
+  // “✓ 合格 → 交付库”不再一步直达：交付库不是可直接移入的栏，点开先选一个档位（用户 10-13）
+  const [libPanel, setLibPanel] = useState(false)
+  const tierNames = useStore((s) => s.settings.tierNames) ?? DEFAULT_TIER_NAMES
   const moveWrapRef = useRef<HTMLDivElement>(null)
+  const libWrapRef = useRef<HTMLDivElement>(null)
   const trashWrapRef = useRef<HTMLDivElement>(null)
   const trashPanelRef = useRef<HTMLDivElement>(null)
   // 点“移动到”面板以外的任何地方（选图、点其它按钮）自然收起
   useOutsideClose(panel, () => setPanel(false), moveWrapRef)
+  useOutsideClose(libPanel, () => setLibPanel(false), libWrapRef)
   // 确认框同样点外即关（取消）
   useOutsideClose(trashAsk != null, () => dismissTrashAsk(), trashWrapRef, trashPanelRef)
   // 选中数掉回 1 张以下（Esc/清空选择）时，残留的确认框自动关闭
@@ -57,7 +68,7 @@ export default function SelectionBar(): JSX.Element | null {
   const inDupTrash = activeCategory === CAT_DUP_TRASH
   const inReview = activeCategory === CAT_REVIEW
   const allSelected = n === images.length && images.length > 0
-  // "确认坏图"：把选中图各自的中置信度维度聚合，取出现最多的维度作为目标分类（无则垃圾桶）
+  // "确认坏图"：把选中图各自的中置信度维度聚合，取出现最多的维度作为目标分类（无则废弃库）
   const reviewDim = (() => {
     const count: Record<string, number> = {}
     for (const img of images) {
@@ -84,44 +95,59 @@ export default function SelectionBar(): JSX.Element | null {
         </button>
 
         {inTrash ? (
-          <button className="btn" onClick={() => void useStore.getState().restoreFromTrash()} title="从垃圾桶还原回交付库">
+          <button className="btn" onClick={() => void useStore.getState().restoreFromTrash()} title="从废弃库还原回交付库">
             ♻️ 还原
           </button>
-        ) : (
+        ) : !inReview ? (
           <div className="relative" ref={trashWrapRef}>
             <button
               className={'btn-danger' + (trashAsk ? ' ring-2 ring-bad' : '')}
               onClick={() => askTrash(false)}
-              title="移入垃圾桶（Delete）：单选直接移，多选弹确认"
+              title="移入废弃库（Delete）：单选直接移，多选弹确认"
             >
-              🗑 垃圾桶
+              ✕ 不合格 废弃库
             </button>
-            {/* 多选确认框：向上升起在工具栏上方，文案与放大弹窗的垃圾桶确认一致 */}
+            {/* 多选确认框：向上升起在工具栏上方，文案与放大弹窗的废弃库确认一致 */}
             {trashAsk && (
               <div ref={trashPanelRef} className="absolute bottom-full mb-2 left-0 w-[340px] bg-panel border border-line rounded-lg shadow-2xl p-3 z-40 fade-in">
-                <div className="text-sm font-bold text-fg mb-1.5">确定把这 {selection.size} 张图移入垃圾桶？</div>
+                <div className="text-sm font-bold text-fg mb-1.5">确定把这 {selection.size} 张图移入废弃库？</div>
                 <div className="text-xs text-fg2 leading-relaxed mb-2.5">
-                  标签全部保留作为废弃原因；图会从交付库/待确认/自定义和所有维度分类视图消失，只出现在垃圾桶里，可随时还原。
+                  标签全部保留作为废弃原因；图会从交付库/待确认/自定义和所有维度分类视图消失，只出现在废弃库里，可随时还原。
                 </div>
                 <div className="flex gap-2">
-                  <button className="btn-danger flex-1 text-xs" onClick={confirmTrashAsk}>确认移入垃圾桶</button>
+                  <button className="btn-danger flex-1 text-xs" onClick={confirmTrashAsk}>确认移入废弃库</button>
                   <button className="btn text-xs text-fg2" onClick={dismissTrashAsk}>取消</button>
                 </div>
               </div>
             )}
           </div>
-        )}
+        ) : null}
 
         {/* “判合格→交付库”常驻：以前只在待确认页有，在闭眼/模糊等坏图页判误判只能展开“移动到”两跳。
-            垃圾桶与重复废弃桶不显（那里已有♻️ 还原）、交付库页本身不显（图已在此） */}
+            废弃库与重复废弃桶不显（那里已有♻️ 还原）、交付库页本身不显（图已在此）。
+            交付库不再是可直接移入的目标，点开先选一个档位（= 放行入该档） */}
         {!inTrash && !inDupTrash && activeCategory !== CAT_LIBRARY && (
-          <button
-            className="btn bg-emerald-700 hover:bg-emerald-600 text-white border-transparent"
-            onClick={() => void moveTo(CAT_LIBRARY)}
-            title={inReview ? '确认是好图 → 移入【交付库】（可导出、不进坏图分类）' : '确认合格 → 移入【交付库】（= 移动到 → 交付库，只清除缺陷类标签，人数与黑白照标签保留，可导出）'}
-          >
-            {inReview ? '✓ 好图 → 交付库' : '✓ 合格 → 交付库'}
-          </button>
+          <div className="relative" ref={libWrapRef}>
+            <button
+              className="btn bg-emerald-700 hover:bg-emerald-600 text-white border-transparent"
+              onClick={() => setLibPanel((v) => !v)}
+              title={inReview ? '确认是好图：选一个档位放行入【交付库】（可导出、不进坏图分类）' : '确认合格：选一个档位放行入【交付库】（清除缺陷类标签，人数与黑白照标签保留）'}
+            >
+              {inReview ? '✓ 好图 → 交付库' : '✓ 合格 → 交付库'} ▾
+            </button>
+            {libPanel && (
+              <div className="absolute bottom-full mb-2 left-0 w-[340px] bg-panel border border-line rounded-lg shadow-2xl p-2.5 z-40 fade-in">
+                <div className="text-xs text-gray-500 mb-2 px-0.5 whitespace-nowrap">放行入交付库·选一个档位（同时清除缺陷类标签）</div>
+                <div className="grid grid-cols-3 gap-2">
+                  {([1, 2, 3] as TierKey[]).map((t) => (
+                    <button key={t} className={`${t === 1 ? 'btn-good' : t === 2 ? 'btn-primary' : 'btn-neutral'} py-2.5 text-sm whitespace-nowrap`} onClick={() => { void moveTo(`tier:${t}` as CategoryKey); setLibPanel(false) }}>
+                      {tierNames[t - 1] || t}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         )}
         {inReview && (
           <>
@@ -131,24 +157,29 @@ export default function SelectionBar(): JSX.Element | null {
               title={
                 reviewDim
                   ? `确认是坏图 → 移入【${DIMENSION_LABELS[reviewDim as keyof typeof DIMENSION_LABELS]}】分类（永不导出）`
-                  : '确认是坏图 → 移入【垃圾桶】（永不导出）'
+                  : '确认是坏图 → 移入【废弃库】（永不导出）'
               }
             >
-              ✗ 坏图 → {reviewDim ? DIMENSION_LABELS[reviewDim as keyof typeof DIMENSION_LABELS] : '垃圾桶'}
+              ✗ 坏图 → {reviewDim ? DIMENSION_LABELS[reviewDim as keyof typeof DIMENSION_LABELS] : '废弃库'}
             </button>
           </>
         )}
 
-        <div className="relative" ref={moveWrapRef}>
+        <div className="relative" ref={moveWrapRef} style={inReview ? { display: 'none' } : undefined}>
           <button className="btn-primary" onClick={() => setPanel((v) => !v)}>
             移动到 ▾
           </button>
           {panel && (
             <div className="absolute bottom-full mb-2 right-0 w-80 max-h-[70vh] overflow-y-auto bg-panel border border-line rounded-lg shadow-2xl p-2 grid grid-cols-3 gap-1 text-xs fade-in z-40">
-              <div className="col-span-3 text-gray-500">状态分类（维度归类请用🏷 标签）：</div>
-              <button className="btn col-span-3 bg-good/20 border-good/50 text-good" onClick={() => { void moveTo(CAT_LIBRARY, physical); setPanel(false) }}>
-                交付库（正常图片，同时清除缺陷类标签）
-              </button>
+              <div className="col-span-3 text-gray-500">交付库 · 选一个档位（= 放行，同时清除缺陷类标签）：</div>
+              <div className="col-span-3 grid grid-cols-3 gap-2">
+                {([1, 2, 3] as TierKey[]).map((t) => (
+                  <button key={t} className={`${t === 1 ? 'btn-good' : t === 2 ? 'btn-primary' : 'btn-neutral'} py-2.5 text-sm whitespace-nowrap`} onClick={() => { void moveTo(`tier:${t}` as CategoryKey, physical); setPanel(false) }}>
+                    {tierNames[t - 1] || t}
+                  </button>
+                ))}
+              </div>
+              <div className="col-span-3 text-gray-500 mt-1">其它状态（维度归类请用🏷 标签）：</div>
               <button className="btn col-span-3 bg-warn/20 border-warn/50 text-warn" onClick={() => { void moveTo(CAT_REVIEW, physical); setPanel(false) }}>
                 待确认（同时清除缺陷类标签）
               </button>
@@ -159,7 +190,7 @@ export default function SelectionBar(): JSX.Element | null {
                 </button>
               ))}
               <button className="btn col-span-3 mt-1 bg-bad/20 border-bad/50 text-bad" onClick={() => { setPanel(false); askTrash(physical) }}>
-                垃圾桶（保留标签作为废弃原因）
+                废弃库（保留标签作为废弃原因）
               </button>
               <div className="col-span-3 mt-1">
                 <label className="flex items-center gap-1.5 text-gray-400 cursor-pointer">
@@ -171,23 +202,24 @@ export default function SelectionBar(): JSX.Element | null {
           )}
         </div>
 
-        {/* 批量判定：对选中所有图记录修正学习（与放大弹窗的 JudgmentBar 同源）。
-            文案与弹窗一致带上“仅记录”，因为待确认页旁边就是“✓ 好图 → 交付库”，两个都叫
-            “确认”会让人以为点这个也算放行 */}
-        <button
-          className="btn bg-emerald-700 hover:bg-emerald-600 text-white border-transparent text-xs whitespace-nowrap"
-          onClick={() => void correctBatch([...selection], 'correct')}
-          title="确认选中图的 AI 判定正确，仅记录一条“判对”样本用于阈值微调：图片不移动、不改归属、不清标签（待确认的图仍留在待确认，要放行请用左边的 ✓ 好图 → 交付库）"
-        >
-          此判定正确（仅记录）
-        </button>
-        <button
-          className="btn bg-orange-500 hover:bg-orange-600 text-white border-transparent text-xs whitespace-nowrap font-medium"
-          onClick={() => openTagManager([...selection])}
-          title="标签管理器：对选中的全部图删除标错的标签 / 补上 AI 漏检的标签（添加后图同时出现在该维度分类并排第一，不是移动）"
-        >
-          {selection.size > 1 ? '批量标签管理' : '标签管理'}
-        </button>
+        {inReview && (
+          <button
+            className="btn bg-orange-500 hover:bg-orange-600 text-white border-transparent text-xs whitespace-nowrap font-medium"
+            onClick={() => openReviewPanel([...selection])}
+            title="重判面板：批量逐项改正——人数选归属，瑕疵逐项“该有/不该有/不动”（勾加、叉删、没动留，异构批量不压平），提交后离开待确认"
+          >
+            此判定错误·重判
+          </button>
+        )}
+        {!inReview && (
+          <button
+            className="btn bg-orange-500 hover:bg-orange-600 text-white border-transparent text-xs whitespace-nowrap font-medium"
+            onClick={() => openTagManager([...selection])}
+            title="给选中的全部图批量增删标签"
+          >
+            {selection.size > 1 ? '批量标签管理' : '标签管理'}
+          </button>
+        )}
 
         <span className="text-[10px] text-gray-600 hidden md:inline whitespace-nowrap">
           也可直接拖拽缩略图到左侧分类

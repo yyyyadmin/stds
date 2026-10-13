@@ -24,33 +24,43 @@ async function loadGray(path: string, maxSide = 800): Promise<{ gray: Float64Arr
   return { gray: new Float64Array(data), w: info.width, h: info.height, rgb: null }
 }
 
-function laplacianVar(gray: Float64Array, w: number, h: number): number {
-  // 4 邻域拉普拉斯
-  let sum = 0
-  let sum2 = 0
-  let n = 0
-  for (let y = 1; y < h - 1; y++) {
-    const row = y * w
-    for (let x = 1; x < w - 1; x++) {
-      const i = row + x
-      const v = 4 * gray[i] - gray[i - 1] - gray[i + 1] - gray[i - w] - gray[i + w]
-      sum += v
-      sum2 += v * v
-      n++
-    }
-  }
-  if (!n) return 9999
-  const mean = sum / n
-  return sum2 / n - mean * mean
-}
-
 function sigmoid(z: number): number {
   return 1 / (1 + Math.exp(-z))
 }
 
-/** 模糊：Laplacian 方差映射置信度（与 Python 引擎同一标定：只认严重模糊，方差>35 不标） */
-function blurConf(variance: number): number {
-  return Math.min(0.99, 0.88 * sigmoid((24 - variance) / 7))
+/** 模糊：整图 4x4 分块统计"有内容但糊"的面积占比（与 Python 引擎同步：占图过半且完全看不清才判）。
+ * node 降级引擎无人脸，不做背景虚化的脸门封顶——背景虚化人像在降级模式下可能仍进待确认，可接受。 */
+function blurConf(gray: Float64Array, w: number, h: number): { conf: number; ratio: number } {
+  const GRID = 4
+  const bh = Math.max(1, Math.floor(h / GRID))
+  const bw = Math.max(1, Math.floor(w / GRID))
+  let blurry = 0
+  let detail = 0
+  for (let gy = 0; gy < GRID; gy++) {
+    for (let gx = 0; gx < GRID; gx++) {
+      const x0 = gx * bw, y0 = gy * bh
+      const x1 = Math.min(w, x0 + bw), y1 = Math.min(h, y0 + bh)
+      let mn = Infinity, mx = -Infinity
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+        const v = gray[y * w + x]
+        if (v < mn) mn = v
+        if (v > mx) mx = v
+      }
+      if (mx - mn < 12) continue // 平坦块：无内容，不计入分母
+      detail++
+      let sum = 0, sum2 = 0, n = 0
+      for (let y = Math.max(y0, 1); y < Math.min(y1, h - 1); y++) for (let x = Math.max(x0, 1); x < Math.min(x1, w - 1); x++) {
+        const i = y * w + x
+        const lv = 4 * gray[i] - gray[i - 1] - gray[i + 1] - gray[i - w] - gray[i + w]
+        sum += lv; sum2 += lv * lv; n++
+      }
+      if (!n) continue
+      const bv = sum2 / n - (sum / n) * (sum / n)
+      if (bv < 25) blurry++ // 有内容但糊
+    }
+  }
+  const ratio = detail ? blurry / detail : 0
+  return { conf: Math.min(0.99, 0.90 * sigmoid((ratio - 0.55) / 0.12)), ratio }
 }
 
 async function statsRgb(path: string): Promise<{ rgb: RawImage }> {
@@ -89,7 +99,8 @@ function exposureConf(rgb: RawImage): { conf: number; reason: string } {
   const loRatio = lo / n
   // 与 Python 引擎同步：只判严重曝光异常，普通暗图/局部灯光不标（高光≥~30%且极亮，或死黑丢细节）
   const over = sigmoid((hiRatio - 0.3) / 0.07) * sigmoid((mean - 80) / 6)
-  const under = sigmoid((6 - mean) / 1.8) * sigmoid((loRatio - 0.88) / 0.05)
+  // 欠曝极严（与 Python 同步）：新增"无高光(hiRatio≈0) 且对比塔缩(std 低)"两门，排除夜景误判
+  const under = sigmoid((3 - mean) / 1.0) * sigmoid((0.01 - hiRatio) / 0.005) * sigmoid((4 - std) / 1.5)
   const conf = Math.min(0.99, Math.max(over, under))
   const dir = over >= under ? '过曝' : '欠曝'
   return { conf, reason: `亮度均值 ${mean.toFixed(1)} 高光 ${(hiRatio * 100).toFixed(1)}% 暗部 ${(loRatio * 100).toFixed(1)}% -> ${dir}` }
@@ -184,13 +195,13 @@ export class NodeEngine {
   async detect(path: string, imageId: number): Promise<Record<string, unknown>> {
     try {
       const { gray, w, h } = await loadGray(path)
-      const variance = laplacianVar(gray, w, h)
+      const blur = blurConf(gray, w, h)
       const { rgb } = await statsRgb(path)
       const exp = exposureConf(rgb)
       const bw = blackWhiteConf(rgb)
       const hash = await phash(path)
       const dims: Record<string, { confidence: number; reason: string; method: string }> = {
-        blur: { confidence: blurConf(variance), reason: `清晰度方差 ${variance.toFixed(0)}（背景虚化需人工复核）`, method: 'laplacian-node' },
+        blur: { confidence: blur.conf, reason: `模糊面积占比 ${(blur.ratio * 100).toFixed(0)}%（node 降级引擎无脸门）`, method: 'laplacian-node' },
         exposure: { confidence: exp.conf, reason: exp.reason, method: 'histogram-node' },
         black_white: { confidence: bw.conf, reason: bw.reason, method: 'channels-node' }
       }

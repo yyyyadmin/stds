@@ -21,34 +21,53 @@ def _sigmoid(z):
 # ---------- 画面模糊 ----------
 
 def blur_score(bgr, faces):
-    """返回 (confidence 模糊成立的可信度, reason)。只认严重模糊（用户口径：大面积糊/
-    看不清人脸/严重虚化才算）——v2.0.62 真实 3190 张中旧曲线在方差 30~60 灰区就给 0.6~0.85，
-    741 张不糊的片被标进模糊视图；新曲线拐点下推：脸区最差方差 <15 才进高置信，>35 不标。"""
+    """只判大面积、完全看不清的模糊（用户口径：占图一半以上、完全看不清才算；局部晕光/
+    小部分聚焦模糊/背景虚化不算）。v2.0.64 真值：旧版用"最差脸 ROI 方差"，一张脸稍糊就标，
+    用户删除(FP 476) vs 保留(TP 322)两群的方差分布完全重叠(min 都 0、中位 4~6)，调阈值无解——
+    本版换信号维度：整图 4x4 分块统计"有内容但糊"的面积占比，并要求主体(脸)也不清晰：
+    - 背景虚化(大光圈人像)：脸区清晰 → 封顶待确认，不进模糊分类
+    - 局部失焦/晕光：糊块占比低 → sigmoid 压到不标
+    - 整图糊到看不清：糊块过半且脸也糊 → 高置信"""
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
     if max(h, w) > 900:
         s = 900.0 / max(h, w)
         gray = cv2.resize(gray, None, fx=s, fy=s)
+    H, W = gray.shape
     full_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-    # 人脸 ROI 单独测（背景虚化是常见创作手法，脸糊才是坏片）
-    roi_vars = []
-    for f in faces[:4]:
-        x, y, fw, fh = f["box"]
-        crop = gray[int(y):int(y + fh), int(x):int(x + fw)]
-        if crop.size > 200:
-            roi_vars.append(float(cv2.Laplacian(crop, cv2.CV_64F).var()))
-    if roi_vars:
-        ref = min(roi_vars)  # 最差的脸
-        mode = "face"
-    else:
-        ref = full_var
-        mode = "full"
-    # 二次验证：高频能量占比（FFT 上半区能量），降为辅助权重
-    hp = _highpass_ratio(gray)
-    # 标定：方差 <10 严重糊→0.85+；15~25 中度→待确认；>35 清晰→不标
-    conf = 0.88 * _sigmoid((24.0 - ref) / 7.0) + 0.12 * _sigmoid((0.010 - hp) / 0.004)
+    # 4x4 分块：每块测 Laplacian 方差 + 灰度动态范围，区分"糊"与"平坦无纹理"(天空/纯色墙)
+    GRID = 4
+    bh, bw = max(1, H // GRID), max(1, W // GRID)
+    blurry_blocks = detail_blocks = 0
+    for gy in range(GRID):
+        for gx in range(GRID):
+            blk = gray[gy * bh:(gy + 1) * bh, gx * bw:(gx + 1) * bw]
+            if blk.size < 100:
+                continue
+            if float(blk.max()) - float(blk.min()) < 12:  # 平坦块：无内容，不计入分母
+                continue
+            detail_blocks += 1
+            if float(cv2.Laplacian(blk, cv2.CV_64F).var()) < 25.0:  # 有内容但糊
+                blurry_blocks += 1
+    blur_ratio = blurry_blocks / detail_blocks if detail_blocks else 0.0
+    # 主体门：有脸取脸区平均方差（非最差），脸清晰=背景虚化不是废片
+    face_var = None
+    if faces:
+        fv = []
+        for f in faces[:4]:
+            x, y, fw, fh = f["box"]
+            crop = gray[int(y):int(y + fh), int(x):int(x + fw)]
+            if crop.size > 200:
+                fv.append(float(cv2.Laplacian(crop, cv2.CV_64F).var()))
+        if fv:
+            face_var = sum(fv) / len(fv)
+    conf = 0.90 * _sigmoid((blur_ratio - 0.55) / 0.12)
+    if face_var is not None and face_var > 30.0:
+        conf = min(conf, 0.50)  # 主体清晰（背景虚化）：封顶只进待确认，不直接判模糊
     conf = float(np.clip(conf, 0, 0.99))
-    return conf, "清晰度方差 %.0f(%s) 高频占比 %.4f" % (ref, mode, hp)
+    return conf, "模糊面积占比 %.0f%%(%d/%d块) 全图方差 %.0f 脸区方差 %s" % (
+        blur_ratio * 100.0, blurry_blocks, detail_blocks, full_var,
+        ("%.0f" % face_var) if face_var is not None else "无脸")
 
 
 def _highpass_ratio(gray):
@@ -79,8 +98,11 @@ def exposure_score(bgr):
     hi_ratio = float((L >= 96).mean())
     lo_ratio = float((L <= 6).mean())
     over = _sigmoid((hi_ratio - 0.30) / 0.07) * _sigmoid((mean - 80) / 6)
-    under = _sigmoid((6.0 - mean) / 1.8) * _sigmoid((lo_ratio - 0.88) / 0.05)
-    flat = _sigmoid((6.5 - std) / 2.0) * 0.5  # 对比度塌缩只作参考，封顶 0.5 低于各档 mid 阈值附近
+    # 欠曝极严（v2.0.64 真值）：旧版 lo_ratio≥0.88 即判欠曝，误杀 72 张夜景/暗场（它们 mean 1~4
+    # 但 std 5~15 有灯光细节）。用户口径"夜晚灯光/舞台/正常环境光不算"——新增"无任何高光
+    # (hi_ratio≈0) 且对比塔缩(std 低)"两门，只留真·死黑丢光废片。
+    under = _sigmoid((3.0 - mean) / 1.0) * _sigmoid((0.01 - hi_ratio) / 0.005) * _sigmoid((4.0 - std) / 1.5)
+    flat = _sigmoid((6.5 - std) / 2.0) * 0.5  # 对比度塔缩只作参考，封顶 0.5 低于各档 mid 阈值附近
     conf = float(np.clip(max(over, under, flat), 0, 0.99))
     direction = "过曝" if over == max(over, under, flat) else ("欠曝" if under == max(over, under, flat) else "对比度异常")
     return conf, "亮度均值 %.1f std %.1f 高光 %.2f 暗部 %.2f -> %s" % (mean, std, hi_ratio, lo_ratio, direction)
@@ -167,6 +189,9 @@ def half_head_score(bgr_shape, faces, upper_bodies, scale):
     EDGE_MARGIN = 0.012    # 贴边阈值（归一化，约占图宽 1.2%）
     CROP_MIN_FACE = 0.12   # 脸高/脸宽占图低于此值不算半截头（防小脸误报）
     FACE_MIN_SIZE = 0.06   # 脸高低于此值视为背景人物，完全跳过
+    FACE_MAX_SUBJECT = 0.28  # 脸占图高超过此值=近景特写：贴边多为构图（框到边≠头被裁）。
+                             # v2.0.64 真值：用户删除的半截头误检脸占比中位 30%，保留的判对中位 18%，
+                             # 分离清晰——大脸特写贴边降为待确认，不直接判半截头（不改动贴边主模型）。
     reasons = []
     conf = 0.0
 
@@ -200,6 +225,8 @@ def half_head_score(bgr_shape, faces, upper_bodies, scale):
             continue
         edge_dist = min(x, y, 1 - x - bw, 1 - y - bh)  # 到最近边缘距离（贴边时 < EDGE_MARGIN）
         crop_conf = max(0.0, min(0.98, 1.0 - edge_dist / (EDGE_MARGIN * 3)))
+        if bh > FACE_MAX_SUBJECT and crop_conf > 0.78:
+            crop_conf = 0.78  # 大脸特写贴边：封顶到待确认区（mid），不直接标高置信半截头
         sides = []
         if y < EDGE_MARGIN:
             sides.append("上/头顶")

@@ -1,6 +1,6 @@
 /**
  * 主工作台：左分类树 + 顶栏（导入/筛选/进度/视图/排序/导出/设置）+ 视图区 + 预览层 + 多选浮动栏
- * 全局快捷键：1/2/3 切视图（9.2），4 看大图（与双击小图同一个弹窗），Del 移垃圾桶，Ctrl+A 全选，Esc 关闭
+ * 全局快捷键：1/2/3 切视图（9.2），4 看大图（与双击小图同一个弹窗），Del 移废弃库，Ctrl+A 全选，Esc 关闭
  */
 import { useEffect, useState } from 'react'
 import { useStore } from './store'
@@ -9,6 +9,7 @@ import TopBar from './components/TopBar'
 import ImageView, { BusyOverlay } from './components/ImageView'
 import PreviewModal from './components/PreviewModal'
 import { TagManagerModal } from './components/TagEditor'
+import ReviewPanel from './components/ReviewPanel'
 import SelectionBar from './components/SelectionBar'
 import ExportDialog from './components/ExportDialog'
 import SettingsDialog from './components/SettingsDialog'
@@ -16,6 +17,7 @@ import DropZone from './components/DropZone'
 import LoginDialog from './components/LoginDialog'
 import MemberCenterDialog from './components/MemberCenterDialog'
 import UpdateDialog from './components/UpdateDialog'
+import FailedImagesDialog from './components/FailedImagesDialog'
 
 export default function App(): JSX.Element {
   const ready = useStore((s) => s.ready)
@@ -26,8 +28,10 @@ export default function App(): JSX.Element {
   const showLogin = useStore((s) => s.showLogin)
   const showMember = useStore((s) => s.showMember)
   const showUpdate = useStore((s) => s.showUpdate)
+  const showFailedImages = useStore((s) => s.showFailedImages)
   const tagManagerIds = useStore((s) => s.tagManagerIds)
   const closeTagManager = useStore((s) => s.closeTagManager)
+  const reviewPanelIds = useStore((s) => s.reviewPanelIds)
   const tagBusy = useStore((s) => s.tagBusy)
   const toast = useStore((s) => s.toast)
   const dismissToast = useStore((s) => s.dismissToast)
@@ -53,7 +57,7 @@ export default function App(): JSX.Element {
         }
         return
       }
-      const dialogOpen = showExport || showSettings || showLogin || showMember || showUpdate
+      const dialogOpen = showExport || showSettings || showLogin || showMember || showUpdate || showFailedImages
       if (!previewId && !dialogOpen) {
         if (e.key === '1') void setViewMode('grid')
         if (e.key === '2') void setViewMode('list')
@@ -64,7 +68,7 @@ export default function App(): JSX.Element {
           const s = useStore.getState()
           if (s.selection.size) {
             if (s.activeCategory === 'trash') void s.restoreFromTrash()
-            // 单选直接移入垃圾桶；多选（≥2）走 SelectionBar 的确认框（与按钮行为一致）
+            // 单选直接移入废弃库；多选（≥2）走 SelectionBar 的确认框（与按钮行为一致）
             else s.askTrash()
           }
         }
@@ -90,7 +94,7 @@ export default function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [previewId, showExport, showSettings, showLogin, showMember, showUpdate, tagManagerIds, closeTagManager, setViewMode, stepPreview, closePreview])
+  }, [previewId, showExport, showSettings, showLogin, showMember, showUpdate, showFailedImages, tagManagerIds, closeTagManager, setViewMode, stepPreview, closePreview])
 
   // toast 自动消失：移动类即时反馈 1 秒自收（调用方传 duration），其余默认 6 秒供读完错误信息
   useEffect(() => {
@@ -155,11 +159,13 @@ export default function App(): JSX.Element {
           <SelectionBar />
           {previewId != null && <PreviewModal />}
           {tagManagerIds != null && <TagManagerModal />}
+          {reviewPanelIds != null && <ReviewPanel />}
           {showExport && <ExportDialog />}
           {showSettings && <SettingsDialog />}
           {showLogin && <LoginDialog />}
           {showMember && <MemberCenterDialog />}
           {showUpdate && <UpdateDialog />}
+          {showFailedImages && <FailedImagesDialog />}
           {/* 标签写入中：不阻断操作的进度胶囊（乐观更新已先改好界面，这里只说明“正在喂 AI”） */}
           {tagBusy && (
             <div className="fixed inset-x-0 bottom-0 z-[60] flex justify-center pointer-events-none pb-3">

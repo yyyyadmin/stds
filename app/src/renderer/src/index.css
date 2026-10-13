@@ -110,6 +110,10 @@ body {
   .btn-good {
     @apply px-3 py-1.5 rounded-md text-sm bg-good hover:bg-[#15803d] text-white transition-colors cursor-pointer border border-transparent;
   }
+  /* 中性灰实心按钮（交付库「一般」档）：与档位标签 bg-gray-500(=fg3) 同色，hover 转深一档 fg2 提对比 */
+  .btn-neutral {
+    @apply px-3 py-1.5 rounded-md text-sm bg-fg3 hover:bg-fg2 text-white transition-colors cursor-pointer border border-transparent;
+  }
   .btn-ghost {
     @apply px-2 py-1 rounded-md text-sm hover:bg-panel2 transition-colors cursor-pointer border border-transparent;
   }

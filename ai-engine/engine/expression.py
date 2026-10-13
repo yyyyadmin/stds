@@ -12,10 +12,81 @@ from .face import eye_rois
 
 EMOTION_LABELS_NEG = ("angry", "disgust", "contempt", "fear")
 
+# ===== 表情崩坏（v2.0.67 用户真值标定，基于 MediaPipe blendshape）=====
+# 主信号 = 眼睛挤没(eyeSquint)，与嘴大无关：全库嘴最大的 CHEN0046(jaw0.49、eyeSq0.32) 是
+# 幸福笑=留；三张"因表情而弃"（CHEN9541/9715/9567）eyeSquint 全 ≥0.65；所有"眼没挤"的
+# （≤0.37）无论去留都不误伤。拍照眼睛本就微眯（基线 p50≈0.39），故 0.50 以下零分。
+# 佐证只认"丑"的嘴型（大张嘴/横拉/龇牙）与仰头——【嘴咧着笑(mouthSmile) 故意不算佐证】：
+# 幸福笑脸也挤眼（CHEN9951 eyeSq0.74 但只是咧嘴笑=正常留），只有"挤眼+嘴张开/横拉/仰头"才是崩坏。
+# 仅"挤眼"而无嘴/仰头佐证 → 封顶待确认(0.78)；侧脸（|yaw|>35°）降权——表情维度必配姿态门控。
+ESQ_ZERO = 0.50    # eyeSquint 低于此零分（微眯基线）
+ESQ_FULL = 0.68    # eyeSquint 高于此满分（挤没）
+_YAW_CAP_DEG = 35.0  # 侧脸阈值：超过则置信封顶待确认（blendshape 在侧脸不稳）
+
+
+def _clip01(v):
+    return max(0.0, min(1.0, v))
+
+
+def _avg2(b, k1, k2):
+    v = [b[k] for k in (k1, k2) if k in b]
+    return sum(v) / len(v) if v else 0.0
+
+
+def _pose_from_matrix(matrix):
+    """从 MediaPipe 4x4 姿态矩阵解 (yaw, pitch) 度；取不出返回 (0,0)。
+    matrix 是嵌套 list，必须 np.array(matrix)[:3,:3]（不能 matrix[:3,:3]）。"""
+    if not matrix:
+        return 0.0, 0.0
+    try:
+        R = np.array(matrix, dtype=float)[:3, :3]
+        pitch = math.degrees(math.atan2(R[2, 1], R[2, 2]))
+        yaw = math.degrees(math.atan2(-R[2, 0], max(1e-6, math.hypot(R[0, 0], R[1, 0]))))
+        return float(yaw), float(pitch)
+    except Exception:  # noqa: BLE001
+        return 0.0, 0.0
+
 
 class ExpressionAnalyzer:
     def __init__(self):
         self.emotion = OnnxSession(["*emotion*.onnx", "fer2013*.onnx", "ufeee*.onnx"], 224)
+
+    def expression_breakdown(self, faces):
+        """表情崩坏置信度：眼睛挤没(eyeSquint)为主、大张嘴/龇牙/横拉/仰头佐证（嘴咧着笑不算）、侧脸降权。
+        取各脸最坏值（任一张脸崩坏即整图瑕疵，与闭眼同逻辑）。无任何脸带 blendshape 时返回 0（保守）。"""
+        best = 0.0
+        best_why = ""
+        for f in faces[:6]:
+            mp = f.get("mp") or {}
+            b = mp.get("blend") or {}
+            if not b:
+                continue
+            esq = _avg2(b, "eyeSquintLeft", "eyeSquintRight")
+            if esq < ESQ_ZERO:
+                continue
+            p = _clip01((esq - ESQ_ZERO) / (ESQ_FULL - ESQ_ZERO))
+            cor = []
+            if b.get("jawOpen", 0.0) >= 0.22:
+                cor.append("大张嘴")
+            # mouthSmile 故意不作佐证：幸福笑也挤眼，只有"挤眼+嘴张开/横拉/仰头"才是崩坏。
+            if b.get("noseSneerLeft", 0.0) + b.get("noseSneerRight", 0.0) >= 0.30:
+                cor.append("龇牙")
+            if _avg2(b, "mouthStretchLeft", "mouthStretchRight") >= 0.15:
+                cor.append("横拉")
+            yaw, pitch = _pose_from_matrix(mp.get("matrix"))
+            if abs(pitch) >= 18.0:
+                cor.append("仰头")
+            conf = p if cor else min(p, 0.78)        # 只挤眼、无嘴/头佐证 → 最多待确认
+            side = abs(yaw) > _YAW_CAP_DEG
+            if side:
+                conf = min(conf, 0.82)               # 侧脸：blendshape 不稳，降权封顶
+            if conf > best:
+                best = conf
+                best_why = "眼挤%.2f%s%s" % (
+                    esq,
+                    ("＋" + "/".join(cor)) if cor else "（无佐证→待确认）",
+                    ("｜侧脸%.0f°降权" % yaw) if side else "")
+        return float(best), best_why
 
     def subfeatures(self, bgr, faces, closed_probs):
         """返回 (triggered: list[str], confidence, reason)"""

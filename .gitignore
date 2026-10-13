@@ -26,6 +26,12 @@ ai-engine/models/*.onnx
 *.log
 logs/
 
+# 离线核查脚本（tier-report / rescan-impact 等）的临时输出，只用来当场看数，不入库
+app/scripts/_*.txt
+# 体检/试点脚本的一次性输出（只读诊断产物，不进版本库）
+scripts/_*.txt
+app/scripts/_*.json
+
 # 系统/编辑器杂项
 .DS_Store
 Thumbs.db
@@ -35,3 +41,8 @@ Thumbs.db
 
 # Superpowers SDD 工作区（计划执行的账本/评审临时文件，不入库）
 .superpowers/
+
+# 模型由 CI 的 fetch-models 自动下载，不进仓库
+ai-engine/models/*.tflite
+# 本地归档（校准数据/客户图），含隐私，禁止上传
+归档/

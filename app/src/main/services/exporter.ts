@@ -1,7 +1,9 @@
 /**
  * 导出模块（第六章）
- * - 垃圾桶自动排除（任何模式）；待确认默认排除（可勾选包含）
- * - 模式：include 包含式 / exclude 排除式 / library 交付库 / all 全部（垃圾桶除外）
+ * - 废弃库自动排除（任何模式）；待确认默认排除（可勾选包含）
+ * - 模式：include 包含式 / exclude 排除式 / library 交付库 / all 全部（废弃库除外）
+ * - 交付库档位（D4 用户规则）：library 模式统一落 交付库/<档位名>/ 二级子目录，
+ *   不再按人数主分类分 folder；包含/排除式勾选档位子类目时同口径
  * - 选项：目标目录、格式转换（sharp）、按分类建子文件夹、保留原名、重名处理、物理移动
  * - 进度事件 + 取消
  */
@@ -9,16 +11,21 @@ import { copyFileSync, existsSync, mkdirSync, renameSync, statSync } from 'fs'
 import { basename, extname, join } from 'path'
 import { EventEmitter } from 'events'
 import sharp from 'sharp'
-import { getDb } from '../db'
+import { getDb, getSettings } from '../db'
 import {
   BAD_DIMENSIONS,
   CAT_LIBRARY,
+  CAT_FLAWS,
   CAT_REVIEW,
   CAT_TRASH,
   CAT_DUP_TRASH,
   isTrashLike,
-  isLibraryBucket,
+  isDeliverable,
+  flawLevel,
+  tierOfCat,
+  DEFAULT_TIER_NAMES,
   DIMENSION_LABELS,
+  STRUCTURAL_DIMENSIONS,
   NEUTRAL_DIMENSIONS
 } from '../../shared/types'
 import type { CategoryKey } from '../../shared/types'
@@ -33,6 +40,12 @@ export interface ExportOptions {
   keepNames: boolean
   physicalMove: boolean
   conflict: 'number' | 'skip' | 'overwrite'
+  /** 仅 library 模式：勾选要导的档位，空/undefined = 全部 */
+  tiers?: import('../../shared/types').TierKey[]
+  /** 仅 library 模式：flat = 合并到一个目录，subdirs = 按档位建子目录 */
+  tierLayout?: 'flat' | 'subdirs'
+  /** 仅 library + flat：输出文件夹名（默认“交付库”） */
+  folderName?: string
 }
 
 export interface ExportProgress {
@@ -51,29 +64,38 @@ class Exporter extends EventEmitter {
    *  关键：包含/排除式对"维度分类"采用与侧栏一致的标签并集口径——一张图只要带了该维度
    *  的中/高置信标签就算命中该分类（即使它的主 category 是别的），使"分类里多少张就导多少张"。
    *  一图命中多个勾选分类时，按分类各产出一条 → 各自进对应子目录（多分类=多目录+各自真实数量）。 */
-  buildList(opts: ExportOptions): Array<{ id: number; path: string; category: CategoryKey; filename: string }> {
+  buildList(opts: ExportOptions): Array<{ id: number; path: string; category: CategoryKey; filename: string; tier: number | null; fileSize: number }> {
     const rows = getDb()
-      .prepare(`SELECT id, path, category, filename, tags, status FROM images WHERE category NOT IN ('trash','dup_trash') AND status != 'skip'`)
-      .all() as Array<{ id: number; path: string; category: string; filename: string; tags: string | null; status: string }>
+      .prepare(`SELECT id, path, category, filename, tags, tier, status, file_size FROM images WHERE category NOT IN ('trash','dup_trash') AND status != 'skip'`)
+      .all() as Array<{ id: number; path: string; category: string; filename: string; tags: string | null; tier: number | null; status: string; file_size: number }>
     const selected = new Set(opts.categories)
-    const out: Array<{ id: number; path: string; category: CategoryKey; filename: string }> = []
+    const out: Array<{ id: number; path: string; category: CategoryKey; filename: string; tier: number | null; fileSize: number }> = []
     for (const r of rows) {
-      if (isTrashLike(r.category)) continue // 双保险：垃圾桶/重复废弃桶永不导出
+      if (isTrashLike(r.category)) continue // 双保险：废弃库/重复废弃桶永不导出
       // 待确认门槛只作用于“泛取”模式（all/exclude/library 会顺带扫进主分类为待确认的图）。
       // include（只导出勾选分类）模式下用户已显式选中该分类，其标签并集成员里主分类恰为
       // 待确认的图必须一并导出，否则导出数会小于侧栏徽章数（“数量对不上”）。
       if (!opts.includeReview && opts.mode !== 'include' && r.category === CAT_REVIEW) continue
       const tags = this.parseTags(r)
-      const mk = (cat: CategoryKey) => out.push({ id: r.id, path: r.path, category: cat, filename: r.filename })
+      const mk = (cat: CategoryKey) => out.push({ id: r.id, path: r.path, category: cat, filename: r.filename, tier: r.tier, fileSize: r.file_size || 0 })
       switch (opts.mode) {
         case 'library':
-          if (this.isLibrary(r.category)) mk(r.category)
+          // 交付库导出统一按 CAT_LIBRARY 落盘；新版支持只导指定档位
+          if (isDeliverable(r.category, tags)) {
+            if (opts.tiers && opts.tiers.length > 0 && r.tier != null && !opts.tiers.includes(r.tier as 1 | 2 | 3)) break
+            mk(CAT_LIBRARY)
+          }
           break
         case 'all':
           mk(r.category)
           break
         case 'include':
-          for (const c of selected) if (this.matchesCat(r, tags, c)) mk(c)
+          for (const c of selected) {
+            // 同时勾了交付库和某档位时跳过档位：library 已覆盖全部档位，否则同一张图
+            // 会在 交付库/<档位>/ 里重复落两份（档位是交付库的真子集，不同于维度重叠口径）
+            if (selected.has(CAT_LIBRARY) && tierOfCat(c)) continue
+            if (this.matchesCat(r, tags, c)) mk(c)
+          }
           break
         case 'exclude': {
           let excluded = false
@@ -95,26 +117,34 @@ class Exporter extends EventEmitter {
     }
   }
 
-  /** 图片是否属于分类 cat（复刻 listByCategory 的并集视图语义，垃圾桶除外） */
-  private matchesCat(r: { category: string; status: string }, tags: Record<string, { level?: string }>, cat: CategoryKey): boolean {
+  /** 图片是否属于分类 cat（与 db.matchesView 同一口径，废弃库除外）：D2 三档状态视图看“主分类+瑕疵等级”，内容维度看标签并集，档位看 tier 列 */
+  private matchesCat(r: { category: string; status: string; tier?: number | null }, tags: Record<string, { level?: string }>, cat: CategoryKey): boolean {
     if (isTrashLike(cat) || isTrashLike(r.category)) return false
-    if (cat === CAT_REVIEW) return r.category === CAT_REVIEW
-    if (cat === CAT_LIBRARY) return this.isLibrary(r.category)
-    if ((BAD_DIMENSIONS as string[]).includes(cat) || (NEUTRAL_DIMENSIONS as string[]).includes(cat)) {
+    // 档位子类目（D4）：与 db.matchesView 同口径 = 交付库成员且 tier 相等
+    const tierN = tierOfCat(cat)
+    if (tierN) return isDeliverable(r.category, tags) && r.tier === tierN
+    if (cat === CAT_LIBRARY) return isDeliverable(r.category, tags)
+    if (cat === CAT_FLAWS) return flawLevel(tags) === 'high'
+    // 与 db.matchesView 同口径：有高置信瑕疵的图属瑕疵片视图，不再计入待确认（否则 include 模式导出数与侧栏徽章对不上）
+    if (cat === CAT_REVIEW) return flawLevel(tags) !== 'high' && (r.category === CAT_REVIEW || flawLevel(tags) === 'mid')
+    // 结构维度（重复/连拍 v2.0.67）也是可导出的分类：与 db.matchesView 同口径走标签并集（勾它导出的是组里被判定多余的那几张）
+    if ((BAD_DIMENSIONS as string[]).includes(cat) || (NEUTRAL_DIMENSIONS as string[]).includes(cat) || (STRUCTURAL_DIMENSIONS as string[]).includes(cat)) {
       const t = tags[cat]
       return r.category === cat || (!!t && t.level !== 'low')
     }
     return r.category === cat // 自定义分类等按归属
   }
 
-  /** 交付库是虚桶：口径单一来源在 shared（isLibraryBucket），与列表 SQL、角标显示必须一致 */
-  private isLibrary(cat: string): boolean {
-    return isLibraryBucket(cat)
-  }
-
-  previewCount(opts: ExportOptions): { will: number; total: number } {
+  previewCount(opts: ExportOptions): { will: number; total: number; byTier: Record<1 | 2 | 3, number>; sizeMB: number | null } {
     const total = (getDb().prepare(`SELECT COUNT(*) c FROM images WHERE category NOT IN ('trash','dup_trash') AND status != 'skip'`).get() as { c: number }).c
-    return { will: this.buildList(opts).length, total }
+    const list = this.buildList(opts)
+    const byTier: Record<1 | 2 | 3, number> = { 1: 0, 2: 0, 3: 0 }
+    for (const it of list) {
+      if (it.tier === 1 || it.tier === 2 || it.tier === 3) byTier[it.tier] += 1
+    }
+    // 容量估算只在原格式下给出（转码后大小不可预知）：同一张因多分类落多目录会重复计入，与实际磁盘占用一致
+    const sizeMB = opts.format === 'original' ? list.reduce((s, it) => s + it.fileSize, 0) / 1048576 : null
+    return { will: list.length, total, byTier, sizeMB }
   }
 
   cancel(): void {
@@ -163,14 +193,23 @@ class Exporter extends EventEmitter {
   }
 
   private async exportOne(
-    item: { id: number; path: string; category: CategoryKey; filename: string },
+    item: { id: number; path: string; category: CategoryKey; filename: string; tier: number | null; fileSize: number },
     opts: ExportOptions,
     usedNames: Set<string>
   ): Promise<void> {
     let dir = opts.targetDir
     if (opts.subfolders) {
-      const label = this.categoryLabel(item.category)
-      dir = join(dir, label)
+      // 目录落点（D4 用户规则）：档位相关的一律是 交付库/<档位名>/ 二级——
+      // library 模式的图（tier 列驱动）和 include 模式直接勾选的档位子类目都走这一条；
+      // 其余分类保持一层目录不变
+      const tierN = tierOfCat(item.category)
+      if (tierN) {
+        // 勾选的就是档位：categoryLabel 只会给出档位名，一级得手动补上“交付库”
+        dir = join(dir, this.categoryLabel(CAT_LIBRARY), this.tierDirName(tierN))
+      } else {
+        dir = join(dir, this.categoryLabel(item.category))
+        if (item.category === CAT_LIBRARY && item.tier) dir = join(dir, this.tierDirName(item.tier))
+      }
       mkdirSync(dir, { recursive: true })
     }
     const convert = opts.format !== 'original'
@@ -211,13 +250,23 @@ class Exporter extends EventEmitter {
     return null
   }
 
+  /** 档位目录名：设置可改（tierNames），与侧栏子行共用同一单源 */
+  private tierDirName(n: number): string {
+    const names = getSettings().tierNames ?? DEFAULT_TIER_NAMES
+    return names[n - 1] || String(n)
+  }
+
   categoryLabel(cat: CategoryKey): string {
-    if ((BAD_DIMENSIONS as string[]).includes(cat) || (NEUTRAL_DIMENSIONS as string[]).includes(cat)) {
+    // 档位子视图（D4）：导出目录名用“交付库/档位名”里的档位名
+    const tierN = tierOfCat(cat)
+    if (tierN) return this.tierDirName(tierN)
+    if ((BAD_DIMENSIONS as string[]).includes(cat) || (NEUTRAL_DIMENSIONS as string[]).includes(cat) || (STRUCTURAL_DIMENSIONS as string[]).includes(cat)) {
       return DIMENSION_LABELS[cat as keyof typeof DIMENSION_LABELS] || cat
     }
     if (cat === CAT_LIBRARY) return '交付库'
+    if (cat === CAT_FLAWS) return '瑕疵片'
     if (cat === CAT_REVIEW) return '待确认'
-    if (cat === CAT_TRASH) return '垃圾桶'
+    if (cat === CAT_TRASH) return '废弃库'
     if (cat === CAT_DUP_TRASH) return '重复废弃'
     if (cat.startsWith('custom:')) {
       const row = getDb().prepare('SELECT name FROM custom_categories WHERE id = ?').get(Number(cat.slice(7))) as { name: string } | undefined

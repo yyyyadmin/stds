@@ -8,9 +8,10 @@ import type { RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { useStore, sortConf, filterByQuery } from '../store'
 import DuplicateGroupsView from './DuplicateGroupsView'
+import { TrashView } from './TrashView'
 import { toSrc, ThumbImg } from './imageSrc'
 import type { ImageRecord, DimensionKey } from '../../../shared/types'
-import { BAD_DIMENSIONS, CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, DIMENSION_LABELS, isLibraryBucket } from '../../../shared/types'
+import { ALL_TAG_DIMENSIONS, CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, DIMENSION_LABELS, isLibraryBucket, isDupRedundant, flawLevel, DEFAULT_TIER_NAMES, PERSON_DIMS } from '../../../shared/types'
 import { dimTagColor } from './Sidebar'
 
 /**
@@ -48,9 +49,21 @@ function tint(hex: string, p: number): string {
  * （见 TagChips 的 sort），数字对筛选本身没有决策价值还占掉一格宽度。数值照旧留在
  * images.tags[].confidence 里——排序、阈值分级、列表视图的「最高置信度」列、以及主进程
  * 写进 corrections.orig_confidence 的校准样本都不读这里的 DOM，隐藏显示不影响任何判定。
+ * 人物分类标签例外（用户拍板 2026-10-12）：实心蓝底白字、无描边——它回答的是
+ * “这是什么图”，和瑕疵标签“这图哪里有问题”不是一类信息，视觉语言必须拉开。
  */
 function DimTag(props: { dim: string }): JSX.Element {
   const c = dimTagColor(props.dim)
+  if (isPersonDim(props.dim)) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[5px] text-[11px] leading-none font-medium text-white shadow-[0_1px_3px_rgba(0,0,0,0.65)]"
+        style={{ background: c }}
+      >
+        {DIMENSION_LABELS[props.dim as keyof typeof DIMENSION_LABELS]}
+      </span>
+    )
+  }
   return (
     <span
       className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[5px] text-[11px] leading-none font-medium border shadow-[0_1px_3px_rgba(0,0,0,0.65)]"
@@ -59,6 +72,21 @@ function DimTag(props: { dim: string }): JSX.Element {
       {DIMENSION_LABELS[props.dim as keyof typeof DIMENSION_LABELS]}
     </span>
   )
+}
+
+/** 是否人物分类维度（单人/合影/混合/无人）：卡片左下角固定排第一的那类标签 */
+function isPersonDim(dim: string): boolean {
+  return (PERSON_DIMS as string[]).includes(dim)
+}
+
+/** 人物分类标签固定排第一，其余按置信度从高到低（卡片左下角与列表视图共用） */
+function sortTagsPersonFirst<T extends [string, { confidence?: number } | undefined]>(list: T[]): T[] {
+  return [...list].sort((a, b) => {
+    const pa = isPersonDim(a[0]) ? 0 : 1
+    const pb = isPersonDim(b[0]) ? 0 : 1
+    if (pa !== pb) return pa - pb
+    return (b[1]?.confidence || 0) - (a[1]?.confidence || 0)
+  })
 }
 
 /**
@@ -161,7 +189,8 @@ function TagBtn({ img, variant = 'hover' }: { img: ImageRecord; variant?: 'hover
 function TagChips({ img }: { img: ImageRecord }): JSX.Element | null {
   const entries = Object.entries(img.tags || {}).filter(([, t]) => t && t.level !== 'low')
   if (!entries.length) return null
-  const sorted = entries.sort((a, b) => (b[1]?.confidence || 0) - (a[1]?.confidence || 0))
+  // 人物分类标签固定第一位（用户拍板），其余按置信度从高到低；互斥保证人数标签至多一枚
+  const sorted = sortTagsPersonFirst(entries)
   const hidden = sorted.length > 3 ? sorted.slice(3) : []
   const [morePos, setMorePos] = useState<{ left: number; bottom: number; maxW: number } | null>(null)
   return (
@@ -201,27 +230,55 @@ function TagChips({ img }: { img: ImageRecord }): JSX.Element | null {
 }
 
 function StatusRibbon({ img }: { img: ImageRecord }): JSX.Element | null {
+  // 档位名订阅（D4）：Hook 必须在早退分支之前无条件调用
+  const tierNamesSetting = useStore((s) => s.settings.tierNames)
   if (img.status === 'pending') return <span className="chip bg-gray-600/80 text-gray-200 absolute right-1 top-1">待筛选</span>
   if (img.status === 'error') return <span className="chip bg-bad/90 text-white absolute right-1 top-1">检测失败</span>
   if (img.status === 'skip') return <span className="chip bg-gray-700/90 text-gray-300 absolute right-1 top-1">无法解码</span>
-  if (img.category === CAT_TRASH) return <span className="chip bg-black/70 text-white absolute right-1 top-1">🗑</span>
-  if (img.category === CAT_REVIEW) return <span className="chip bg-warn text-white absolute right-1 top-1">待确认</span>
-  // 交付角标必须走虚桶判定（与列表 SQL / 导出同一口径）：单人照、多人合拍照、多人混合照、无人物、
-  // 黑白照、自定义分类的图全都属于交付库且正常导出，直接比 category === 'library'
-  // 会让一万多张里只有一百张带标（新增/删除瑕疵标签并不改归属，所以标不会因此消失）
-  if (isLibraryBucket(img.category))
+  if (img.category === CAT_TRASH || img.category === CAT_DUP_TRASH) return <span className="chip bg-black/70 text-white absolute right-1 top-1">🗑</span>
+  // D2：交付状态由"主分类 + 瑕疵等级"派生的三档互斥角标（与侧栏上段、导出口径同一真源）：
+  // 高置信瑕疵 → 瑕疵片；中置信瑕疵 ∪ 手动停泊 → 待确认；无瑕疵 → 交付
+  const fl = flawLevel(img.tags)
+  if (fl === 'high')
+    return <span className="chip bg-bad/90 text-white absolute right-1 top-1" title="判出缺陷的图：不进交付库、默认不导出">瑕疵</span>
+  if (img.category === CAT_REVIEW || fl === 'mid')
+    return <span className="chip bg-warn text-white absolute right-1 top-1">待确认</span>
+  // 重复照片（v2.0.67，旧名“重复多余”）：本身没拍坏，只是同组已经挑了一张更好的进库。它不是瑕疵，必须单独一枚角标，
+  // 否则这张图在网格上看起来与交付库里的图一模一样（用户分不清哪张会被导出去）。
+  if (isDupRedundant(img.tags))
     return (
-      <span
-        className="chip bg-good text-white absolute right-1 top-1 shadow-[0_1px_3px_rgba(0,0,0,0.65)]"
-        title={
-          img.category === CAT_LIBRARY
-            ? '交付库（默认参与导出）'
-            : `交付库（默认参与导出），当前相册：${categoryLabelShort(img.category)}`
-        }
-      >
-        交付
+      <span className="chip bg-indigo-500/90 text-white absolute right-1 top-1" title="同一瞬间已经有更好的那张进了交付库，这张默认不导出；想多留这张，去【重复照片】那一组里点保留">
+        重复照片
       </span>
     )
+  // 交付角标走虚桶判定（传入 tags）：干净的人数图属交付库且正常导出；
+  // D4：文案改用档位名（优质=绿、良好=蓝、一般=灰），无档位（尚未 backfill）时仍写“交付”
+  if (isLibraryBucket(img.category, img.tags)) {
+    const names = tierNamesSetting ?? DEFAULT_TIER_NAMES
+    const tier = img.tier
+    const text = tier ? names[tier - 1] || String(tier) : '交付'
+    const cls = tier === 2 ? 'bg-blue-600/90' : tier === 3 ? 'bg-gray-500/90' : 'bg-good'
+    // 档位来源要说给客户听（用户反馈：手动改过档在界面上完全看不出来）：
+    // v3 档位走引擎实测清晰度，人工改过的行主进程用 tier_by='user' 永久保护，这里把两者区分开。
+    const tierSrc =
+      img.tierBy === 'user'
+        ? '· 档位你手动定过，重筛不会改'
+        : img.tags.blur
+          ? '· 档位按引擎实测清晰度分的'
+          : '· 这张没留清晰度记录，暂归中间档'
+    return (
+      <span
+        className={'chip text-white absolute right-1 top-1 shadow-[0_1px_3px_rgba(0,0,0,0.65)] ' + cls}
+        title={
+          img.category === CAT_LIBRARY
+            ? `交付库 · ${text}（默认参与导出）${tierSrc}`
+            : `交付库 · ${text}（默认参与导出），当前相册：${categoryLabelShort(img.category)} ${tierSrc}`
+        }
+      >
+        {text}
+      </span>
+    )
+  }
   return null
 }
 
@@ -719,8 +776,13 @@ export default function ImageView(): JSX.Element {
     )
   }
 
-  if (activeCategory === 'duplicate' || activeCategory === CAT_DUP_TRASH) {
-    return <DuplicateGroupsView images={sorted} mode={activeCategory === CAT_DUP_TRASH ? 'trash' : 'keep'} />
+  if (activeCategory === 'duplicate') {
+    return <DuplicateGroupsView images={sorted} mode="keep" />
+  }
+
+  // 统一废弃库：按来源栏分列 + 逐张还原/选档入档（旧「重复照片-废弃」已并入此处）
+  if (activeCategory === CAT_TRASH) {
+    return <TrashView images={sorted} />
   }
 
   if (!sorted.length) {
@@ -734,11 +796,11 @@ export default function ImageView(): JSX.Element {
             <div className="text-xs text-fg3">全程本地处理 · 无网络请求</div>
           </div>
 
-          {/* 检测维度：直接复用 BAD_DIMENSIONS + DIMENSION_LABELS，不写死 */}
+          {/* 检测维度：直接复用 ALL_TAG_DIMENSIONS + DIMENSION_LABELS，不写死 */}
           <div className="mt-5">
-            <div className="text-xs font-medium text-fg3 mb-2">AI 检测维度（命中即归入待修正 / 垃圾桶）</div>
+            <div className="text-xs font-medium text-fg3 mb-2">AI 检测维度（有问题的图会被拦在交付库外面）</div>
             <div className="flex flex-wrap gap-1.5">
-              {BAD_DIMENSIONS.map((d) => (
+              {ALL_TAG_DIMENSIONS.map((d) => (
                 <span key={d} className="px-2 py-0.5 rounded-full text-xs bg-bad/10 text-bad border border-bad/20">
                   {DIMENSION_LABELS[d]}
                 </span>
@@ -827,7 +889,7 @@ export default function ImageView(): JSX.Element {
                   </td>
                   <td className="border-b border-line/50 px-2 py-1 align-middle">
                     <div className="flex flex-wrap gap-1">
-                      {tags.map(([d]) => (
+                      {sortTagsPersonFirst(tags).map(([d]) => (
                         <DimTag key={d} dim={d} />
                       ))}
                       {!tags.length && <span className="text-fg3">—</span>}
@@ -881,7 +943,7 @@ export default function ImageView(): JSX.Element {
 function categoryLabelShort(cat: string): string {
   if (cat === 'library') return '交付库'
   if (cat === 'review') return '待确认'
-  if (cat === 'trash') return '垃圾桶'
+  if (cat === 'trash') return '废弃库'
   if (cat.startsWith('custom:')) return '自定义'
   return DIMENSION_LABELS[cat as keyof typeof DIMENSION_LABELS] || cat
 }

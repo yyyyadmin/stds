@@ -12,6 +12,7 @@ import {
   DIMENSION_LABELS,
   SCENE_PRESETS,
   STRICTNESS_PRESETS,
+  DEFAULT_TIER_NAMES,
   deriveStrictness,
   type DimensionKey
 } from '../../../shared/types'
@@ -32,6 +33,8 @@ export default function SettingsDialog(): JSX.Element {
   const [stats, setStats] = useState<{ total: number; perDim: Record<string, { falsePositive: number; truePositive: number; total: number }> } | null>(null)
   const [tuneReport, setTuneReport] = useState<TuneReport | null>(null)
   const [advanced, setAdvanced] = useState(false)
+  // 档位目录名草稿（D4）：失焦/回车时保存，留空回退默认名
+  const [tierDraft, setTierDraft] = useState<string[] | null>(null)
 
   // 版本更新状态
   const [update, setUpdate] = useState<UpdateInfo | null>(null)
@@ -175,7 +178,7 @@ export default function SettingsDialog(): JSX.Element {
                 <button
                   className="btn text-xs"
                   onClick={() => {
-                    if (confirm('重新筛选会先把上一轮的 AI 分类清零重算（您手动放置的图片、手动加的标签，以及垃圾桶/废弃桶内容都会保留不受影响）。继续？')) void rescanAll()
+                    if (confirm('重新筛选会先把上一轮的 AI 分类清零重算（您手动放置的图片、手动加的标签，以及废弃库/废弃桶内容都会保留不受影响）。继续？')) void rescanAll()
                   }}
                 >
                   重新筛选全部图片
@@ -202,8 +205,45 @@ export default function SettingsDialog(): JSX.Element {
                   : STRICTNESS_PRESETS.find((p) => p.key === strictNow)?.tip}
               </p>
               <p className="text-xs text-fg3">
-                只影响瑕疵照片（闭眼/模糊/曝光等）进【待确认】的门槛；人数分类（合影/单人/无人）是引擎的结构结论，不随这里变。<b>切换档位无需重新检测</b>，立即按已存的原始置信度重新分桶。
+                只影响【待确认】里哪些疑点算“值得再看一眼”（闭眼/模糊/曝光/半截头/表情崩坏）。人数分类（合影/单人/无人）、黑白照、重复图是引擎的事实与结构结论，<b>不参与这里的收紧或放宽</b>，任何档位下都一律照旧。<b>切换档位无需重新检测</b>，立即按已存结果重新分桶。
               </p>
+              <p className="text-xs text-fg3">
+                每一类问题各有各的判定刻度（"模糊"最高只会给出 0.85，"闭眼"只有 0.75 和 1.0 两档），所以这里是在<b>各自刻度上整体收紧或放宽</b>，不是所有问题共用一条线。
+              </p>
+            </div>
+          </section>
+
+          {/* 交付库档位目录名（D4）：侧栏三行子档与导出二级子目录共用这几个名字，
+              改完立即可见（无需重筛）；导出时按 交付库/优质|良好|一般/ 分 folder。
+              v3：档位的依据已从“离瑕疵线多远”换成引擎实测清晰度，无需重跑引擎即可重算 */}
+          <section>
+            <h3 className="text-fg2 font-bold mb-2">交付库档位目录名</h3>
+            <div className="rounded-md bg-panel2 border border-line p-3 space-y-2">
+              <div className="flex items-center gap-2">
+                {(tierDraft ?? settings.tierNames ?? DEFAULT_TIER_NAMES).map((n, i) => (
+                  <input
+                    key={i}
+                    className="input flex-1 min-w-0 text-sm"
+                    value={n}
+                    maxLength={12}
+                    onChange={(e) => {
+                      const base = [...(tierDraft ?? settings.tierNames ?? DEFAULT_TIER_NAMES)]
+                      base[i] = e.target.value
+                      setTierDraft(base)
+                    }}
+                    onBlur={() => {
+                      if (!tierDraft) return
+                      const next = tierDraft.map((x, i) => x.trim() || DEFAULT_TIER_NAMES[i])
+                      setTierDraft(null)
+                      void saveSettings({ tierNames: next })
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                    }}
+                  />
+                ))}
+              </div>
+              <p className="text-xs text-fg3">三档按引擎实测的<b>画面清晰度</b>（细节量 + 高频占比）排队，侧栏与导出子目录共用这几个名字（如改成 精修/初修/直出）。它只告诉你先看哪批，<b>不影响哪张照片被拦下来</b>；拿不到清晰度实测的老图一律先归中间档，不擅自抬也不擅自压。</p>
             </div>
           </section>
 
@@ -239,7 +279,10 @@ export default function SettingsDialog(): JSX.Element {
                         onChange={(e) => setThreshold('midThreshold', Number(e.target.value))} />
                     </div>
                     <p className="text-xs text-fg3">
-                      低于 {settings.midThreshold.toFixed(2)} 的判定不标记，图片默认留在交付库。调整阈值<b>无需重新检测</b>，立即按已存的原始置信度重新分桶。
+                      低于 {settings.midThreshold.toFixed(2)} 的判定不标记，图片默认留在交付库。调整阈值<b>无需重新检测</b>，立即按已存结果重新分桶。
+                    </p>
+                    <p className="text-xs text-fg3">
+                      这两根滑条是瑕疵判定的<b>整体基准</b>：每类瑕疵在自己的刻度上按同样幅度平移（比如这里放宽 0.1，模糊与闭眼也各自放宽 0.1）。人数/黑白/重复这些事实结论不吃平移，所以不可能被拉高到某一类永不触发。
                     </p>
                   </div>
                 </div>

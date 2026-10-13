@@ -8,17 +8,21 @@
  * - 布局：左缩略列 + 中画布 + 右判定信息/工具列（三栏并排常驻）
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useStore } from '../store'
+import { useStore, displayOrder } from '../store'
 import { toSrc, useBigSrc, Spinner } from './imageSrc'
 import JudgmentBar from './JudgmentBar'
-import TagEditor, { anchorDimOfCategory, CatPinIcon } from './TagEditor'
+import TagEditor, { anchorDimOfCategory, categoryDisplayName } from './TagEditor'
+import type { MetaItem } from '../../../shared/ipc'
 import {
+  BAD_DIMENSIONS,
+  CAT_FLAWS,
   CAT_REVIEW,
   CAT_TRASH,
   DIMENSION_LABELS,
   isBadDim,
   type DimensionKey,
-  type FaceInfo
+  type FaceInfo,
+  type ImageRecord
 } from '../../../shared/types'
 
 interface Transform {
@@ -31,6 +35,8 @@ export default function PreviewModal(): JSX.Element | null {
   const previewId = useStore((s) => s.previewId)
   const images = useStore((s) => s.images)
   const activeCategory = useStore((s) => s.activeCategory)
+  const displayIds = useStore((s) => s.displayIds)
+  const customCategories = useStore((s) => s.customCategories)
   const closePreview = useStore((s) => s.closePreview)
   const stepPreview = useStore((s) => s.stepPreview)
   const openPreview = useStore((s) => s.openPreview)
@@ -40,8 +46,22 @@ export default function PreviewModal(): JSX.Element | null {
   // 标记叠加开关提到全局 store：切换图片 / 关闭重开大图都保持上次选择（本次筛选全程记忆）
   const showOverlay = useStore((s) => s.previewOverlay)
   const togglePreviewOverlay = useStore((s) => s.togglePreviewOverlay)
+  const reviewSession = useStore((s) => s.reviewSession)
+  const startReview = useStore((s) => s.startReview)
+  const exitReview = useStore((s) => s.exitReview)
 
   const img = useMemo(() => images.find((i) => i.id === previewId) || null, [images, previewId])
+  /**
+   * 大图必须按“网格展示序”数张数、翻页、排左侧缩略列：直接用 images（库里顺序）会出现
+   * “网格里第 500 张、计数器写 20/600”，带筛选或改过排序时按 → 还会翻到没命中的图。
+   */
+  const list = useMemo(() => displayOrder(images, displayIds), [images, displayIds])
+  const pos = list.findIndex((i) => i.id === previewId)
+  const catLabel = categoryDisplayName(activeCategory, customCategories)
+  // 复核模式：待确认 / 瑕疵片 / 任一坏维度才提供（都是“需要逐张人工过一遍”的语境）
+  const reviewEligible = activeCategory === CAT_REVIEW || activeCategory === CAT_FLAWS || (!!activeCategory && isBadDim(activeCategory))
+  const reviewActive = !!reviewSession && reviewSession.cat === activeCategory
+  const judged = reviewSession ? Math.max(0, reviewSession.total - list.length) : 0
   // 原图加载：缩略图占位 → 原图就绪无缝替换；超 300ms 才提示
   const big = useBigSrc(img)
 
@@ -55,26 +75,34 @@ export default function PreviewModal(): JSX.Element | null {
     setT({ scale: 1, x: 0, y: 0 })
   }, [previewId])
 
-  // 图片被移出当前分类（移除标签 / 移动 / 入垃圾桶）时：不关闭弹窗，自动切到它原位置的
+  // 图片被移出当前分类（移除标签 / 移动 / 入废弃库）时：不关闭弹窗，自动切到它原位置的
   // 下一张（删除后后一张正好顶到同一 index）；列表清空（最后一张）才关闭
   const lastIdxRef = useRef(0)
   useEffect(() => {
     if (previewId == null) return
-    const i = images.findIndex((x) => x.id === previewId)
+    const i = list.findIndex((x) => x.id === previewId)
     if (i >= 0) {
       lastIdxRef.current = i
       return
     }
-    if (images.length) openPreview(images[Math.min(lastIdxRef.current, images.length - 1)].id)
+    if (list.length) openPreview(list[Math.min(lastIdxRef.current, list.length - 1)].id)
     else closePreview()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [images, previewId])
+  }, [list, previewId])
 
   // 切换图片时左侧缩略列表跟随滚动：必须居中。用 'nearest' 的语义是“已经在可视区就不滚”，
   // 于是连着按 → 时当前图会一路贴在列表最下面那张，正好看不到“下一张”预览
   useEffect(() => {
     activeThumbRef.current?.scrollIntoView({ block: 'center' })
   }, [previewId])
+
+  // 复核模式下本组判完（该分类清空）：即时反馈完成并结束会话（上面已有 effect 会随之关闭弹窗）
+  useEffect(() => {
+    if (reviewSession && reviewSession.cat === activeCategory && list.length === 0) {
+      useStore.setState({ toast: { msg: `本组复核完成，共判 ${reviewSession.total} 张`, kind: 'success', duration: 1800 } })
+      exitReview()
+    }
+  }, [list.length, reviewSession, activeCategory, exitReview])
 
   // 列表记录已瘦身不带 details（人脸框/关键点），只有这里的人脸叠加需要——按 previewId 单张取全量记录（一次 IPC，代价可忽略）
   const [lazyFaces, setLazyFaces] = useState<FaceInfo[]>([])
@@ -137,7 +165,18 @@ export default function PreviewModal(): JSX.Element | null {
 
   // 当前 AI 判定（右边信息列顶部）：只报维度名，不带置信度小数——
   // “0.91”对判片没有信息量（分数高低不代表该不该留），卡片芯片上已有百分比。
-  const primaryDim = isBadDim(img.category) ? (img.category as DimensionKey) : null
+  // D2：主分类=人数不携瑕疵，当前 AI 判定取最高置信的非 low 瑕疵标签（旧数据 category 恰为坏维度时兼容）
+  let primaryDim: DimensionKey | null = isBadDim(img.category) ? (img.category as DimensionKey) : null
+  if (!primaryDim) {
+    let bc = -1
+    for (const d of BAD_DIMENSIONS) {
+      const t = img.tags?.[d]
+      if (t && t.level !== 'low' && t.confidence > bc) {
+        bc = t.confidence
+        primaryDim = d
+      }
+    }
+  }
   const src = compareOriginal ? big.src : img.thumb ? toSrc(img.thumb) : big.src
   const faces = lazyFaces
 
@@ -145,6 +184,27 @@ export default function PreviewModal(): JSX.Element | null {
     <div className="fixed inset-0 z-40 bg-black/85 flex flex-col fade-in" onClick={(e) => e.target === e.currentTarget && closePreview()}>
       {/* 顶部工具条 */}
       <div className="shrink-0 relative flex items-center gap-2 px-4 py-2.5 text-[15px] bg-black/40 border-b border-white/10">
+        {/* 左上：当前分类 + 这是分类里的第几张（tabular-nums 让翻页时数字不左右跳） */}
+        <div className="flex items-baseline gap-2 min-w-0 max-w-[24%]">
+          <span className="text-[15px] text-white/90 truncate" title={`当前分类：${catLabel}`}>{catLabel}</span>
+          <span className="text-[13px] text-white/55 tabular-nums whitespace-nowrap">{pos >= 0 ? pos + 1 : '-'} / {list.length}</span>
+        </div>
+        {/* 复核模式开关（仅待确认/瑕疵/坏维度提供）：开启后顶部显「已判 X / 共 Y」，
+            判一张自动连跳下一张（复用上方离开分类即切图的逻辑），不加任何快捷键 */}
+        {reviewEligible && (reviewActive ? (
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="text-[13px] text-emerald-300 tabular-nums whitespace-nowrap" title="本轮复核进度">复核中 · 已判 {judged} / 共 {reviewSession?.total}</span>
+            <button className="btn-ghost-dark text-[12px] px-2 py-1 rounded border border-white/20 text-white/70 hover:text-white" onClick={exitReview} title="退出复核（不影响已做的判定）">退出复核</button>
+          </div>
+        ) : (
+          <button
+            className="btn-ghost-dark text-[12px] px-2 py-1 rounded border border-emerald-400/40 text-emerald-200 hover:bg-emerald-400/10 whitespace-nowrap shrink-0"
+            onClick={() => startReview(activeCategory as string, list.length)}
+            title="连续过片：判完一张自动跳下一张，顶部显示本组进度"
+          >
+            ▶ 开始复核
+          </button>
+        ))}
         {/* 居中（顶部中间）：文件名 + 尺寸 + 格式 + 文件大小 */}
         <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-baseline gap-2.5 max-w-[50%]">
           <span className="text-[15px] text-white/90 truncate" title={img.path}>{img.filename}</span>
@@ -173,7 +233,13 @@ export default function PreviewModal(): JSX.Element | null {
           标记叠加 {showOverlay ? '开' : '关'}
         </button>
         <button className="btn-ghost-dark text-sm text-white/85" onClick={reset} title="双击画面也可复位">复位缩放</button>
-        <button className="btn-ghost-dark text-sm text-white/85" onClick={closePreview}>关闭</button>
+        <button
+          className="px-3 py-1.5 rounded-md text-sm font-medium whitespace-nowrap bg-bad text-white border border-bad hover:bg-bad/85 hover:border-bad/85 transition-colors"
+          onClick={closePreview}
+          title="关闭大图（也可直接按 Esc）"
+        >
+          ESC 关闭
+        </button>
       </div>
 
       {/* 工作区：左缩略列 + 中画布 + 右信息/工具列（三栏并排，全部常驻可操作） */}
@@ -183,7 +249,7 @@ export default function PreviewModal(): JSX.Element | null {
           className="w-52 shrink-0 overflow-y-auto flex flex-col gap-1.5 bg-black/45 rounded-lg p-2"
           onWheel={(e) => e.stopPropagation()}
         >
-          {images.map((im) => (
+          {list.map((im) => (
             <div key={im.id} className="relative shrink-0 pr-2.5">
               <div
                 ref={im.id === img.id ? activeThumbRef : undefined}
@@ -262,44 +328,47 @@ export default function PreviewModal(): JSX.Element | null {
           </button>
         </div>
 
-        {/* 右侧：当前主判定 + 标签增删 + 判定工具栏（370px，大字号） */}
-        <aside className="w-[370px] shrink-0 overflow-y-auto rounded-lg bg-black/60 border border-white/10 p-4 flex flex-col gap-4">
-          <div className="text-lg text-white/90 flex flex-wrap items-center gap-2">
-            当前 AI 判定：
+        {/* 右侧：当前判定 + 标签管理 + 判定工具 + 拍摄参数（370px，大字号）
+            背景一律用不透明主题面板：以前是 bg-black/60 半透黑玻璃，浅色主题下 TagEditor /
+            JudgmentBar 这些用主题令牌的组件会白字压白底，整栏看不见 */}
+        <aside className="w-[370px] shrink-0 overflow-y-auto rounded-lg bg-panel border border-line p-4 flex flex-col gap-7">
+          {/* 当前判定：小标签 + 一个着色粗体结论词。以前是“文字+芯片”一行，芯片和
+              标签区的彩色芯片撞脸分不清主次；现在结论词就是本栏最大的字，层级靠排版成立 */}
+          <div className="flex items-baseline gap-2 flex-wrap">
+            <span className="text-xs text-fg3">当前判定</span>
             {primaryDim ? (
-              <span className="chip bg-bad/90 text-white !text-base">{DIMENSION_LABELS[primaryDim]}</span>
+              <span className="text-lg font-bold text-bad">{DIMENSION_LABELS[primaryDim]}</span>
             ) : img.category === CAT_TRASH ? (
-              <span className="chip bg-white/15 text-white/80 !text-base">垃圾桶（手动标记）</span>
+              <span className="text-lg font-bold text-fg3">废弃库</span>
             ) : img.category === CAT_REVIEW ? (
-              <span className="chip bg-warn/90 text-black !text-base">待确认（中置信度）</span>
+              <span className="text-lg font-bold text-warn">待确认</span>
             ) : (
-              <span className="chip bg-good/90 text-white !text-base">正常（交付库）</span>
+              <span className="text-lg font-bold text-good">正常 · 交付库</span>
             )}
-            {img.categoryBy === 'user' && <span className="text-xs text-white/50">（用户修正过）</span>}
+            {img.categoryBy === 'user' && <span className="text-xs text-fg3">（已被您修正过）</span>}
           </div>
 
-          {/* 标签：✖ 删除单个标签 / ＋ 添加漏检标签（人数三分类互斥→添加即替换，已有才置灰）
-              判定详情（“脸框占图高12%”这类长句）不给复审的人看，TagEditor 已把 showReason 默认关掉，
-              三个入口（大图右栏 / 单个标签弹窗 / 批量标签弹窗）一并收掉；理由照旧存在 tags 里。
+          {/* 标签单页三区（当前/人物切换/点加），组件自带区标题不再另写说明；
               定位针锚点取“正在浏览的分类”而非图的主分类：并集视图里图可能主分类是待确认、
-              靠“闭眼”标签才在当前列表——用主分类当锚点会漏标（删了图直接移出列表却没提示） */}
-          <div className="text-sm text-white/70 flex flex-wrap items-center gap-1.5">
-            <span>AI 检测标签（觉得不对可直接删，漏了可加；</span>
-            <CatPinIcon color="rgb(255 255 255 / 0.85)" className="w-3.5 h-3.5 shrink-0" />
-            <span>= 当前分类的标签，删了图会移出此分类）：</span>
-          </div>
+              靠“闭眼”标签才在当前列表——用主分类当锚点会漏标 */}
           <TagEditor imgs={[img]} anchorDim={anchorDimOfCategory(activeCategory) ?? primaryDim} size="lg" />
 
           {/* 判定操作工具栏：紧跟标签信息下方，2×2 大按钮 */}
-          <div className="pt-3 border-t border-white/10 flex flex-col gap-2">
+          <div className="pt-3 border-t border-line flex flex-col gap-2">
             <JudgmentBar img={img} size="lg" showTagButton={false} />
             {/* 叠加图例只在开了标记叠加时才出现：它解释的是人脸框颜色对应的置信度区间，
                 叠加关着时摆这么一行阈值公式纯属噪声（而且只有调参数的人看得懂） */}
             {showOverlay && (
-              <div className="text-[10px] text-white/40">
+              <div className="text-[10px] text-fg3">
                 高亮阈值：高 &gt;{settings.highThreshold} · 中 {settings.midThreshold}-{settings.highThreshold} · 低 &lt;{settings.midThreshold}
               </div>
             )}
+          </div>
+
+          {/* 内容隔离线 + 拍摄参数：原图 EXIF 全量键值（主进程 exifr 优先，
+              CR3 等不支持的容器走字节解析兑底），切图时自动重读 */}
+          <div className="pt-3 border-t border-line">
+            <ExifPanel img={img} />
           </div>
         </aside>
       </div>
@@ -308,3 +377,51 @@ export default function PreviewModal(): JSX.Element | null {
 }
 
 /** 待确认图的中置信度标签猜测已提到 shared/types（guessMidDim/midConf，JudgmentBar 共用） */
+
+/**
+ * 照片参数信息：文件名称/格式/尺寸/大小这四条来自入库记录永远有，相机参数由主进程
+ * imageMeta 读原文件并收口成中文白名单（非相机直出的图返回 null，只给一句说明）。
+ * 标题靠字重与最深令牌压场，参数行是键左值右的发丝线列表，不加任何框；
+ * 切图时重读（主进程按路径缓存，来回翻不重复读盘）。
+ */
+function ExifPanel({ img }: { img: ImageRecord }): JSX.Element {
+  // undefined = 读取中；null = 不是相机直出；数组 = 参数键值
+  const [items, setItems] = useState<MetaItem[] | null | undefined>(undefined)
+  useEffect(() => {
+    let alive = true
+    setItems(undefined)
+    void window.api.imageMeta(img.path).then((m) => {
+      if (alive) setItems(m)
+    })
+    return () => {
+      alive = false
+    }
+  }, [img.path])
+  const rows: MetaItem[] = [
+    { k: '文件名称', v: img.filename },
+    { k: '格式', v: (img.format || '未知').toUpperCase() },
+    { k: '像素尺寸', v: img.width ? `${img.width} × ${img.height}` : '未知' },
+    ...(img.fileSize ? [{ k: '文件大小', v: `${(img.fileSize / 1048576).toFixed(1)} MB` }] : []),
+    ...(items ?? [])
+  ]
+  return (
+    <section>
+      <div className="mb-2">
+        <div className="text-[14px] font-bold text-fg">照片参数信息</div>
+        <div className="text-[11px] text-fg3 mt-0.5">仅相机直出的照片有</div>
+      </div>
+      {items === undefined && <div className="text-xs text-fg3">读取中…</div>}
+      {items !== undefined && (
+        <div>
+          {rows.map((r) => (
+            <div key={r.k} className="flex items-baseline justify-between gap-3 py-[3px] text-xs border-b border-line/60 last:border-0">
+              <span className="shrink-0 text-fg3">{r.k}</span>
+              <span className="text-right text-fg break-all">{r.v}</span>
+            </div>
+          ))}
+          {items === null && <div className="pt-1 text-[11px] text-fg3">这张不是相机直出的照片，没有拍摄参数</div>}
+        </div>
+      )}
+    </section>
+  )
+}

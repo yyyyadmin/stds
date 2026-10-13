@@ -1,27 +1,32 @@
 /**
- * 侧栏分类树（第三章 3.1）
- * 结构：顶部三行状态入口（全部文件 / 交付库 / 待确认）+ 四个分组
- * （瑕疵照片 = 7 个坏维度 / 人物与影调 = 5 个中性维度 / 废片 = 垃圾桶 + 重复废弃桶 / 自定义分类）。
- * 层级靠三件事拉开，不靠方框：分组标题是 13px 粗体 + 最深的 fg 且不可点（没 hover 底色），
- * 行是 13px 常规 fg2 可点，小字是 10px fg3；“会不会导出”只用标题行末尾一个着色词说。
- * 每行行首是图形 + 颜色双编码（见 SidebarIcons），色弱用户靠形状也能分档。
- * 代码术语（坏/中性维度）只留在注释里。支持把选中的图片拖拽到分类完成多选移动（9.3）。
+ * 侧栏分类树（第三章 3.1，D4 面向客户简化 + 分组顺序重排）
+ * 上段“交付状态”互斥可求和：全部 / 交付库（三行档位子行带「└──」层级连接符、缩进一档，
+ * 子行数字比父行更小更浅、选中也不粗体——从属关系不能反客为主）/ 瑕疵片 / 待确认；
+ * 下段按“先看后弃”排序：人物与影调 → 瑕疵（按缺陷类型）→ 自定义相册 → 废片（最底，确定不要的垫底）。
+ * 原“按内容分”折叠开关已取消：分组固定排序后直接摊开，遮起来反而找不到。
+ * 层级只靠排版（标题 13px 粗体 fg 不可点、行 13px fg2、着色词 10px），
+ * tooltip 全部写成一句客户话（禁“置信/阈值/样本”等内部术语，保留操作效果说明）。
+ * 每行行首是图形 + 颜色双编码（见 SidebarIcons）。支持把图片拖到分类移动（9.3），拖到档位行改档。
  */
 import { createContext, useContext, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { NavIcon } from './SidebarIcons'
+import TutorialCenter from './TutorialCenter'
 import { useStore } from '../store'
 import {
   BAD_DIMENSIONS,
   CAT_LIBRARY,
+  CAT_FLAWS,
   CAT_REVIEW,
   CAT_TRASH,
-  CAT_DUP_TRASH,
   DIMENSION_LABELS,
   NEUTRAL_DIMENSIONS,
-  PRECISION_TIERS,
-  dimTier,
-  isBadDim
+  DEFAULT_TIER_NAMES,
+  DUP_REDUNDANT_KEY,
+  isBadDim,
+  isStructuralDim,
+  type TierKey
 } from '../../../shared/types'
 import type { CategoryKey } from '../../../shared/types'
 
@@ -33,7 +38,7 @@ const BAD_DOT_COLORS: Record<string, string> = {
   blur: '#8b55f6', // 画面模糊 · 紫罗兰
   exposure: '#eab308', // 曝光异常 · 黄
   half_head: '#14b8a6', // 半截头 · 青
-  duplicate: '#6366f1' // 重复/连拍 · 蓝紫
+  duplicate: '#6366f1' // 重复照片 · 蓝紫
 }
 
 /** 中性维度统一配色（蓝） */
@@ -44,7 +49,10 @@ export const NEUTRAL_DOT_COLOR = '#3b82f6'
  * 供 Sidebar 画圆点、ImageView 画标签共用，改一处即可两端同步。
  */
 export function dimTagColor(dim: string): string {
-  return isBadDim(dim) ? BAD_DOT_COLORS[dim] ?? '#ef4444' : NEUTRAL_DOT_COLOR
+  // 结构维度（重复/连拍）跟瑕疵用同一张调色板：它也要在卡片上挂一枚看得见的彩色标签，
+  // 掉回蓝色会被当成“客观事实类标签”（单人照/黑白照那种不带好坏色彩的）
+  if (isBadDim(dim) || isStructuralDim(dim)) return BAD_DOT_COLORS[dim] ?? '#ef4444'
+  return NEUTRAL_DOT_COLOR
 }
 
 /** 状态点规则：库里没有图时一律置灰，有图才亮各自的颜色 */
@@ -55,8 +63,6 @@ function lit(count: number | undefined, color: string): string {
 
 /**
  * 导出状态：只用一个着色词，右对齐在标题行末尾，不套方框。
- * 上一版给每组标题都挂了一枚 chip 徽标，一栏里挤了五个框，“什么都是标签”就等于
- * 什么都没有主次；框只留给真正的状态角标（卡片上的 待确认 / 🗑），分组靠颜色 + 位置说。
  * 绿 = 进交付包，红 = 默认不导出但可捞回，灰 = 永不导出（只能还原）。
  */
 const GROUP_STATUS = {
@@ -66,27 +72,85 @@ const GROUP_STATUS = {
 } as const
 
 /**
+ * 分组标题后的问号提示。悬停即弹出自定义浮层（不是系统原生 title 那种一行灰条）：
+ * 走 Portal + fixed 挂到 body（沿用 TagChips 的做法），绕开侧栏可能的 overflow 裁剪，
+ * 无延迟、样式可控、靠屏幕右缘自动往左收；浮层 pointer-events-none 不拦截交互。
+ */
+function HelpTip(props: { title: string; text: string }): JSX.Element {
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
+  return (
+    <span
+      className="shrink-0 inline-flex items-center align-middle translate-y-[1.5px] text-fg3 hover:text-fg2 cursor-pointer [&_svg]:h-3.5 [&_svg]:w-3.5"
+      onMouseEnter={(e) => {
+        const r = e.currentTarget.getBoundingClientRect()
+        // 弹在图标右侧；靠屏幕右缘时往左收（预留 300），靠底部时往上抬（预留 220）
+        const left = Math.max(8, Math.min(r.right + 10, window.innerWidth - 300))
+        const top = Math.max(8, Math.min(r.top - 6, window.innerHeight - 220))
+        setPos({ left, top })
+      }}
+      onMouseLeave={() => setPos(null)}
+    >
+      <NavIcon name="help" />
+      {pos &&
+        createPortal(
+          <div
+            className="fixed z-[90] w-[280px] max-w-[calc(100vw-16px)] rounded-xl border border-line bg-panel/95 px-3.5 py-2.5 shadow-2xl pointer-events-none"
+            style={{ left: pos.left, top: pos.top }}
+          >
+            <div className="mb-1.5 border-b border-line/60 pb-1.5 text-[12px] font-bold leading-snug text-fg">
+              {props.title}
+            </div>
+            <div className="space-y-1.5 text-[11.5px] leading-relaxed text-fg">
+              {props.text.split('\n').map((raw, i) => {
+                const line = raw.trim()
+                if (!line) return null
+                if (line.startsWith('·')) {
+                  // 实心圆点：用最深令牌 bg-fg 上色、放大到 5px，文字换行时缩进到点后面
+                  return (
+                    <div key={i} className="flex gap-2">
+                      <span className="mt-[7px] h-[5px] w-[5px] shrink-0 rounded-full bg-fg" />
+                      <span className="flex-1">{line.replace(/^·\s*/, '')}</span>
+                    </div>
+                  )
+                }
+                return <div key={i}>{line}</div>
+              })}
+            </div>
+          </div>,
+          document.body
+        )}
+    </span>
+  )
+}
+
+/**
  * 分组容器。两个对齐细节：标题用 px-5 跟行里的文字基线（mx-2 + px-3 = 20px）齐平；
  * 末尾的着色词右对齐，与行里的数字同一列。标题不是按钮：不绑 onClick、没有 hover 底色，
  * 只用 font-bold + text-fg（最深的令牌）压住下面 13px 常规 fg2 的行。
+ * 说明分层：hover 标题 = 一句 `tip` 短描述；标题后的问号图标（`help`）hover = 详细的
+ * `hint` 长说明。长文字不再常驻在标题下，侧栏因此更简洁，需要时悬停问号即弹出。
  */
 function Group(props: {
   title: string
-  hint: string
   status: keyof typeof GROUP_STATUS
   tip: string
+  hint?: string
   action?: ReactNode
   children: ReactNode
 }): JSX.Element {
   const s = GROUP_STATUS[props.status]
   return (
     <section className="mt-4 border-t border-line/70 pt-2">
-      <div className="px-5 flex items-center gap-2" title={props.tip}>
-        <span className="flex-1 min-w-0 truncate text-[13px] font-bold text-fg">{props.title}</span>
+      <div className="px-5 flex items-center gap-2">
+        <span className="flex-1 min-w-0 flex items-center gap-1.5">
+          <span className="min-w-0 truncate text-[13px] font-bold text-fg" title={props.tip}>
+            {props.title}
+          </span>
+          {props.hint && <HelpTip title={props.title} text={props.hint} />}
+        </span>
         <span className={'shrink-0 text-[10px] font-medium ' + s.cls}>{s.text}</span>
         {props.action}
       </div>
-      <div className="px-5 mt-0.5 text-[10px] leading-snug text-fg3">{props.hint}</div>
       <div className="mt-1">{props.children}</div>
     </section>
   )
@@ -101,11 +165,18 @@ function Row(props: {
   count?: number
   /** 图形名（见 SidebarIcons），与颜色一起构成双编码 */
   icon?: string
+  /** 子行行首的层级连接符（如「└──」）：占 icon 的位置、浅色不参与配色；
+   *  带连接符的行数字自动降一档（更小更浅不跟选中态变粗） */
+  connector?: string
   /** 图形着色；省略时继承行文字色，选中态会跟着变品牌色 */
   color?: string
   tip?: string
   noDrop?: boolean
   onDelete?: () => void
+  /** 数字与标签层级强调：total=全部文件（15px 粗 fg），status=组内主行（13px 粗 fg2） */
+  emphasis?: 'total' | 'status'
+  /** 传了就在标签后紧跟一枚绿色小字「导出」，点击直接开导出面板（不触发选中分类） */
+  onExport?: () => void
 }): JSX.Element {
   const active = useStore((s) => s.activeCategory === props.cat)
   const openCategory = useStore((s) => s.openCategory)
@@ -117,8 +188,11 @@ function Row(props: {
   return (
     <div
       className={
-        'group flex items-center gap-2 px-3 py-2 mx-2 rounded-md cursor-pointer text-sm transition-colors ' +
-        (active ? 'bg-brand/15 text-brand border border-brand/40 font-semibold' : 'text-fg2 hover:bg-panel2 border border-transparent') +
+        'group flex items-center gap-2 px-3 py-2 mx-2 rounded-md cursor-pointer ' +
+        (props.emphasis === 'total' ? 'text-[15px] font-bold' : 'text-sm') + ' transition-colors ' +
+        (active
+          ? 'bg-brand/15 text-brand border border-brand/40' + (props.emphasis === 'total' ? '' : ' font-semibold')
+          : (props.emphasis === 'total' ? 'text-fg' : 'text-fg2') + ' hover:bg-panel2 border border-transparent') +
         (isDropTarget ? ' ring-1 ring-brand bg-brand/25' : '') +
         // 空分类整行压暗：它点进去是白屏，不配跟有图的行一样扎眼
         (props.count === 0 ? ' opacity-50' : '')
@@ -132,12 +206,48 @@ function Row(props: {
         (props.cat && selection.size > 1 ? `（拖入将移动当前选中的 ${selection.size} 张）` : '')
       }
     >
+      {props.connector && (
+        <span className="shrink-0 text-fg3 select-none whitespace-pre" aria-hidden="true">
+          {props.connector}
+        </span>
+      )}
       {props.icon && <NavIcon name={props.icon} color={props.color} />}
-      <span className="flex-1 truncate">{props.label}</span>
+      {props.onExport ? (
+        <span className="flex-1 flex items-center min-w-0">
+          <span className={'truncate' + (props.emphasis === 'status' ? ' font-semibold text-fg' : '')}>{props.label}</span>
+          <button
+            className="shrink-0 self-start text-[10px] font-medium text-good hover:underline cursor-pointer translate-y-[3px] -ml-0.5"
+            onClick={(e) => {
+              e.stopPropagation()
+              props.onExport?.()
+            }}
+            title="导出交付库照片"
+          >
+            「导出」
+          </button>
+        </span>
+      ) : (
+        <span className={'flex-1 truncate' + (props.emphasis === 'status' ? ' font-semibold text-fg' : '')}>
+          {props.label}
+        </span>
+      )}
       {props.count != null && (
         // 选中行的数字必须跟标签同色（主题品牌色）：这里曾用 text-blue-200，浅色主题下
-        // 它是近白的浅蓝，压在 bg-brand/15 的浅蓝底上几乎看不见，反而比未选中的 gray-500 更难读
-        <span className={'text-xs tabular-nums ' + (active ? 'text-brand' : 'text-gray-500')}>{props.count}</span>
+        // 它是近白的浅蓝，压在 bg-brand/15 的浅蓝底上几乎看不见，反而比未选中的 gray-500 更难读。
+        // 档位子行（带连接符）例外：数字永远比父行小一档、浅一档、不粗体，不能压过“交付库”的总数
+        <span
+          className={
+            props.connector
+              ? 'text-[11px] tabular-nums font-normal text-gray-400'
+              : props.emphasis === 'total'
+                ? 'text-[15px] tabular-nums font-bold ' + (active ? 'text-brand' : 'text-fg')
+                : props.emphasis === 'status'
+                  ? 'text-[13px] tabular-nums font-bold ' + (active ? 'text-brand' : 'text-fg2')
+                  : 'text-xs tabular-nums ' + (active ? 'text-brand' : 'text-gray-500')
+          }
+        >
+          {props.count}
+        </span>
       )}
       {props.onDelete && (
         <button
@@ -157,12 +267,23 @@ function Row(props: {
 
 export default function Sidebar(): JSX.Element {
   const counts = useStore((s) => s.counts)
+  const tierNames = useStore((s) => s.settings.tierNames) ?? DEFAULT_TIER_NAMES
   const customCategories = useStore((s) => s.customCategories)
   const addCustomCategory = useStore((s) => s.addCustomCategory)
   const removeCustomCategory = useStore((s) => s.removeCustomCategory)
   const moveIds = useStore((s) => s.moveIds)
   const [adding, setAdding] = useState(false)
   const [name, setName] = useState('')
+  const [showTutorial, setShowTutorial] = useState(false)
+  // 档位三行的客户话（按 1/2/3 下标）：只说这档图干什么用，不出现打分机制。
+  // v3 口径：档位依据从"离瑕疵线多远"换成引擎实测的清晰度（拉普拉斯方差 + 高频细节占比），
+  // 所以话术讲"清楚/偏软"这种看得见的差别，不再讲"擦边"；测不到清晰度的图一律兜到中间档，
+  // 这句话必须写明，否则用户会以为中间档的图都被测过且真的居中。
+  const tierTips: Record<TierKey, string> = {
+    1: '实测最清楚的一档，放大精修放心用',
+    2: '清晰度实测居中，正常出片够用；早年放行时没留下清晰度记录的也先归这里',
+    3: '画面偏软，适合当备选凑数，不建议大尺寸放大'
+  }
 
   /*
    * 拖放命中裁判（旧逐行实现的三个同根问题：① dragleave 穿越本行子元素就误清高亮，
@@ -197,7 +318,7 @@ export default function Sidebar(): JSX.Element {
   return (
     <DropCtx.Provider value={dropCat}>
       <aside
-        className="w-56 shrink-0 bg-panel border-r border-line flex flex-col overflow-y-auto py-3 text-[13px]"
+        className="w-56 shrink-0 bg-panel border-r border-line flex flex-col overflow-y-auto pt-2 pb-3 text-[13px]"
         onDragOver={(e) => {
           if (!e.dataTransfer.types.includes('application/x-image-ids')) return
           const hit = hitRow(e.clientX, e.clientY)
@@ -231,54 +352,95 @@ export default function Sidebar(): JSX.Element {
           if (ids.length) void moveIds(ids, cat)
         }}
       >
-      <div className="px-5 pb-2 text-[11px] font-semibold tracking-wide text-fg3">分类体系</div>
-      <Row label="全部文件" cat={null} count={counts.all} icon="all" tip="不过滤的任何图，连瑕疵与废片都在里面，只为了看全貌；导出时不看这里" />
-      <Row label="交付库" cat={CAT_LIBRARY} count={counts[CAT_LIBRARY]} icon="library" color={lit(counts[CAT_LIBRARY], '#22c55e')} tip="没被任何缺陷标记的图，默认全部参与导出（人数、黑白这些事实不算缺陷，这里的图照常导出）" />
-      <Row label="待确认" cat={CAT_REVIEW} count={counts[CAT_REVIEW]} icon="review" color={lit(counts[CAT_REVIEW], '#eab308')} tip="中置信度 0.7-0.9，需人工复核；默认不导出" />
+      <Row emphasis="total" label="全部文件" cat={null} count={counts.all} icon="all" tip="所有照片都在这里，只为了看全貌" />
+      {/* 筛选结果区域：只靠淡底色与下方 Group 拉开差异，行缩进与 Group 完全一致 */}
+      <section className="mt-1 pt-1 pb-1 rounded-lg bg-panel2/25">
+      <div className="flex items-center gap-2 px-4 pb-1 pt-1">
+        <span className="flex-1 border-t border-fg/20"></span>
+        <span className="flex items-center gap-1.5">
+          <span className="text-[15px] font-bold text-fg tracking-widest whitespace-nowrap">筛选结果</span>
+          <HelpTip
+            title="筛选结果"
+            text={`这里是 AI 筛片的结论汇总，按交付去向分成互不重复的几栏，一张照片只进其中一栏。
 
-      {/* 原文案“坏维度（{ref.label}参考）”会把用户撞晕：一是“坏维度”是开发术语，二是 ref.label
-          本身已是“仅作参考”，拼接后显示成“仅作参考参考”；改成行业用语，精度档位放进悬停提示 */}
-      <Group
-        title="瑕疵照片"
-        status="bad"
-        hint="AI 挑出的毛病，人工可以捞回"
-        tip="按缺陷类型归类：闭眼、斜眼、面部狰狞、画面模糊、曝光异常、半截头、重复/连拍。命中任一缺陷即归入对应分类，默认不参与导出；各维度的精度档位悬停在具体分类名上可看"
-      >
-        {BAD_DIMENSIONS.map((d) => (
-          <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} icon={d} color={lit(counts[d], BAD_DOT_COLORS[d] ?? '#ef4444')} noDrop={d === 'duplicate'} tip={d === 'duplicate' ? '重复/连拍：由聚类自动分组，不可拖入；点入用分组视图选留/废' : `${DIMENSION_LABELS[d]} · 精度档位：${PRECISION_TIERS[dimTier(d)].tip}（灰 = 暂无图片）`} />
-        ))}
-      </Group>
+· 交付库：没瑕疵的好片，默认全部导出（下面再按清晰程度分优质、良好、一般三档）。
+· 瑕疵片：AI 判出缺陷的照片，默认不导出。
+· 待确认：AI 拿不准的，复核后再定，暂不导出。
+· 重复照片：连拍同组已挑了一张好的入库，这些是剩下的。
 
-      {/* 内部叫“中性维度”，对用户说“中性”等同于说“不重要”，他们猜不到里面是人数与黑白；
-          直接拿内容命名，并说明白它们不影响好坏、照常导出（这些图本来就属于交付库） */}
+因此这几栏相加约等于全部照片，和下方「类型」「瑕疵」会重复计数的分法不一样。`}
+          />
+        </span>
+        <span className="flex-1 border-t border-fg/20"></span>
+      </div>
+            <Row emphasis="status" label="交付库" cat={CAT_LIBRARY} count={counts[CAT_LIBRARY]} icon="library" color={lit(counts[CAT_LIBRARY], '#22c55e')} noDrop onExport={counts[CAT_LIBRARY] ? () => void useStore.setState({ showExport: true }) : undefined} tip="没瑕疵的好片，默认全部参与导出；不能直接拖入这一栏，请拖到它下面优质/良好/一般三个档位之一。下面三档只按画面清不清楚排队，谁被拦在交付库外面跟它无关" />
+      {/* 档位三子行：行首「└──」层级连接符 + 外层 ml-2 缩进，跟父行文字拉开一档；
+          点开=只看该档，拖入=改档（不移动归属、不清标签） */}
+      {([1, 2, 3] as TierKey[]).map((t) => (
+        <div key={t} className="ml-2">
+          <Row connector="└──" label={tierNames[t - 1] || String(t)} cat={`tier:${t}`} count={counts[`tier:${t}`]} tip={`${tierTips[t]}；点看只显示这一档，拖入可改档`} />
+        </div>
+      ))}
+      <Row emphasis="status" label="瑕疵片" cat={CAT_FLAWS} count={counts[CAT_FLAWS]} icon="face_ugly" color={lit(counts[CAT_FLAWS], '#ef4444')} noDrop tip="AI 判出缺陷的照片，默认不导出；确认为误判可删标签放行" />
+      <Row emphasis="status" label="待确认" cat={CAT_REVIEW} count={counts[CAT_REVIEW]} icon="review" color={lit(counts[CAT_REVIEW], '#eab308')} tip="AI 拿不准的图，复核后再决定；也可拖入手动搁置。暂不导出" />
+      {/* 重复照片（v2.0.67，客户看到的名字从“重复多余”改成“重复照片”）：本身没拍坏、只因同组已经有一张进了交付库而不导出的那批图。
+          以前它们混在“瑕疵片”里，用户看到的就是“好片被当坏片”，10-13 投诉的根源。
+          数字只数“单因冗余被拦下”的张数；点进去是整组视图（每组到底有几张、含已入库的代表帧），两个数不同义。 */}
+      <Row emphasis="status" label="重复照片" cat="duplicate" count={counts[DUP_REDUNDANT_KEY]} icon="duplicate" color={lit(counts[DUP_REDUNDANT_KEY], BAD_DOT_COLORS.duplicate)} noDrop tip="同一瞬间拍了很多张、每组已经挑了一张好的进交付库，这些是剩下的。想多留一张，点进去那一组里选即可" />
+      </section>
+
+      {/* 人物在前、瑕疵在后（用户 10-13 指定）：先按人/影调找图是高频动线，
+          瑕疵是复核场景才逐类看；瑕疵行的数字是“带该缺陷的张数”，
+          一图两种缺陷会进两行，所以行间数字不加和 */}
       <Group
-        title="人物与影调"
+        title="类型"
         status="normal"
-        hint="按人数 / 黑白再分一遍，不代表好坏"
-        tip="按画面人数与摆拍结构再分一遍：单人照 / 多人合拍照（人人成排、一起看镜头的摆拍）/ 多人混合照（接亲、做游戏这类人物扎堆但有情节的抓拍）/ 无人物场景，再加黑白影调。只是客观属性，不代表照片好坏，这些图本来就属于交付库、照常参与导出（混合照尤其不要当瑕疵——那是正要交的互动瞬间）。要只交某一类时，勾上这个分类单独导一次即可"
+        tip="按画面里几个人、是不是黑白再分一遍，只是客观属性，不代表照片好坏"
+        hint={`这里只按照片的客观内容归类，不代表片子拍得好坏。
+
+· 前四栏按画面里有几个人分，一张照片只归进一个。
+· 「黑白照」是另一个角度：一张黑白照片会同时算进它的人数栏和「黑白照」。
+
+因此这几栏的数字相加，会比照片的实际总张数多。`}
       >
         {NEUTRAL_DIMENSIONS.map((d) => (
-          <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} icon={d} color={lit(counts[d], NEUTRAL_DOT_COLOR)} tip={`${DIMENSION_LABELS[d]} · 仅作标签，不影响好坏判定`} />
+          <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} icon={d} color={lit(counts[d], NEUTRAL_DOT_COLOR)} tip={`${DIMENSION_LABELS[d]} · 只按内容分，不影响好坏判定；想单独交某一类时勾这个分类导出即可`}
+          />
         ))}
       </Group>
 
-      {/* 行业三档说法（好片 / 瑕疵片 / 废片）里的最后一档：这一组就是“人工丢掉的”，
-          比“回收”直白，也能与上面“瑕疵照片（默认不导出）”拉开层次：一个还可能要、一个确定不要 */}
+      <Group
+        title="瑕疵"
+        status="bad"
+        tip="按缺陷类型逐个看：带该缺陷的图都在这里（一张图有两种缺陷会出现在两行，各行的数字各数各的）；删掉标签或复核放行就不会再不导出"
+        hint={`这里按 AI 判出的缺陷类型逐个查看，默认都不参与导出。
+
+· 一张照片可能同时有多种缺陷（例如既闭眼、画面又模糊），就会同时出现在对应的几栏里。
+
+因此各行数字相加，会比上面「瑕疵片」的总数多。确认为误判时，删掉该缺陷标签或复核放行即可正常导出。`}
+      >
+        {BAD_DIMENSIONS.map((d) => (
+          <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} icon={d} color={lit(counts[d], BAD_DOT_COLORS[d] ?? '#ef4444')} tip={`${DIMENSION_LABELS[d]}：被判了这类缺陷的图`} />
+        ))}
+      </Group>
+
+      {/* 废片沉在自定义分类前面（用户 10-13 指定）：确定不要的比自建相册低频，往下放 */}
       <Group
         title="废片"
         status="never"
-        hint="你亲手丢的，随时可还原"
-        tip="你亲手丢掉的图：垃圾桶里的手动废片，以及重复/连拍分组里丢弃的多余帧。它们永不参与导出，也从其它分类视图里消失，但随时可以还原；重新筛选不会动这里的图"
+        tip="你亲手丢掉的图都集中在这一栏，永不导出；点进去可按来源逐栏还原或直接选档加入交付库"
+        hint={`这一栏存放你亲手丢进垃圾桶的照片，永不参与导出。
+
+· 点进去可按丢弃来源分栏查看。
+· 若丢错了，可随时还原，或直接选好档位重新加入交付库。`}
       >
-        <Row label="垃圾桶" cat={CAT_TRASH} count={counts[CAT_TRASH]} icon="trash" color={lit(counts[CAT_TRASH], '#e11d48')} tip="用户手动标记的废片，永远不可能被导出；重新筛选不会动这里的图，所以这个数在重筛前后不变" />
-        <Row label="重复/连拍-废弃" cat={CAT_DUP_TRASH} count={counts[CAT_DUP_TRASH]} icon="dup_trash" color={lit(counts[CAT_DUP_TRASH], '#9333ea')} noDrop tip="重复分组里被你丢弃的多余图；永不导出、不可拖入，可点入分组视图恢复到重复/连拍；重筛不会动这里的图，所以数不变" />
+        <Row emphasis="status" label="废弃库" cat={CAT_TRASH} count={counts[CAT_TRASH]} icon="trash" color={lit(counts[CAT_TRASH], '#e11d48')} tip="你亲手丢掉的图，永不导出；点进去可按来源还原或直接入档" />
       </Group>
 
       <Group
         title="自定义分类"
         status="normal"
-        hint="手动归的相册，同样参与导出"
-        tip="自己建的相册（如「主桌」「伴娘」）：把图拖进来即归类，跟人数 / 黑白一样属于交付库、正常导出；删除分类时里面的图回归交付库"
+        tip="自己建的相册（如「主桌」「伴娘」），照常导出；删除相册时里面的图回归交付库"
         action={
           <button
             className="w-6 h-6 shrink-0 rounded-full bg-brand text-white text-lg leading-none font-bold flex items-center justify-center hover:bg-blue-500 active:scale-90 shadow-[0_1px_5px_rgba(59,130,246,0.55)] transition"
@@ -317,7 +479,16 @@ export default function Sidebar(): JSX.Element {
           />
         ))}
       </Group>
-      <div className="flex-1" />
+      {/* 底部教程中心：文档式弹窗，左边页签切章节（快速上手/分类/操作/会员/设置） */}
+      <div className="mx-3 mt-4 flex justify-center">
+        <button
+          onClick={() => setShowTutorial(true)}
+          className="w-full text-[13px] font-semibold text-fg2 hover:text-fg bg-panel2 hover:bg-line/60 border border-line rounded-lg px-4 py-2.5 transition-colors cursor-pointer"
+        >
+          📖 教程中心
+        </button>
+      </div>
+      {showTutorial && <TutorialCenter onClose={() => setShowTutorial(false)} />}
       </aside>
     </DropCtx.Provider>
   )
