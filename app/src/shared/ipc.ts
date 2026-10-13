@@ -63,6 +63,27 @@ export interface SysConfig {
   site_name: string | null
 }
 
+/** 一条积分变动记录（points_history.php）。consume_points 负=扣费、正=充值；remark 格式为「类型说明-备注」 */
+export interface PointsHistoryItem {
+  consume_time: string
+  consume_points: number
+  status: string
+  remaining_points: number
+  reason: string
+  remark: string
+}
+
+/** 积分变动记录分页结果 */
+export interface PointsHistoryResult {
+  ok: boolean
+  message: string
+  list: PointsHistoryItem[]
+  page: number
+  page_size: number
+  total: number
+  total_pages: number
+}
+
 export const CH = {
   // 渲染 -> 主（invoke）
   appBootstrap: 'app:bootstrap',
@@ -115,6 +136,7 @@ export const CH = {
   orderCreate: 'member:order',
   sysConfig: 'member:config',
   consumePoints: 'member:consume',
+  pointsHistory: 'member:points-history',
   checkUpdate: 'app:check-update',
   openExternal: 'app:open-external',
   libraryClear: 'data:library-clear',
@@ -234,6 +256,7 @@ export interface RendererApi {
   orderCreate(productType: string, productId: string): Promise<{ ok: boolean; message: string; order_no?: string; amount?: string; product_name?: string; service_qrcode?: string }>
   sysConfig(): Promise<SysConfig>
   consumePoints(imageCount: number): Promise<ConsumeResult>
+  pointsHistory(params: { type?: string; page?: number; page_size?: number }): Promise<PointsHistoryResult>
   checkUpdate(): Promise<UpdateInfo | null>
   openExternal(url: string): Promise<void>
   libraryClear(): Promise<{ cleared: number }>

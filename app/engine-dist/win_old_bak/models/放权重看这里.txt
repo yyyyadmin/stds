@@ -1,0 +1,3 @@
+把 ONNX 深度学习权重放入本 models/ 目录后重启软件，即可从规则算法升级为深度学习完整精度。
+文件名关键字示例：face_detection_yunet*.onnx / ocec*.onnx / mobilegaze*.onnx / *emotion*.onnx。
+详见 README.md。缺权重时引擎用 OpenCV Haar + 几何规则兜底，功能不中断。

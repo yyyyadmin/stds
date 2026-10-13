@@ -195,14 +195,29 @@ export function clearEngineInputCache(): number {
 /** 需要归一化后才能交给 Python 引擎的格式：冻结引擎的 libraw/heif 原生件不可靠，而 sharp 链路已被验证可用 */
 const NEEDS_NORMALIZE = new Set([...RAW_EXTS, '.heic', '.heif', '.avif', '.jxl'])
 
+/** 普通图（JPG/TIFF/PNG 等 sharp 能读容器 EXIF 的格式）是否需要转正：
+ *  EXIF Orientation 存在且非 1（2~8 都含旋转/镜像）时，冻结 Python 引擎拿到的是侧躺像素，
+ *  人脸/人体模型认不出 → 大量竖拍照片被误判"无人物场景"。返回 true 则需归一化。 */
+async function needsOrientationFix(path: string): Promise<boolean> {
+  try {
+    const m = await sharp(path, { failOn: 'none' }).metadata()
+    return !!m.orientation && m.orientation !== 1
+  } catch {
+    return false
+  }
+}
+
 /**
- * 引擎输入归一化：RAW/HEIC/AVIF 先经 sharp（含内嵌 JPEG 预览兜底）转成“已按 EXIF 转正”的 JPEG 磁盘缓存，
- * 再把该缓存路径交给检测引擎——绕开冻结 Python 引擎解不开 RAW/HEIC 的问题，同时缓存路径为 ASCII，
- * 顺带规避中文目录路径风险。普通格式（JPG/PNG 等）原路返回，不产生额外开销。失败回退原路径。
+ * 引擎输入归一化：RAW/HEIC/AVIF 以及"带 EXIF 旋转标记的普通图（竖拍 JPG 等）"先经 sharp
+ * （含内嵌 JPEG 预览兜底）转成"已按 EXIF 转正"的 JPEG 磁盘缓存，再把该缓存路径交给检测引擎——
+ * 绕开冻结 Python 引擎解不开 RAW/HEIC、且其自身 EXIF 转正不生效（导致竖拍误判无人物）的问题，
+ * 同时缓存路径为 ASCII，顺带规避中文目录路径风险。方向为正（orientation 1/无）的普通图原路返回，
+ * 不产生额外开销。失败回退原路径。
  */
 export async function ensureNormalizedJpeg(path: string, maxSide = 2000): Promise<string> {
   const ext = extname(path).toLowerCase()
-  if (!NEEDS_NORMALIZE.has(ext)) return path
+  // 普通格式且无需旋转 → 快路径直送（覆盖全部横拍照，零额外开销）
+  if (!NEEDS_NORMALIZE.has(ext) && !(await needsOrientationFix(path))) return path
   const dir = join(app.getPath('userData'), 'data', 'engine-input')
   try {
     mkdirSync(dir, { recursive: true })

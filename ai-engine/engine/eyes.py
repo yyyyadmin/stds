@@ -25,7 +25,12 @@ _EAR_OPEN = 0.13    # EAR 高于此零分。闭眼判定看的是"眼睛闭没�
                     # 漏判，那是 eyeBlink 侧要调，不能把本阈值调回去。
 _BLINK_ZERO = 0.52  # eyeBlink 低于此零分（实测眯眼误判全部 ≤0.59）
 _BLINK_FULL = 0.85  # eyeBlink 高于此满分（真实全闭 p95≈0.86）
-_CONFLICT_CAP = 0.82  # 单信号拉满但另一信号近乎相反(<0.15)：疑似误检，封顶只进待确认
+# v2.0.79（用户实测 7G1A9206/DHT12474/CHEN1075/DHT24834 后修正）：EAR 与 blink 两把尺子
+# “打架”（一个说闭死、另一个明确说睁）时，等于没有任何可靠证据支持“闭眼”这个一票否决的重判，
+# 一律不计闭眼（旧版封顶 0.82 塞进待确认，全库误伤的都是低头/妆容/眼睛不可见的假闭眼）。
+# 真闭眼必然两信号同时说闭（走下面的双信号互证分支），不受本规则影响；故收紧不违反“低头/侧看
+# 只要眼睛真闭仍算闭眼”的口径。_CONFLICT_CAP 已废弃，保留仅为兼容历史 reason 文案。
+_CONFLICT_CAP = 0.82
 
 
 def _clip01(v):
@@ -51,7 +56,7 @@ def _eye_ear(lms, idx):
 def _mp_closed_prob(face):
     """有 mp 时返回 (闭合概率, 诊断串)；无 mp / 数据不足返回 None（交调用方回落启发式）。
     只认完全闭合：EAR/blink 两信号各自按严格标定映射，双信号互证才给拉满；
-    单信号强但另一信号明显相反（睁）→ 封顶 _CONFLICT_CAP 只进待确认。
+    单信号强但另一信号明显相反（睁）→ 视为无可靠证据，不计闭眼（v2.0.79，详见 _CONFLICT_CAP 注释）。
     任一眼完全闭合即算闭眼（用户口径：单眼闭、眯成一条线都算）。"""
     mpd = face.get("mp")
     if not mpd:
@@ -74,8 +79,8 @@ def _mp_closed_prob(face):
         if p_ear is not None and p_blink is not None:
             if min(p_ear, p_blink) >= 0.5:  # 双信号互证：真实全闭，叠加拉满
                 pe = min(1.0, pe + 0.30 * min(p_ear, p_blink))
-            elif pe >= 0.85 and min(p_ear, p_blink) < 0.15:  # 另一信号明确说"睁"：只进待确认
-                pe = _CONFLICT_CAP
+            elif pe >= 0.85 and min(p_ear, p_blink) < 0.15:  # 两信号打架：一个说闭死一个说睁 → 无可靠证据，不算闭眼
+                pe = 0.0
         best = pe if best is None else max(best, pe)
         diag.append("%s(ear=%s blink=%s)" % (
             "L" if blink_key.endswith("Left") else "R",

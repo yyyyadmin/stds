@@ -60,6 +60,7 @@ const api: RendererApi = {
   orderCreate: (t: string, id: string) => ipcRenderer.invoke(CH.orderCreate, t, id),
   sysConfig: () => ipcRenderer.invoke(CH.sysConfig),
   consumePoints: (count: number) => ipcRenderer.invoke(CH.consumePoints, count),
+  pointsHistory: (params) => ipcRenderer.invoke(CH.pointsHistory, params),
   checkUpdate: () => ipcRenderer.invoke(CH.checkUpdate),
   openExternal: (url: string) => ipcRenderer.invoke(CH.openExternal, url),
   libraryClear: () => ipcRenderer.invoke(CH.libraryClear),

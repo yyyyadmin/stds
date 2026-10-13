@@ -35,7 +35,7 @@ import {
   DUP_REDUNDANT_KEY,
   DEFAULT_SETTINGS
 } from '../shared/types'
-import { scoreTier } from './classify'
+import { scoreTier, computeCategory } from './classify'
 
 import { openDb, type SqlDb } from './sqlite'
 
@@ -333,6 +333,15 @@ export function updateDetectResult(
   // 人数标签互斥收口：不管上游是引擎新结果、连拍一致化还是聚类补标，落库前再过一次闸，
   // 杜绝同一张图带着两个互斥人数标签进库（卡片上会同时挂「合拍照 + 混合照」两枚打脸的标签）。
   const safeTags = enforcePersonMutex(tags)
+  // 人数一致性硬约束（v2.0.75）：调用方算 category 时用的是互斥收口**前**的 tags；若引擎同时给了
+  // 两个非 low 人数标签，computeCategory 按 PERSON_DIMS 顺序取靠前的（如 mixed_photo），而 enforcePersonMutex
+  // 只留置信/级别更高的那个（如 single_person）——category 便指着那个被删掉的标签，图赖在错误的并集
+  // 视图里。tags 是唯一真源：只要传入的 category 是人数维度，就用收口后实际胜出的人数标签校正它。
+  let finalCategory = category
+  if ((PERSON_DIMS as string[]).includes(finalCategory)) {
+    const recomputed = computeCategory(safeTags, getSettings(), { category, categoryBy } as ImageRecord)
+    if ((PERSON_DIMS as string[]).includes(recomputed) && recomputed !== finalCategory) finalCategory = recomputed
+  }
   // 档位随新 tags 重算（D4）；人工改过的档位（tier_by='user'）永不被重筛/重算覆盖
   const tier = status === 'done' ? scoreTier(safeTags, getSettings()) : null
   db.prepare(`
@@ -341,7 +350,7 @@ export function updateDetectResult(
       tier = CASE WHEN tier_by = 'user' THEN tier ELSE ? END,
       tier_by = CASE WHEN tier_by = 'user' THEN tier_by ELSE ? END
     WHERE id = ?
-  `).run(JSON.stringify(safeTags), JSON.stringify(details), dupGroup, category, categoryBy, status, Date.now(), prev === category ? null : Date.now(), tier, tier ? 'ai' : null, id)
+  `).run(JSON.stringify(safeTags), JSON.stringify(details), dupGroup, finalCategory, categoryBy, status, Date.now(), prev === finalCategory ? null : Date.now(), tier, tier ? 'ai' : null, id)
 }
 
 export function setCategory(id: number, category: CategoryKey, categoryBy: 'ai' | 'user' | null): void {
@@ -393,14 +402,36 @@ export function setDimTag(id: number, dim: DimensionKey, tag: DimResult | null):
   // 写入人数维度时自动顶掉其它人数维度（互斥），调用方不必各自记这份清单。
   // 黑白照与人数正交，不在这组里，不受影响。
   enforcePersonMutex(tags)
+  // 人数一致性硬约束（v2.0.75）：写/删人数标签会顶掉其它人数标签。若当前主分类正指着被顶掉的那个维度，
+  // 图会赖在错误的并集视图里（实测：用户把“多人混合照”手动改成“单人照”，mixed_photo 标签被清走，
+  // 但 category 列停在 mixed_photo，图继续在多人混合照视图出现）。tags 是真源——只要当前主分类是人数维度，
+  // 就把它跟到收口后实际胜出（非 low）的那个人数标签上。普通（非人数）标签不动主分类。
+  let newCategory: CategoryKey = r.category
+  let categoryChanged = false
+  if ((PERSON_DIMS as string[]).includes(r.category)) {
+    const dominant = PERSON_DIMS.find((d) => tags[d] && tags[d]!.level !== 'low')
+    if (dominant && dominant !== r.category) {
+      newCategory = dominant
+      categoryChanged = true
+    }
+  }
   // 标签变了就重算档位（D4）；人工改档不覆盖
   const tier = scoreTier(tags, getSettings())
-  db.prepare(
-    `UPDATE images SET tags = ?,
-       tier = CASE WHEN tier_by = 'user' THEN tier ELSE ? END,
-       tier_by = CASE WHEN tier_by = 'user' THEN tier_by ELSE ? END
-     WHERE id = ?`
-  ).run(JSON.stringify(tags), tier, tier ? 'ai' : null, id)
+  if (categoryChanged) {
+    db.prepare(
+      `UPDATE images SET tags = ?, category = ?, category_by = 'user', cat_changed_at = ?,
+         tier = CASE WHEN tier_by = 'user' THEN tier ELSE ? END,
+         tier_by = CASE WHEN tier_by = 'user' THEN tier_by ELSE ? END
+       WHERE id = ?`
+    ).run(JSON.stringify(tags), newCategory, Date.now(), tier, tier ? 'ai' : null, id)
+  } else {
+    db.prepare(
+      `UPDATE images SET tags = ?,
+         tier = CASE WHEN tier_by = 'user' THEN tier ELSE ? END,
+         tier_by = CASE WHEN tier_by = 'user' THEN tier_by ELSE ? END
+       WHERE id = ?`
+    ).run(JSON.stringify(tags), tier, tier ? 'ai' : null, id)
+  }
 }
 
 /**

@@ -228,7 +228,7 @@ export function isLibraryBucket(cat: CategoryKey, tags: Record<string, { level?:
 /** 分类桶 key = 'library' | 'review' | 'trash' | DimensionKey | 'custom:<id>' */
 export type CategoryKey = string
 
-/** 置信度分级（第四章）默认阈值；缺省为"严格"档（旧名"非常严格"），用户可在设置中调整 */
+/** 置信度分级（第四章）默认阈值；固定为"严格"档（旧名"非常严格"）。v7 阈值锁定后客户不可调，仅供开发者改代码。 */
 export const DEFAULT_HIGH_THRESHOLD = 0.8
 export const DEFAULT_MID_THRESHOLD = 0.55
 
@@ -257,12 +257,14 @@ export type ConfidenceLevel = 'high' | 'mid' | 'low'
  * 人数四分类与黑白是结构/事实结论（引擎给 0.93~0.99 常量），不进这张表，沿用全局阈值，
  * 以免静默把图从某个分类视图里挪走（历史上发生过）。
  *
- * 力度档与滑条不再"直接当阈值用"，而是在这把尺上整体平移（见 classify.effectiveThresholds）。
+ * 自 v7 起力度档与滑条已从客户设置中撤除，effectiveThresholds 直接返回本表值、不再做任何平移（见 classify.ts）。
  */
 export const BASELINE_THRESHOLDS: Partial<Record<DimensionKey, [number, number]>> = {
   eyes_closed: [0.7, 0.95],
   face_ugly: [0.7, 0.82], // 引擎台阶：0.78=单一子特征（码内注释“落入待确认区”），≥0.86=两个以上子特征
-  blur: [0.6, 0.88],
+  // v6（2026-10-14）小降一档：用户反馈“之前纳入模糊的要求太高、很多偏糊的没被标”。high 0.88→0.80、
+  // mid 0.6→0.55，多逮一两张明显偏糊的；背景虚化保护在引擎侧（脸清晰封顶 0.50）不受此改动影响，不会误伤。
+  blur: [0.55, 0.8],
   exposure: [0.55, 0.8],
   half_head: [0.7, 0.9]
 }
@@ -275,8 +277,16 @@ export const BASELINE_THRESHOLDS: Partial<Record<DimensionKey, [number, number]>
  * v3 = 同日档位（tier）依据从“离瑕疵线多远”换成引擎原始锐度实测（见 SHARP_ANCHORS）；
  * v4 = 重复/连拍从瑕疵维度改为结构维度（不再算瑕疵、不再归瑕疵片），且每组代表帧改为按用户权重挑最好一张；
  *      同时启动补跑一次 reclusterStored()（只用库里现存 phash 重新成组与改挂标签，不重跑引擎）。
+ * v5 = 2026-10-14：① 修好档位解析器（引擎 v2.0.64 起 blur reason 换成“全图方差/脸区方差”，旧解析器
+ *      认不出 → 优质自 v2.0.64 起从未发出、全库塌在良好）；② 按纯方差新分布把优质/良好切点从 0.7/0.43
+ *      放松到 0.6/0.4（干净照锐度中位数只有 0.64，旧切点把一半好照片挤成良好）；③ 顺带用现存 tags
+ *      重算 category，修掉“用户把混合照改成单人照、标签换了但主分类没跟”导致图赖在错误并集视图的孤儿行。
+ * v6 = 2026-10-14：模糊台阶基线小降一档（[0.6,0.88]→[0.55,0.80]，用户“偏糊的也该标”），启动补跑 regradeAll
+ *      按新台阶重算存量 blur 的 level。（曝光识别光晕属引擎侧公式改动，需重扫才生效，不靠本次 regrade。）
+ * v7 = 2026-10-14：阈值锁定。effectiveThresholds 收口为只认 BASELINE_THRESHOLDS，不再吃自学习微调/场景/力度平移；
+ *      启动补跑 regradeAll，把存量 level 从“自学习抬高后的线”（如 blur 0.62）换回固定基线（blur 0.55）重算。
  */
-export const REGRADE_VERSION = 4
+export const REGRADE_VERSION = 7
 
 /**
  * 档位（优质/良好/一般）的量化依据：从 blur 的 reason 里解析引擎**原始测量值**。
@@ -295,9 +305,12 @@ export const SHARP_ANCHORS: Record<'face' | 'full', { varLo: number; varHi: numb
 }
 /** 锐度分里拉普拉斯方差的权重，余量给高频占比（两个信号同向，混用以压制单点噪声） */
 export const SHARP_VAR_WEIGHT = 0.65
-/** 优质 / 良好切点：取真实锐度分分布的 p70 与 p35，使三档真的分成堆（实测 30% / 35% / 35%） */
-export const TIER_SHARP_TRUST = 0.7
-export const TIER_SHARP_OK = 0.43
+/** 优质 / 良好切点。v5（2026-10-14）：旧切点 0.7/0.43 是在“方差+高频占比”混合信号上标的；解析器修好后
+ *  档位改用纯方差口径，真实分布整体上移（干净照锐度中位数≈0.64），0.7 会把一半好照片压成良好（实测
+ *  库里优质 0 张）。放松到 0.6/0.4：约“六成干净照进优质”，底部偏软的才落一般，既满足用户“放松优质”
+ *  又保留一般档的分层。瑕疵闸门（scoreTier 里 flawLevel!=='none'→null）不变：有瑕疵标签一定进不了优质/良好。 */
+export const TIER_SHARP_TRUST = 0.6
+export const TIER_SHARP_OK = 0.4
 /** 拿不到实测（放行时清过 blur 标签、或 node 降级引擎只给“模糊面积占比”）时的档位：不奖不罚 */
 export const TIER_SHARP_UNKNOWN: TierKey = 2
 
@@ -311,12 +324,20 @@ export const TIER_SHARP_UNKNOWN: TierKey = 2
  */
 export function estimateTier(tags: Record<string, { level?: string; reason?: string } | undefined> | null | undefined, tier: number | null): TierKey | null {
   if (tier === 1 || tier === 2 || tier === 3) return tier
-  const m = (tags?.blur?.reason || '').match(/清晰度方差\s*(-?\d+(?:\.\d+)?)\((full|face)\)\s*高频占比\s*(-?\d+(?:\.\d+)?)/)
+  const reason = tags?.blur?.reason || ''
+  const clamp = (x: number): number => Math.min(1, Math.max(0, x))
+  const normV = (v: number, a: { varLo: number; varHi: number }): number =>
+    clamp((Math.log10(Math.max(1, v)) - Math.log10(a.varLo)) / (Math.log10(a.varHi) - Math.log10(a.varLo)))
+  // 当前引擎（v2.0.64 起）：优先脸区方差，无脸回落全图方差（与主进程 classify.sharpScore 同口径）
+  const fm = /脸区方差\s*(\d+(?:\.\d+)?)/.exec(reason)
+  if (fm) { const s = normV(Number(fm[1]), SHARP_ANCHORS.face); return s >= TIER_SHARP_TRUST ? 1 : s >= TIER_SHARP_OK ? 2 : 3 }
+  const gm = /全图方差\s*(-?\d+(?:\.\d+)?)/.exec(reason)
+  if (gm) { const s = normV(Number(gm[1]), SHARP_ANCHORS.full); return s >= TIER_SHARP_TRUST ? 1 : s >= TIER_SHARP_OK ? 2 : 3 }
+  // 兼容 v2.0.64 前旧格式“清晰度方差 N(口径) 高频占比 X”
+  const m = reason.match(/清晰度方差\s*(-?\d+(?:\.\d+)?)\((full|face)\)\s*高频占比\s*(-?\d+(?:\.\d+)?)/)
   if (!m) return TIER_SHARP_UNKNOWN
   const a = SHARP_ANCHORS[(m[2] as 'face' | 'full')] || SHARP_ANCHORS.face
-  const clamp = (x: number): number => Math.min(1, Math.max(0, x))
-  const v = Math.max(1, Number(m[1]))
-  const lv = (Math.log10(v) - Math.log10(a.varLo)) / (Math.log10(a.varHi) - Math.log10(a.varLo))
+  const lv = (Math.log10(Math.max(1, Number(m[1]))) - Math.log10(a.varLo)) / (Math.log10(a.varHi) - Math.log10(a.varLo))
   const lh = (Number(m[3]) - a.hfLo) / (a.hfHi - a.hfLo)
   const s = SHARP_VAR_WEIGHT * clamp(lv) + (1 - SHARP_VAR_WEIGHT) * clamp(lh)
   if (s >= TIER_SHARP_TRUST) return 1

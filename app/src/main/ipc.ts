@@ -39,7 +39,7 @@ import { readImageMeta } from './services/exifMeta'
 import { clearEngineInputCache } from './services/rawPreview'
 import { authManager } from './services/auth'
 import { engineManager } from './engine'
-import { autoTune, resetTuned, TUNE_MIN_CORRECTIONS } from './services/tuner'
+import { autoTune, resetTuned } from './services/tuner'
 import { CAT_LIBRARY, CAT_TRASH, CAT_FLAWS, CAT_REVIEW, isBadDim, isStructuralDim, isTrashLike, BAD_DIMENSIONS, SUPPORTED_EXTS, PERSON_DIMS, guessMidDim, tierOfCat, isDeliverable, type CategoryKey, type DimensionKey, type ImageRecord } from '../shared/types'
 import { computeCategory } from './classify'
 
@@ -67,19 +67,13 @@ export function registerIpc(win: BrowserWindow): void {
   scanner.on('progress', (p: ScanProgress) => {
     send(CH.E_scanProgress, p)
     if (!p.running && (p.phase === 'done' || p.phase === 'stopped')) {
-      // 筛选结束自动尝试阈值微调（第五章 5.4）
-      const s = getSettings()
-      if (s.autoTune && totalCorrections() >= TUNE_MIN_CORRECTIONS) {
-        try {
-          autoTune()
-        } catch {
-          /* ignore */
-        }
-      }
-      // 积分消费（API 文档 3.3）：本次实际处理张数，会员免扣
-      if (p.done > 0 && authManager.state().loggedIn) {
+      // v7（2026-10-14）阈值锁定：不再在筛选结束自动微调阈值。判定线只认代码里的基线表
+      // （effectiveThresholds 已忽略 tunedThresholds），自学习这条腿从写入源头就断掉。
+      // 积分消费（API 文档 3.3）：只计蓝色“开始筛选”这类计费轮次（p.billable），重筛不收费；
+      // 只按本次「检测成功」的张数扣，失败的不扣；会员免扣
+      if (p.billable && p.ok > 0 && authManager.state().loggedIn) {
         void authManager
-          .consume(p.done)
+          .consume(p.ok)
           .then((r) => send(CH.E_authChanged, authManager.state(), r))
           .catch(() => undefined)
       }
@@ -500,7 +494,7 @@ export function registerIpc(win: BrowserWindow): void {
   ipcMain.handle(CH.scanRescanAll, async () => {
     // 先把上一轮 AI 归属与标签归位（归属不动的：人工两个桶 + 用户手动放置），再起跑
     const reset = resetForRescan()
-    const r = await scanner.start()
+    const r = await scanner.start(false)
     return { ...r, reset }
   })
   ipcMain.handle(CH.reclassify, () => reclassifyAll())
@@ -547,6 +541,11 @@ export function registerIpc(win: BrowserWindow): void {
     send(CH.E_authChanged, authManager.state(), r)
     return r
   })
+  ipcMain.handle(
+    CH.pointsHistory,
+    (_e, params: { type?: string; page?: number; page_size?: number }) =>
+      authManager.pointsHistory(params?.type ?? '', params?.page ?? 1, params?.page_size ?? 10)
+  )
   ipcMain.handle(CH.checkUpdate, () => authManager.checkUpdate())
   ipcMain.handle(CH.openExternal, (_e, url: string) => {
     // 仅允许 http/https，防止任意协议注入

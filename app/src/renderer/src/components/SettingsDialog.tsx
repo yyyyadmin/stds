@@ -7,17 +7,8 @@
  */
 import { useEffect, useState } from 'react'
 import { useStore } from '../store'
-import {
-  BAD_DIMENSIONS,
-  DIMENSION_LABELS,
-  SCENE_PRESETS,
-  STRICTNESS_PRESETS,
-  DEFAULT_TIER_NAMES,
-  deriveStrictness,
-  type DimensionKey
-} from '../../../shared/types'
+import { DEFAULT_TIER_NAMES } from '../../../shared/types'
 import type { EngineStatus } from '../../../main/engine'
-import type { TuneReport } from '../../../main/services/tuner'
 import type { UpdateInfo } from '../../../shared/ipc'
 
 export default function SettingsDialog(): JSX.Element {
@@ -30,9 +21,6 @@ export default function SettingsDialog(): JSX.Element {
   const perfAutoLean = useStore((s) => s.perfAutoLean)
 
   const [engine, setEngine] = useState<EngineStatus | null>(null)
-  const [stats, setStats] = useState<{ total: number; perDim: Record<string, { falsePositive: number; truePositive: number; total: number }> } | null>(null)
-  const [tuneReport, setTuneReport] = useState<TuneReport | null>(null)
-  const [advanced, setAdvanced] = useState(false)
   // 档位目录名草稿（D4）：失焦/回车时保存，留空回退默认名
   const [tierDraft, setTierDraft] = useState<string[] | null>(null)
 
@@ -43,7 +31,6 @@ export default function SettingsDialog(): JSX.Element {
 
   useEffect(() => {
     void window.api.engineStatus().then(setEngine)
-    void window.api.tuneStats().then(setStats)
   }, [])
 
   const checkUpdate = (): void => {
@@ -57,38 +44,6 @@ export default function SettingsDialog(): JSX.Element {
       })
       .catch(() => setCheckFailed(true))
       .finally(() => setChecking(false))
-  }
-
-  const setThreshold = (key: 'highThreshold' | 'midThreshold', v: number): void => {
-    const patch: Record<string, number | string> = { [key]: v, strictness: 'custom' }
-    if (key === 'midThreshold' && v >= settings.highThreshold) patch.midThreshold = settings.highThreshold - 0.05
-    if (key === 'highThreshold' && v <= settings.midThreshold) patch.highThreshold = settings.midThreshold + 0.05
-    void saveSettings(patch, true)
-  }
-
-  // 检测程度档位：选档即同步写入对应的两个阈值并立即重分桶
-  const strictNow = deriveStrictness(settings.highThreshold, settings.midThreshold)
-  const applyStrictness = (k: string): void => {
-    const p = STRICTNESS_PRESETS.find((x) => x.key === k)
-    if (!p) return
-    void saveSettings({ strictness: p.key, highThreshold: p.high, midThreshold: p.mid }, true)
-  }
-
-  const tuneNow = (): void => {
-    void window.api.tuneNow().then((r) => {
-      setTuneReport(r)
-      void useStore.getState().saveSettings({})
-      void useStore.getState().refreshImages()
-      void useStore.getState().refreshCounts()
-    })
-  }
-  const tuneReset = (): void => {
-    void window.api.tuneReset().then(() => {
-      setTuneReport(null)
-      void useStore.getState().saveSettings({})
-      void useStore.getState().refreshImages()
-      void useStore.getState().refreshCounts()
-    })
   }
 
   return (
@@ -187,32 +142,6 @@ export default function SettingsDialog(): JSX.Element {
             </div>
           </section>
 
-          {/* 筛选力度（原"检测程度"）：主区只留一个结果导向下拉；两根滑条搬进
-              高级设置——同一对参数不再在客户面前摆两个入口（用户拍板 2026-10-11），
-              选项里的"（高 0.80 / 中 0.55）"小数也去掉了 */}
-          <section>
-            <h3 className="text-fg2 font-bold mb-2">筛选力度</h3>
-            <div className="rounded-md bg-panel2 border border-line p-3 space-y-2">
-              <select className="input w-full" value={strictNow} onChange={(e) => applyStrictness(e.target.value)}>
-                {STRICTNESS_PRESETS.map((p) => (
-                  <option key={p.key} value={p.key}>{p.label}</option>
-                ))}
-                {strictNow === 'custom' && <option value="custom">自定义（高级设置里微调过）</option>}
-              </select>
-              <p className="text-xs text-fg3">
-                {strictNow === 'custom'
-                  ? '当前为自定义阈值：越严格 → 越多照片被拉进待确认，越宽松 → 误报更少、绝大多数直接进交付库。'
-                  : STRICTNESS_PRESETS.find((p) => p.key === strictNow)?.tip}
-              </p>
-              <p className="text-xs text-fg3">
-                只影响【待确认】里哪些疑点算“值得再看一眼”（闭眼/模糊/曝光/半截头/表情崩坏）。人数分类（合影/单人/无人）、黑白照、重复图是引擎的事实与结构结论，<b>不参与这里的收紧或放宽</b>，任何档位下都一律照旧。<b>切换档位无需重新检测</b>，立即按已存结果重新分桶。
-              </p>
-              <p className="text-xs text-fg3">
-                每一类问题各有各的判定刻度（"模糊"最高只会给出 0.85，"闭眼"只有 0.75 和 1.0 两档），所以这里是在<b>各自刻度上整体收紧或放宽</b>，不是所有问题共用一条线。
-              </p>
-            </div>
-          </section>
-
           {/* 交付库档位目录名（D4）：侧栏三行子档与导出二级子目录共用这几个名字，
               改完立即可见（无需重筛）；导出时按 交付库/优质|良好|一般/ 分 folder。
               v3：档位的依据已从“离瑕疵线多远”换成引擎实测清晰度，无需重跑引擎即可重算 */}
@@ -245,131 +174,6 @@ export default function SettingsDialog(): JSX.Element {
               </div>
               <p className="text-xs text-fg3">三档按引擎实测的<b>画面清晰度</b>（细节量 + 高频占比）排队，侧栏与导出子目录共用这几个名字（如改成 精修/初修/直出）。它只告诉你先看哪批，<b>不影响哪张照片被拦下来</b>；拿不到清晰度实测的老图一律先归中间档，不擅自抬也不擅自压。</p>
             </div>
-          </section>
-
-          {/* 高级设置（默认折叠） */}
-          <section>
-            <button className="w-full flex items-center justify-between text-fg2 font-bold" onClick={() => setAdvanced((v) => !v)}>
-              <span>高级设置（阈值微调 / 场景 / 修正学习）</span>
-              <span className="text-fg3">{advanced ? '▲ 收起' : '▼ 展开'}</span>
-            </button>
-            {advanced && (
-              <div className="mt-3 space-y-5">
-                {/* 置信度阈值微调：从主区挪来。和主区"筛选力度"下拉是同一对参数，
-                   滑过之后档位显示"自定义"，回下拉选档即可覆盖 */}
-                <div>
-                  <h4 className="text-fg2 font-bold mb-2">置信度阈值微调</h4>
-                  <div className="rounded-md bg-panel2 border border-line p-3 space-y-3">
-                    <div>
-                      <div className="flex justify-between text-xs text-fg3">
-                        <span>高置信度阈值（高于此线 → 直接归入瑕疵）</span>
-                        <b className="text-fg tabular-nums">{settings.highThreshold.toFixed(2)}</b>
-                      </div>
-                      <input type="range" min={0.5} max={0.99} step={0.01} value={settings.highThreshold}
-                        className="w-full accent-red-500"
-                        onChange={(e) => setThreshold('highThreshold', Number(e.target.value))} />
-                    </div>
-                    <div>
-                      <div className="flex justify-between text-xs text-fg3">
-                        <span>中置信度下限（介于中和高之间 → 待确认）</span>
-                        <b className="text-fg tabular-nums">{settings.midThreshold.toFixed(2)}</b>
-                      </div>
-                      <input type="range" min={0.3} max={0.95} step={0.01} value={settings.midThreshold}
-                        className="w-full accent-yellow-500"
-                        onChange={(e) => setThreshold('midThreshold', Number(e.target.value))} />
-                    </div>
-                    <p className="text-xs text-fg3">
-                      低于 {settings.midThreshold.toFixed(2)} 的判定不标记，图片默认留在交付库。调整阈值<b>无需重新检测</b>，立即按已存结果重新分桶。
-                    </p>
-                    <p className="text-xs text-fg3">
-                      这两根滑条是瑕疵判定的<b>整体基准</b>：每类瑕疵在自己的刻度上按同样幅度平移（比如这里放宽 0.1，模糊与闭眼也各自放宽 0.1）。人数/黑白/重复这些事实结论不吃平移，所以不可能被拉高到某一类永不触发。
-                    </p>
-                  </div>
-                </div>
-
-                {/* 场景预设 */}
-                <div>
-                  <h4 className="text-fg2 font-bold mb-2">场景预设</h4>
-                  <div className="grid grid-cols-2 gap-2">
-                    {SCENE_PRESETS.map((p) => (
-                      <button
-                        key={p.key}
-                        className={
-                          'px-3 py-2 rounded-md border text-left ' +
-                          (settings.scene === p.key ? 'border-brand bg-brand/10 text-brand' : 'border-line bg-panel2 text-fg2 hover:text-fg')
-                        }
-                        onClick={() => void saveSettings({ scene: p.key }, true)}
-                        title={Object.entries(p.overrides).map(([d, v]) => `${DIMENSION_LABELS[d as DimensionKey]}: ${v[0]}~${v[1]}`).join('\n') || '使用全局阈值'}
-                      >
-                        <div className="font-bold">{p.label}</div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* 修正学习 */}
-                <div>
-                  <h4 className="text-fg2 font-bold mb-2">修正学习 · 阈值微调</h4>
-                  <label className="flex items-center gap-2 text-fg2 mb-2 cursor-pointer">
-                    <input type="checkbox" checked={settings.autoTune} onChange={(e) => void saveSettings({ autoTune: e.target.checked })} />
-                    修正记录积累后自动微调阈值
-                  </label>
-                  <div className="rounded-md bg-panel2 border border-line p-3 text-xs space-y-2">
-                    <div className="text-fg3">
-                      累计修正记录：<b className="text-fg tabular-nums">{stats?.total ?? '…'}</b> 条（达到 200 条后生效）
-                    </div>
-                    {stats && Object.keys(stats.perDim).length > 0 && (
-                      <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-                        {Object.entries(stats.perDim)
-                          .sort((a, b) => b[1].total - a[1].total)
-                          .slice(0, 8)
-                          .map(([d, s]) => (
-                            <div key={d} className="flex justify-between text-fg3">
-                              <span>{DIMENSION_LABELS[d as DimensionKey] || d}</span>
-                              <span className="tabular-nums">
-                                误判 {s.falsePositive} / 正确 {s.truePositive}
-                              </span>
-                            </div>
-                          ))}
-                      </div>
-                    )}
-                    {tuneReport && (
-                      <div className="text-fg2">
-                        {tuneReport.tuned.length
-                          ? '本次微调：' + tuneReport.tuned.map((t) => `${DIMENSION_LABELS[t.dim as DimensionKey] || t.dim} → ${t.to[0].toFixed(2)}~${t.to[1].toFixed(2)}（${t.reason}）`).join('；')
-                          : tuneReport.skippedReason || '暂无可微调项'}
-                      </div>
-                    )}
-                    <div className="flex gap-2 pt-1">
-                      <button className="btn text-xs" onClick={tuneNow}>立即微调</button>
-                      <button className="btn text-xs" onClick={tuneReset}>重置微调</button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 维度阈值明细 */}
-                <div>
-                  <h4 className="text-fg2 font-bold mb-2">各维度当前生效阈值</h4>
-                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                    {BAD_DIMENSIONS.map((d) => {
-                      const tuned = settings.tunedThresholds?.[d]
-                      const scene = SCENE_PRESETS.find((p) => p.key === settings.scene)?.overrides[d]
-                      const t = tuned || scene || [settings.midThreshold, settings.highThreshold]
-                      const src = tuned ? '微调' : scene ? '场景' : '全局'
-                      return (
-                        <div key={d} className="flex justify-between text-fg3 border-b border-line/40 py-0.5">
-                          <span>{DIMENSION_LABELS[d]}</span>
-                          <span className="tabular-nums">
-                            {Number(t[0]).toFixed(2)} ~ {Number(t[1]).toFixed(2)}
-                            <span className="text-fg3 opacity-60 ml-1">({src})</span>
-                          </span>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              </div>
-            )}
           </section>
 
           {/* 版本更新 */}

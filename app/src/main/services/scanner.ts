@@ -26,7 +26,12 @@ import { isTrashLike, isDupRedundant, flawLevel, CAT_REVIEW, BAD_DIMENSIONS, NEU
 
 export interface ScanProgress {
   running: boolean
+  /** 本次处理张数（成功 + 失败），进度条用 */
   done: number
+  /** 本次真正检测成功的张数（失败的不计入）——唯一用于扣积分的口径 */
+  ok: number
+  /** 本轮是否计费：蓝色“开始筛选”=true（新图首次检测收费）；设置里“重新筛选”=false（重跑不收费） */
+  billable: boolean
   total: number
   current: string
   phase: 'init' | 'scanning' | 'dup-cluster' | 'done' | 'stopped' | 'error'
@@ -45,7 +50,7 @@ class Scanner extends EventEmitter {
   private queue: number[] = []
   private running = false
   private stopRequested = false
-  private progress: ScanProgress = { running: false, done: 0, total: 0, current: '', phase: 'done' }
+  private progress: ScanProgress = { running: false, done: 0, ok: 0, billable: true, total: 0, current: '', phase: 'done' }
   /** 连续检测失败计数：用于引擎健康熔断（连续过多失败自动停止，避免长时间假死） */
   private consecFail = 0
   private engineAborted = false
@@ -63,9 +68,10 @@ class Scanner extends EventEmitter {
   }
 
   /** 开始/继续筛选（断点续跑：只处理 pending/error 状态图片）
+   *  billable：本轮是否扣积分。蓝色“开始筛选”传 true；设置里“重新筛选全部”传 false。
    *  关键：本方法立即返回，引擎初始化与检测在 startAsync 异步进行，
    *  避免引擎启动卡住时阻塞 scanStart IPC 导致停止/清空等全部无响应。 */
-  async start(): Promise<{ started: boolean; message: string }> {
+  async start(billable = true): Promise<{ started: boolean; message: string }> {
     if (this.running) return { started: false, message: '筛选已在进行中' }
     const pending = pendingImages()
     if (!pending.length) {
@@ -73,7 +79,7 @@ class Scanner extends EventEmitter {
       if (!total) return { started: false, message: '请先导入照片' }
       return { started: false, message: '所有照片已完成筛选' }
     }
-    this.progress = { running: true, done: 0, total: pending.length, current: '', phase: 'init', message: '正在启动 AI 引擎...', startedAt: Date.now(), phaseStartedAt: Date.now() }
+    this.progress = { running: true, done: 0, ok: 0, billable, total: pending.length, current: '', phase: 'init', message: '正在启动 AI 引擎...', startedAt: Date.now(), phaseStartedAt: Date.now() }
     this.emit('progress', this.progress)
     this.running = true
     this.stopRequested = false
@@ -185,6 +191,7 @@ class Scanner extends EventEmitter {
           throw new Error(String(raw.error))
         }
         this.handleResult(rec, raw)
+        this.progress.ok++
         this.consecFail = 0
       } catch (e) {
         const errMsg = String((e as Error)?.message || e)

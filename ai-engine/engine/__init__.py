@@ -5,7 +5,7 @@ from .face import FaceDetector
 from .eyes import EyesAnalyzer
 from .expression import ExpressionAnalyzer
 from .landmarks import FaceLandmarkEnhancer
-from .person import PersonDetector, merge_overlaps, frontal_faces, body_has_face, posed_group
+from .person import PersonDetector, merge_overlaps, frontal_faces, body_has_face, posed_group, foreground_bystander, POSED_FRONT_RATIO
 from . import quality as Q
 from .models import detect_device, _HAS_ORT
 
@@ -98,8 +98,13 @@ class DetectEngine:
         bw_conf, bw_reason = Q.black_white_score(bgr)
         dims["black_white"] = {"confidence": round(bw_conf, 4), "reason": bw_reason, "method": "saturation"}
 
+        # --- 人体检测框前置：人数分类与半截头"检不到脸"安全网共用同一份结果，只跑一次 ---
+        person_count, bodies = self.person.count(bgr)
+        full_bodies = [b for b in bodies if b.get("filtered", True)] if person_count is not None else []
+        main = merge_overlaps(full_bodies)
+
         # --- 半截头 ---
-        hh_conf, hh_reason = Q.half_head_score(bgr.shape, faces, upper, scale)
+        hh_conf, hh_reason = Q.half_head_score(bgr.shape, faces, upper, scale, person_boxes=main)
         dims["half_head"] = {"confidence": round(hh_conf, 4), "reason": hh_reason, "method": "box+body"}
 
         # --- 人数分类（四分类，用户拍板 2026-10-11：人数看正面主体，合影看摆拍结构）---
@@ -117,10 +122,7 @@ class DetectEngine:
         # 混合照与合拍照同为中性维度、同属交付库：接亲这类情节片是要交片的，任何时候不进瑕疵。
         # v2.0.62 三组结构性误判的修法保留：拆框合并、人体漏检时脸作硬下限、远景小框不算无人物；
         # “远景小框≥2”（用户旧拍板）仍不进无人物，但不再算合影——没人在摆拍，只是环境里的观众。
-        person_count, bodies = self.person.count(bgr)
         if person_count is not None:
-            full_bodies = [b for b in bodies if b.get("filtered", True)]
-            main = merge_overlaps(full_bodies)
             # 把“合并发生了几个框”写进 reason：下一轮校准能直接量化拆框频率与护栏是否过紧/过松
             merge_note = (
                 "，人体 %d 框同列合并为 %d 人" % (len(full_bodies), len(main))
@@ -131,16 +133,36 @@ class DetectEngine:
             n_bystander = sum(1 for b in main if not body_has_face(b, frontal))
             n_present = max(len(main), face_count)
             others = max(n_present - n_front, n_bystander)
+            # 在场"主体人数"以人体框数为准（v2.0.78 用户实测 CHEN1192 后修正）：上一版数"够大的脸"，
+            # 但人脸检测器 YuNet 会把墙上的投影、地上的宠物脸误检成一张大气质脸（CHEN1192 一张单人
+            # 写真被数成 2 人 → 误判多人），而人体检测器不会被一团影子或一只狗骗到——单人照只有 1 个
+            # 身体框。仅当人体整体漏检（0 框）时才退回脸数兜底，避免"两个人体全漏"被误判单人。侧身/低头都算在场。
+            n_faces_big = sum(1 for f in (faces or []) if h > 0 and float(f["box"][3]) / float(h) >= 0.03)
+            n_subjects = len(main) if main else n_faces_big
             if n_front >= 2:
                 avg_score = sum(f["score"] for f in frontal) / n_front
                 base = 0.88 + avg_score * 0.1
                 who = "正面主体 %d、规整主群 %d、共在场 %d（人体 %d、脸 %d）%s" % (
                     n_front, posed_n, n_present, len(main), face_count, merge_note
                 )
-                if posed:
+                # 第六道合影闸（v2.0.77 用户拍板 2026-10-14）：五道闸只评判对着镜头的那群人，看不见前景
+                # 一个背对镜头的大块头。当前景背身者比整群正脸人都明显更大（更靠前）时，画面真正的主角
+                # 是那个背影，这张是抓拍现场不是摆拍合影 → 降级混合照（如 DHT24780 黑西装背影占半屏）。
+                fg = foreground_bystander(main, frontal)
+                # 合影得在场的人里绝大多数都朝着镜头（v2.0.78 用户拍板 2026-10-14）：只数正脸会把
+                # "低头办仪式/旁边有人侧身"的抓拍误判合影（DHT12399 敬茶 4 人仅 2 人朝镜头）。
+                front_ratio = (n_front / n_present) if n_present else 0.0
+                few_facing = front_ratio < POSED_FRONT_RATIO
+                if posed and not fg and not few_facing:
                     dims["group_photo"] = {"confidence": round(min(0.98, base), 4), "reason": "摆拍合影主群：%s" % who, "method": "body-count+posed"}
                 else:
-                    dims["mixed_photo"] = {"confidence": round(min(0.96, base), 4), "reason": "多人但非摆拍合影（%s）：%s" % ("/".join(posed_fails), who), "method": "body-count+posed"}
+                    if posed and fg:
+                        fails = "前景有背身主体抢镜"
+                    elif posed and few_facing:
+                        fails = "在场 %d 人仅 %d 人朝镜头" % (n_present, n_front)
+                    else:
+                        fails = "/".join(posed_fails)
+                    dims["mixed_photo"] = {"confidence": round(min(0.96, base), 4), "reason": "多人但非摆拍合影（%s）：%s" % (fails, who), "method": "body-count+posed"}
             elif n_front == 1 and others == 0:
                 if main:
                     b0 = main[0]
@@ -155,8 +177,12 @@ class DetectEngine:
                     # 人体零检出但检到 1 张正面脸：沿用旧 face-count 单人判据
                     conf, why = 0.985, "检出 1 张正面人脸（人体未检出）"
                 dims["single_person"] = {"confidence": round(conf, 4), "reason": why, "method": "body-count"}
+            elif n_front == 1 and n_subjects >= 2:
+                # 检到 ≥2 个在场人体、但只有 1 张正脸（其余侧身/低头/背身）：现场至少 2 人，是多人不是单人。
+                # 只有 1 张正脸 → 合影五道闸需 ≥2 正脸，过不了 → 归多人混合照（同属交付库、不进瑕疵）。
+                dims["mixed_photo"] = {"confidence": 0.86, "reason": "检出 %d 个在场人体、仅 1 个正面主体（其余侧身/低头/背身），现场至少 %d 人" % (n_subjects, n_subjects), "method": "body-count"}
             elif n_front == 1:
-                # 图1 那类：新娘正脸清晰 + 宾客后脑/半截前景——不够合照也不够单人，进待确认
+                # 仅 1 张够大的正脸，其余是"没检到脸"的后脑/半截身（n_subjects<2）——真·单人带旁人，进待确认
                 dims["single_person"] = {"confidence": 0.62, "reason": "仅 1 个正面主体，另有 %d 个在场者非正面（后脑/半截/侧脸/低头）" % others, "method": "body-count"}
             elif n_present >= 1:
                 if n_present >= 2:

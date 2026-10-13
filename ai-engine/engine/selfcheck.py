@@ -342,6 +342,13 @@ def run():
             "scattered": ([pf(60, 120, 80, 100), pf(1000, 120, 80, 100)], False),
             # 一人侧头（yaw 0.27：过正面主体闸 0.30、不过合影闸 0.24）→ 混合照
             "offgaze": ([pf(300, 120, 80, 100), pf(392, 120, 80, 100, yaw=0.27)], False),
+            # 两对各自凑近、中间留一道大缝（全家福父母各抱一团）：中位数间距小 → 合拍照
+            # （v2.0.74 修：旧版取最大缝会把它误判成“人物散落”，用户实测同款合影被坑）
+            "twopair": ([pf(200, 120, 80, 100), pf(296, 120, 80, 100),
+                         pf(800, 120, 80, 100), pf(896, 120, 80, 100)], True),
+            # 四人均匀横铺整幅、多数间距都大（真·四散）：中位数仍高 → 混合照
+            "wide4": ([pf(60, 120, 80, 100), pf(400, 120, 80, 100),
+                       pf(740, 120, 80, 100), pf(1080, 120, 80, 100)], False),
         }
         bad = []
         for name, (fs, want) in cases.items():
@@ -353,6 +360,29 @@ def run():
     except Exception as _pg:  # noqa: BLE001
         out["posed_run_ok"] = False
         out["error"] = (out["error"] or "") + " |posed: %s: %s" % (type(_pg).__name__, _pg)
+    # --- "半脸也算半截头"身体安全网的无模型单测（用户拍板 2026-10-14）---
+    # 脸检不到时靠人身框上缘贴顶边判半截头；小身/不贴顶/有脸三条必须不误伤。
+    try:
+        from .quality import half_head_score
+        Hh, Ww = 1000, 700
+        shape = (Hh, Ww, 3)
+        big_top = [{"box": [100, 0, 500, 800]}]          # 主体人身贴顶边 → 应判半截
+        big_inner = [{"box": [100, 120, 500, 800]}]       # 大身但头顶在框内 → 不判
+        small_top = [{"box": [100, 0, 120, 200]}]         # 远景小人身贴顶 → 不判
+        fake_face = [{"box": [300, 400, 80, 60], "score": 0.9}]  # 有脸时不走身体安全网
+        c1, r1 = half_head_score(shape, [], [], 1.0, person_boxes=big_top)
+        c2, r2 = half_head_score(shape, [], [], 1.0, person_boxes=big_inner)
+        c3, r3 = half_head_score(shape, [], [], 1.0, person_boxes=small_top)
+        c4, r4 = half_head_score(shape, fake_face, [], 1.0, person_boxes=big_top)
+        ok1 = c1 >= 0.8 and "顶边" in r1
+        ok2 = c2 == 0.0
+        ok3 = c3 == 0.0
+        ok4 = c4 == 0.0  # 小脸在框内：既有逻辑判"头部完整"，新安全网也不因有身框而偷加
+        out["half_head_fallback_ok"] = bool(ok1 and ok2 and ok3 and ok4)
+        out["half_head_detail"] = "c1:%.2f c2:%.2f c3:%.2f c4:%.2f" % (c1, c2, c3, c4)
+    except Exception as _hh:  # noqa: BLE001
+        out["half_head_fallback_ok"] = False
+        out["error"] = (out["error"] or "") + " |half_head: %s: %s" % (type(_hh).__name__, _hh)
     return out
 
 

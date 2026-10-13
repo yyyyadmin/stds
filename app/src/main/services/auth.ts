@@ -15,6 +15,8 @@ import type {
   MembershipLevel,
   PlanInfo,
   SysConfig,
+  PointsHistoryItem,
+  PointsHistoryResult,
   UpdateInfo
 } from '../../shared/ipc'
 
@@ -275,6 +277,44 @@ class AuthManager {
       }
     }
     return { ok: false, consumed: 0, remaining: null, insufficient: false, message: r.message || '积分扣费失败' }
+  }
+
+  /** 积分变动记录（points_history.php）。type 空=全部，consume=仅扣费 */
+  async pointsHistory(
+    type: string,
+    page: number,
+    pageSize: number
+  ): Promise<PointsHistoryResult> {
+    const empty = { list: [] as PointsHistoryItem[], page, page_size: pageSize, total: 0, total_pages: 0 }
+    if (!this.token) return { ok: false, message: '未登录', ...empty }
+    const r = await request<{ list?: unknown[]; pagination?: Record<string, unknown> }>(
+      'points_history.php',
+      { type, page, page_size: pageSize },
+      this.token
+    )
+    if (r.code === 200) {
+      const d = r.data || {}
+      const rawList = Array.isArray(d.list) ? d.list : []
+      const list = (rawList as Array<Record<string, unknown>>).map((it) => ({
+        consume_time: String(it.consume_time || ''),
+        consume_points: Number(it.consume_points) || 0,
+        status: String(it.status || ''),
+        remaining_points: Number(it.remaining_points) || 0,
+        reason: String(it.reason || ''),
+        remark: String(it.remark || '')
+      }))
+      const pg = d.pagination || {}
+      return {
+        ok: true,
+        message: r.message || '',
+        list,
+        page: Number(pg.page) || page,
+        page_size: Number(pg.page_size) || pageSize,
+        total: Number(pg.total) || 0,
+        total_pages: Number(pg.total_pages) || 0
+      }
+    }
+    return { ok: false, message: r.message || '获取消费记录失败', ...empty }
   }
 
   async checkUpdate(): Promise<UpdateInfo | null> {

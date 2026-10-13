@@ -138,10 +138,13 @@ def frontal_faces(faces, img_h):
 # 改动必须重建引擎并全库重筛才生效；reason 里会带出“未通过哪一道闸”，
 # 校准时直接按它统计各闸的拦截量就知道该松哪一道，不必猜。
 POSED_H_RATIO = 2.0     # 1 同纵深：簇内最大脸高 / 最小脸高
-POSED_ROW_STD = 0.85    # 2 成一排：脸中心 y 标准差 / 平均脸高
-POSED_GAP_RATIO = 1.3   # 3 紧挨着：按 x 排序后最大净间距 / 平均脸宽
+# （原"2 成一排"POSED_ROW_STD 已在 v2.0.78 移除：合影允许前排蹲后排站的错落站位，用户实测 7G1A8818）
+POSED_GAP_RATIO = 1.5   # 3 紧挨着：按 x 排序后净间距中位数 / 平均脸宽（v2.0.77 由 1.3 放宽到 1.5：
+                        #   新人并肩自然站位中间常留 ~1.4 个脸宽的缝，1.3 会把这些正常合影误降级成混合照）
 POSED_MAX_YAW = 0.24    # 4 共同面向：簇内最大 yaw（比正面主体闸 0.30 更严——看镜头是摆拍的强信号）
 POSED_DOMINANT = 0.55   # 5 主群即主体：簇内最大脸高 / 全图最大脸高
+POSED_FRONT_RATIO = 0.6 # 7 合影得绝大多数人朝镜头（v2.0.78 用户拍板 2026-10-14，在 __init__.py 判定）：
+                        #   正面主体数 / 在场总人数 < 此线 → 是抓拍不是摆拍合影（DHT12399 敬茶仅 2/4 朝镜头）
 
 
 def posed_group(frontal, img_w, img_h):
@@ -170,22 +173,28 @@ def posed_group(frontal, img_w, img_h):
     gh = [float(f["box"][3]) for f in group]
     gw = [float(f["box"][2]) for f in group]
     cx = [f["box"][0] + f["box"][2] / 2.0 for f in group]
-    cy = [f["box"][1] + f["box"][3] / 2.0 for f in group]
     mean_h = sum(gh) / len(gh)
     mean_w = sum(gw) / len(gw)
     fails = []
     if max(gh) / max(1e-6, min(gh)) > POSED_H_RATIO:
         fails.append("纵深差异大")
-    cy_mean = sum(cy) / len(cy)
-    cy_std = (sum((v - cy_mean) ** 2 for v in cy) / len(cy)) ** 0.5
-    if cy_std / max(1e-6, mean_h) > POSED_ROW_STD:
-        fails.append("不在一排")
+    # （原"成一排"闸已移除：脸的竖直中心方差会把前排蹲后排站的正常合影误杀，用户实测 7G1A8818）
     order = sorted(range(len(group)), key=lambda k: cx[k])
     xs = [cx[k] for k in order]
     ws = [gw[k] for k in order]
     if len(xs) > 1:
-        gap = max((xs[k + 1] - xs[k]) - (ws[k] + ws[k + 1]) / 2.0 for k in range(len(xs) - 1))
-        if gap / max(1e-6, mean_w) > POSED_GAP_RATIO:
+        # 用相邻间距的“中位数”而非“最大值”（v2.0.74 修）：规矩合影常两两凑近、中间留一道缝
+        # （全家福里父母与子女各抱一团、伴娘团贴一侧），旧版取最大缝会把这种一票否决成
+        # “人物散落”（实测流水账 3 张纯合影只栽这一道闸）。中位数只认典型邻里间距，一道离群
+        # 大缝不影响；真·四散（接亲游戏多数间距都大）中位数仍高，照样拦。v2.0.77 阈值由 1.3 放宽到 1.5
+        # （用户实测 DHT12489：新人并肩自然站位净距 1.38 脸宽，被 1.3 一票否决成"散落不成群"）。
+        gaps = sorted(
+            ((xs[k + 1] - xs[k]) - (ws[k] + ws[k + 1]) / 2.0) / max(1e-6, mean_w)
+            for k in range(len(xs) - 1)
+        )
+        mid = len(gaps) // 2
+        gap_ratio = gaps[mid] if len(gaps) % 2 else (gaps[mid - 1] + gaps[mid]) / 2.0
+        if gap_ratio > POSED_GAP_RATIO:
             fails.append("人物散落不成群")
     yaws = []
     for f in group:
@@ -209,6 +218,23 @@ def body_has_face(body, faces):
         if bx <= cx <= bx + bw and by - fh <= cy <= by + bh * 0.7:
             return True
     return False
+
+
+POSED_FOREGROUND_RATIO = 1.2  # 6 无背身前景抢镜：某个"不含正脸的人体"(背身/侧身没拍到脸) 的占图高，
+                              #   超过对着镜头那群人最大占图高的 1.2 倍时，说明真正的主角是这个背影，不算摆拍合影。
+                              #   倍数 1.2 留缓冲（用户实测 DHT24780：黑西装背影占图高 0.77、后面 3 个伴娘最大 0.51、
+                              #   比值 1.50 → 降级混合照；而正常合影边角宾客背影最大比值仅 0.69，不误伤）。
+
+
+def foreground_bystander(main, frontal):
+    """是否存在"抢镜的背身前景人"：有一个不含正脸的人体框，其占图高 > 含正脸人体最大占图高 × POSED_FOREGROUND_RATIO。
+    合影五道闸只评判对着镜头的那群人，看不见前景一个背对镜头的大块头；当这个背影比整群正脸人都明显更大
+    （更靠前）时，画面真正的主角是那个背影，这张是抓拍现场而非摆拍合影（用户 2026-10-14 拍板：抢镜才降级）。"""
+    group_h = [b["h_ratio"] for b in main if body_has_face(b, frontal)]
+    bys_h = [b["h_ratio"] for b in main if not body_has_face(b, frontal)]
+    if not group_h or not bys_h:
+        return False
+    return max(bys_h) > max(group_h) * POSED_FOREGROUND_RATIO
 
 
 def merge_overlaps(bodies):

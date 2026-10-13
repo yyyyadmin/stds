@@ -6,7 +6,7 @@
  */
 import { useEffect, useState } from 'react'
 import { useStore } from '../store'
-import type { PlanInfo, SysConfig } from '../../../shared/ipc'
+import type { PlanInfo, SysConfig, PointsHistoryItem } from '../../../shared/ipc'
 
 const LEVEL_LABEL: Record<string, string> = {
   free: '普通用户',
@@ -30,6 +30,41 @@ export default function MemberCenterDialog(): JSX.Element | null {
   const [orderNo, setOrderNo] = useState('')
   const [qr, setQr] = useState('')
   const [err, setErr] = useState('')
+
+  // 积分记录（积分变动历史）弹窗：每页 10 条，扣费/充值/兑换等全部混排，点「累计消耗」数字或「消费记录」链接都打开
+  const [histOpen, setHistOpen] = useState(false)
+  const [histItems, setHistItems] = useState<PointsHistoryItem[]>([])
+  const [histPage, setHistPage] = useState(1)
+  const [histPages, setHistPages] = useState(1)
+  const [histLoading, setHistLoading] = useState(false)
+  const [histErr, setHistErr] = useState('')
+
+  // remark 格式为「类型说明-备注」：按第一个 - 拆分，前半放主行，后半放副行
+  const histTitle = (it: PointsHistoryItem): string =>
+    (it.remark || it.reason || '积分变动').split('-')[0]
+  const histDetail = (it: PointsHistoryItem): string => {
+    const i = it.remark.indexOf('-')
+    return i > -1 ? it.remark.slice(i + 1) : ''
+  }
+
+  const loadHistory = async (page: number): Promise<void> => {
+    setHistLoading(true)
+    setHistErr('')
+    const r = await window.api.pointsHistory({ type: '', page, page_size: 10 })
+    if (r.ok) {
+      setHistItems(r.list)
+      setHistPage(r.page)
+      setHistPages(r.total_pages || 1)
+    } else {
+      setHistItems([])
+      setHistErr(r.message || '获取消费记录失败')
+    }
+    setHistLoading(false)
+  }
+  const openHistory = async (): Promise<void> => {
+    setHistOpen(true)
+    await loadHistory(1)
+  }
 
   useEffect(() => {
     if (!showMember) return
@@ -103,8 +138,19 @@ export default function MemberCenterDialog(): JSX.Element | null {
                 <div className="text-xs text-fg2">当前积分</div>
               </div>
               <div>
-                <div className="text-2xl font-bold text-fg tabular-nums">{user?.points.total_consumed ?? 0}</div>
-                <div className="text-xs text-fg2">累计消耗</div>
+                <div
+                  className="text-2xl font-bold text-fg tabular-nums cursor-pointer hover:text-brand transition-colors"
+                  title="点击查看消费记录"
+                  onClick={() => void openHistory()}
+                >
+                  {user?.points.total_consumed ?? 0}
+                </div>
+                <div className="text-xs text-fg2">
+                  累计消耗
+                  <button className="ml-1.5 text-brand hover:underline cursor-pointer" onClick={() => void openHistory()}>
+                    消费记录
+                  </button>
+                </div>
               </div>
               <div className="flex-1" />
               <div className="flex gap-2">
@@ -209,6 +255,50 @@ export default function MemberCenterDialog(): JSX.Element | null {
           </>
         )}
       </div>
+
+      {/* 消费记录弹窗（叠加在会员中心之上） */}
+      {histOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" onClick={(e) => e.target === e.currentTarget && setHistOpen(false)}>
+          <div className="w-[460px] max-h-[70vh] flex flex-col bg-panel border border-line rounded-2xl shadow-2xl">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-line">
+              <h3 className="text-[15px] font-bold text-fg">消费记录</h3>
+              <button className="btn-ghost text-fg3" onClick={() => setHistOpen(false)} title="关闭">✕</button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-2">
+              {histLoading && <div className="text-xs text-fg2 py-8 text-center">加载中…</div>}
+              {!histLoading && histErr && <div className="text-xs text-bad py-8 text-center">{histErr}</div>}
+              {!histLoading && !histErr && !histItems.length && <div className="text-xs text-fg3 py-8 text-center">暂无消费记录</div>}
+              {!histLoading && !histErr && (
+                <ul className="divide-y divide-line">
+                  {histItems.map((it, i) => (
+                    <li key={i} className="py-2.5 flex items-center gap-3">
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm text-fg truncate">{histTitle(it)}</div>
+                        {histDetail(it) && (
+                          <div className="text-[11px] text-fg3 mt-0.5 truncate">{histDetail(it)}</div>
+                        )}
+                        <div className="text-[11px] text-fg3">{it.consume_time}</div>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <div className={'text-sm font-bold tabular-nums ' + (it.consume_points < 0 ? 'text-bad' : it.consume_points > 0 ? 'text-good' : 'text-fg3')}>
+                          {it.consume_points > 0 ? '+' : ''}
+                          {it.consume_points}
+                        </div>
+                        <div className="text-[11px] text-fg3 tabular-nums">余 {it.remaining_points}</div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="flex items-center justify-between px-5 py-3 border-t border-line">
+              <button className="btn text-xs disabled:opacity-40" disabled={histLoading || histPage <= 1} onClick={() => void loadHistory(histPage - 1)}>上一页</button>
+              <span className="text-xs text-fg2">第 {histPage} / {histPages} 页</span>
+              <button className="btn text-xs disabled:opacity-40" disabled={histLoading || histPage >= histPages} onClick={() => void loadHistory(histPage + 1)}>下一页</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

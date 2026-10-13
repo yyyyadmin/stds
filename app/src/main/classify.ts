@@ -5,35 +5,20 @@
  * - 用户手动放置（categoryBy = 'user'）优先，AI 不覆盖
  */
 import type { AppSettings, CategoryKey, DimResult, DimensionKey, ImageRecord, TierKey } from '../shared/types'
-import { BAD_DIMENSIONS, NEUTRAL_DIMENSIONS, STRUCTURAL_DIMENSIONS, CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, PERSON_DIMS, FACT_DIMENSIONS, isTrashLike, levelOf, flawLevel, SCENE_PRESETS, BASELINE_THRESHOLDS, DEFAULT_MID_THRESHOLD, DEFAULT_HIGH_THRESHOLD, SHARP_ANCHORS, SHARP_VAR_WEIGHT, TIER_SHARP_TRUST, TIER_SHARP_OK, TIER_SHARP_UNKNOWN } from '../shared/types'
+import { BAD_DIMENSIONS, NEUTRAL_DIMENSIONS, STRUCTURAL_DIMENSIONS, CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, PERSON_DIMS, FACT_DIMENSIONS, isTrashLike, levelOf, flawLevel, BASELINE_THRESHOLDS, DEFAULT_MID_THRESHOLD, DEFAULT_HIGH_THRESHOLD, SHARP_ANCHORS, SHARP_VAR_WEIGHT, TIER_SHARP_TRUST, TIER_SHARP_OK, TIER_SHARP_UNKNOWN } from '../shared/types'
 
 /**
- * 取某维度生效阈值，优先级：事实/结构结论（刚性）> 自学习微调 > （场景覆盖 或 该维度的台阶基线）+ 力度平移 > 全局一对数。
- * 进了基线表的维度已不再直接用全局阈值——全局值只负责给出“比默认宽了多少 / 严了多少”。
+ * 取某维度生效阈值。v7（2026-10-14）阈值锁定：事实/结构维度用固定默认值，其余维度一律只认
+ * 下面这张专家逐维度标定的 BASELINE_THRESHOLDS——自学习微调、场景预设、力度档平移全部不再参与
+ * （客户设置里这些旋钮已撤除，判定线由开发者在代码里统一维护）。历史上“自学习悄悄把模糊抬到
+ * 0.62 盖过严格档、导致偏糊片漏标”正是多层覆盖互相打架的坑，收口成单层。
  */
-export function effectiveThresholds(dim: DimensionKey, s: AppSettings): [number, number] {
-  // 事实/结构维度（人数四分类 + 黑白 + 重复）刀枪不入：不吃力度平移，也不吃自学习。
-  // 它们回答的是“这张图是什么 / 是不是冗余”，不是“这张图好不好”；随力度档改口会直接
-  // 换掉主分类与标签可见性（3185 张实测：宽松档误将 139 张合拍照、105 张黑白照拽进待确认；
-  // high 滑到 0.99 时 739 张单人照 + 1295 张重复图整段变成“未检出”而从视图消失）。
+export function effectiveThresholds(dim: DimensionKey, _s: AppSettings): [number, number] {
+  // 事实/结构维度（人数四分类 + 黑白 + 重复）刀枪不入：它们是“这张图是什么 / 是不是冗余”的
+  // 硬结论，不随任何松紧变化（3185 张实测：一旦随力度/自学习改口，会把成百张图静默挪出分类视图）。
   if (FACT_DIMENSIONS.includes(dim)) return [DEFAULT_MID_THRESHOLD, DEFAULT_HIGH_THRESHOLD]
-  const tuned = s.tunedThresholds[dim]
-  if (tuned) return tuned
-  const preset = SCENE_PRESETS.find((p) => p.key === s.scene)
-  const scene = preset?.overrides[dim]
-  const anchor = scene || BASELINE_THRESHOLDS[dim]
-  if (!anchor) return [s.midThreshold, s.highThreshold]
-  // 力度档 / 滑条当“整体平移”用：它们相对默认（严格）档的偏移量，叠加到该维度自己的台阶基线上。
-  // 以前直接把 0.8/0.55 当阈值用，对 blur（饱和在 0.85）等于“只要报了就直接标瑕疵”，
-  // 对 eyes（台阶 0.75/1.0）又等于“1.0 才算铁证”，同一档位在不同维度上语义相反。
-  // mid 与 high 用**同一个**偏移量刚性平移（3185 张实测：分开平移会让“宽松”档的
-  // 可疑带整体上移接住顶部台阶，待确认从 439 张涨到 1269 张，与“宽松=少打扰”恰好相反）。
-  const d = ((s.midThreshold - DEFAULT_MID_THRESHOLD) + (s.highThreshold - DEFAULT_HIGH_THRESHOLD)) / 2
-  let mid = anchor[0] + d
-  let high = anchor[1] + d
-  high = Math.min(0.99, Math.max(0.5, high))
-  mid = Math.min(high - 0.05, Math.min(0.95, Math.max(0.3, mid)))
-  return [Number(mid.toFixed(3)), Number(high.toFixed(3))]
+  // 其余维度只认基线表；不在表里的（理论已被上面拦截）回落固定的严格档默认值，绝不吃滑条/自学习。
+  return BASELINE_THRESHOLDS[dim] || [DEFAULT_MID_THRESHOLD, DEFAULT_HIGH_THRESHOLD]
 }
 
 /** 原始 dims（引擎返回 confidence）-> 打级别后的 tags */
@@ -108,28 +93,51 @@ export function computeCategory(tags: ImageRecord['tags'], settings: AppSettings
  * settings 保留在签名里（五个调用方均已持有），当前算法不吃阈值。
  */
 const RE_SHARP = /清晰度方差\s*(-?\d+(?:\.\d+)?)\((full|face)\)\s*高频占比\s*(-?\d+(?:\.\d+)?)/
+// 当前引擎（v2.0.64 分块重写后）的 blur reason 不再产出“清晰度方差/高频占比”，改成
+// “…全图方差 N 脸区方差 M”（M 可能为“无脸”）。旧解析器认不出新格式 → sharpScore 恒 null
+// → scoreTier 恒 TIER_SHARP_UNKNOWN(2)，导致“优质”自 v2.0.64 起再没被 AI 发出去过（实测当前库
+// 23 张 AI 档位全塌在良好）。v2.0.74 修：解析新格式的拉普拉斯方差（与旧“清晰度方差”同一指标，
+// 量级一致，锚点直接复用），优先脸区方差（主体清晰度）、无脸回落全图方差；旧格式保留兼容历史入库 reason。
+const RE_FACE_VAR = /脸区方差\s*(\d+(?:\.\d+)?)/
+const RE_FULL_VAR = /全图方差\s*(-?\d+(?:\.\d+)?)/
 const clamp01 = (x: number): number => Math.min(1, Math.max(0, x))
+
+/** 拉普拉斯方差 -> 0~1 归一锐度（按锚点 log 归一，压制跨 200 倍的量纲） */
+function normVar(v: number, a: { varLo: number; varHi: number }): number {
+  const lv = (Math.log10(Math.max(1, v)) - Math.log10(a.varLo)) / (Math.log10(a.varHi) - Math.log10(a.varLo))
+  return clamp01(lv)
+}
 
 /** 从 reason 解析原始测量值 -> 0~1 锐度分；解析不出返回 null */
 export function sharpScore(tags: ImageRecord['tags']): number | null {
-  const m = (tags.blur?.reason || '').match(RE_SHARP)
-  if (!m) return null
-  const a = SHARP_ANCHORS[(m[2] as 'face' | 'full')] || SHARP_ANCHORS.face
-  const v = Math.max(1, Number(m[1]))
-  const lv = (Math.log10(v) - Math.log10(a.varLo)) / (Math.log10(a.varHi) - Math.log10(a.varLo))
-  const lh = (Number(m[3]) - a.hfLo) / (a.hfHi - a.hfLo)
-  return Number((SHARP_VAR_WEIGHT * clamp01(lv) + (1 - SHARP_VAR_WEIGHT) * clamp01(lh)).toFixed(4))
+  const reason = tags.blur?.reason || ''
+  const fm = RE_FACE_VAR.exec(reason)
+  if (fm) return Number(normVar(Number(fm[1]), SHARP_ANCHORS.face).toFixed(4))
+  const gm = RE_FULL_VAR.exec(reason)
+  if (gm) return Number(normVar(Number(gm[1]), SHARP_ANCHORS.full).toFixed(4))
+  const old = RE_SHARP.exec(reason) // 兼容 v2.0.64 前的旧格式（高频占比同向混用）
+  if (old) {
+    const a = SHARP_ANCHORS[(old[2] as 'face' | 'full')] || SHARP_ANCHORS.face
+    const lh = (Number(old[3]) - a.hfLo) / (a.hfHi - a.hfLo)
+    return Number((SHARP_VAR_WEIGHT * normVar(Math.max(1, Number(old[1])), a) + (1 - SHARP_VAR_WEIGHT) * clamp01(lh)).toFixed(4))
+  }
+  return null
 }
 
 export function scoreTier(tags: ImageRecord['tags'], settings?: AppSettings): TierKey | null {
   void settings
-  // 不在交付库（有中/高瑕疵）→ 无档位：瑕疵照片/待确认不需要分级
+  // 瑕疵闸门（用户 2026-10-14 明确口径）：任何中/高瑕疵标签 → 无档位。
+  // 既进不了优质也进不了良好（而且瑕疵图本就不在交付库，落在瑕疵片/待确认）。
+  // “只能勉强进一般”指最坏也只能待在交付库最低档，绝不因“够锐”被提到优质/良好。
+  // 人工干预不受此限：用户手动改档走 tier_by='user'，updateDetectResult/setDimTag 都不覆盖它。
   if (flawLevel(tags) !== 'none') return null
   const s = sharpScore(tags)
-  if (s === null) return TIER_SHARP_UNKNOWN
-  if (s >= TIER_SHARP_TRUST) return 1
-  if (s >= TIER_SHARP_OK) return 2
-  return 3
+  const base: TierKey = s === null ? TIER_SHARP_UNKNOWN : s >= TIER_SHARP_TRUST ? 1 : s >= TIER_SHARP_OK ? 2 : 3
+  // 高置信合拍照保底（用户拍板 2026-10-14，“修锐度+合影保底”）：规整摆拍合影是客户必交的交付主体，
+  // 只要本身够“良好”就顶到优质；但太软（一般档）的合影不硬抬，避免把优质档稀释成一堆虚拍。能走到
+  // 这里已确认无任何瑕疵（上一行闸门）。
+  if (tags.group_photo?.level === 'high' && base <= 2) return 1
+  return base
 }
 
 /** 判断分类桶含义 */

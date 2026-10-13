@@ -542,7 +542,14 @@ export const useStore = create<StoreState>((set, get) => ({
   },
   async doRegister(req) {
     const r = await window.api.authRegister(req)
-    if (r.ok) set({ auth: await window.api.authMe() })
+    // 注册成功 = 已自动登录：要和 doLogin 一样关掉弹窗并给成功提示，否则用户以为“点了没反应”
+    if (r.ok) {
+      set({
+        auth: await window.api.authMe(),
+        showLogin: false,
+        toast: { msg: r.message || '注册成功，已自动登录', kind: 'success' }
+      })
+    }
     return r
   },
   async sendCaptcha(req) {

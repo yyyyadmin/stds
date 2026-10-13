@@ -27,7 +27,11 @@ def blur_score(bgr, faces):
     本版换信号维度：整图 4x4 分块统计"有内容但糊"的面积占比，并要求主体(脸)也不清晰：
     - 背景虚化(大光圈人像)：脸区清晰 → 封顶待确认，不进模糊分类
     - 局部失焦/晕光：糊块占比低 → sigmoid 压到不标
-    - 整图糊到看不清：糊块过半且脸也糊 → 高置信"""
+    - 整图糊到看不清：糊块过半且脸也糊 → 高置信
+    v2.0.74 口径回正（用户："占一半以上、完全看不清就算"）：旧中心 0.55/宽 0.12 下
+    62% 糊面积只得 0.59——低于档位线不标，90%+ 也永不到 high（0.90 封顶）。实测 6127 条流水账
+    用户从未修正过模糊维度（零 FP 证据），改中心 0.52/宽 0.08/封顶 0.95：50%≈不标（临界），
+    62%→0.79（标），75%+→0.89（确定档）。"脸清晰封顶"门保留，背景虚化仍不误伤。"""
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
     if max(h, w) > 900:
@@ -61,7 +65,13 @@ def blur_score(bgr, faces):
                 fv.append(float(cv2.Laplacian(crop, cv2.CV_64F).var()))
         if fv:
             face_var = sum(fv) / len(fv)
-    conf = 0.90 * _sigmoid((blur_ratio - 0.55) / 0.12)
+    # v2.0.76 主体感知门槛：默认仍按用户口径"糊了大半（>52%）才算"。但"有脸且脸很软"
+    # （face_var<30，主体本身没对上焦/运动糊）时，把起分线降到 35%——这样 7G1A9042 这类
+    # "糊块 44% + 脸区方差 25"的偏糊片置信度升到 0.72，能越过自学习抬高后的实际模糊门槛
+    # （tunedThresholds.blur 中档 0.62）进待确认打上模糊标签；无脸/背景虚化的照片仍走 52%
+    # 保守线（实测对当前库零误伤：唯一 40~52% 区间的干净片都是无脸的 7G1A7374/7376，不受影响）。
+    center = 0.35 if (face_var is not None and face_var < 30.0) else 0.52
+    conf = 0.95 * _sigmoid((blur_ratio - center) / 0.08)
     if face_var is not None and face_var > 30.0:
         conf = min(conf, 0.50)  # 主体清晰（背景虚化）：封顶只进待确认，不直接判模糊
     conf = float(np.clip(conf, 0, 0.99))
@@ -88,9 +98,11 @@ def exposure_score(bgr):
     """只判严重曝光异常（用户口径：灯光/太阳/光晕大面积影响整幅画面感才算）。
     v2.0.62 真实分布：旧规则"画面偏暗→欠曝"在婚礼暗环境里高置信 682 张中 452 张被用户
     判掉（TP/FP 亮度分布完全重叠不可分），本版彻底删掉"偏暗即曝光"：
-    - 过曝：高光爆掉面积 ≥~30% 且整体极亮（光晕洗白全图）才起高分
+    - 过曝：两条证据任一即可——①光晕洗白全图（高光≥~30% 且整体极亮）；②大面积爆掉本身
+      （高光≥~26%，亮度均值只做轻门控防死黑误入）——v2.0.74 新增：旧版只认①，
+      婚礼现场大面积光晕+下半身深色（均值被拖到 ~73）整批漏判，实测零 FP 证据后放宽
     - 欠曝：只认死黑丢细节（均值≤~6 且暗部占比≥~90%），普通夜景/室内暗光不标
-    - 对比度塌缩：封顶 0.5，永不直接进分类"""
+    - 对比度塔缩：封顶 0.5，永不直接进分类"""
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
     L = lab[:, :, 0].astype(np.float32) * (100.0 / 255.0)
     mean = float(L.mean())
@@ -98,6 +110,9 @@ def exposure_score(bgr):
     hi_ratio = float((L >= 96).mean())
     lo_ratio = float((L <= 6).mean())
     over = _sigmoid((hi_ratio - 0.30) / 0.07) * _sigmoid((mean - 80) / 6)
+    # 大面积光晕独立成判：爆掉像素≥~26% 就是"大面积"本身，不再要求全图极亮
+    # （深色礼服/暗背景会把均值拖低，旧版因此漏判整批光晕片）；均值轻门控防死黑图误入
+    over = max(over, _sigmoid((hi_ratio - 0.26) / 0.06) * _sigmoid((mean - 40) / 8))
     # 欠曝极严（v2.0.64 真值）：旧版 lo_ratio≥0.88 即判欠曝，误杀 72 张夜景/暗场（它们 mean 1~4
     # 但 std 5~15 有灯光细节）。用户口径"夜晚灯光/舞台/正常环境光不算"——新增"无任何高光
     # (hi_ratio≈0) 且对比塔缩(std 低)"两门，只留真·死黑丢光废片。
@@ -172,7 +187,7 @@ def black_white_score(bgr):
 
 # ---------- 半截头 ----------
 
-def half_head_score(bgr_shape, faces, upper_bodies, scale):
+def half_head_score(bgr_shape, faces, upper_bodies, scale, person_boxes=None):
     """半截头：头部被画面边缘裁掉。
     模型（按用户提供的"贴边检测"实现，替换掉原"头部余量反推"）：以 478 landmark 外接框
     （归一化 0~1）判是否触碰画面边缘，并用脸高/脸宽占比过滤背景小脸，避免远景路人误报。
@@ -183,7 +198,11 @@ def half_head_score(bgr_shape, faces, upper_bodies, scale):
     输入优先用 face["mp"]["bbox"]（478 外接框，像素）；mediapipe 关闭/未挂载时回落 YuNet 脸框作代理。
     另保留两条与"贴边"正交的躯干安全网（有身子无头 / 躯干多于人脸）——它们不属于被替换的余量反推，
     且覆盖"头完全出框只剩躯干"的真实半截场景；如需 100% 字面移植可去掉。
-    本函数只读 faces/upper，不改任何人脸维度输入；调用签名不变，其余检测逻辑零影响。
+    人脸检不到时的身体安全网（用户拍板 2026-10-14："半脸也算半截头"）：花束遮挡/侧头/低头导致
+    YuNet 检不到脸时，贴边主模型没有原料；改用人体检测框（mediapipe，比 HOG 躯干可靠）——
+    主体人身框够大且上缘贴画布顶边 → 头顶必已出框，判半截头。
+    person_boxes 为 merge_overlaps 后的主框列表（工作图坐标 dict，含 "box"/"h_ratio"），None/空则跳过。
+    本函数只读 faces/upper/person_boxes，不改任何人脸维度输入。
     """
     H, W = bgr_shape[:2]
     EDGE_MARGIN = 0.012    # 贴边阈值（归一化，约占图宽 1.2%）
@@ -246,6 +265,18 @@ def half_head_score(bgr_shape, faces, upper_bodies, scale):
     # 躯干多于人脸：部分人头被裁/未入镜
     if faces and upper_bodies and len(upper_bodies) > len(faces):
         bump(0.72, "躯干 %d 但人脸 %d→疑有人头未完整入镜" % (len(upper_bodies), len(faces)))
+    # 脸检不到时的身体安全网：主体人身框上缘贴画布顶边 → 头顶已出框（半脸也算半截头）
+    if not faces and person_boxes:
+        for b in person_boxes:
+            pb = b.get("box")
+            if not pb:
+                continue
+            bx, by, bw2, bh2 = [float(v) for v in pb[:4]]
+            if bh2 < H * 0.30:
+                continue  # 远景小人身不算（用户口径：远景小后脑勺/背景人不参与）
+            if by <= H * 0.02:
+                bump(0.85, "未检到人脸且人身框贴画面顶边（半脸被遮或头顶出框）")
+                break
     return float(conf), "; ".join(reasons) if reasons else "头部完整"
 
 
