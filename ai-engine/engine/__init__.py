@@ -9,6 +9,20 @@ from .person import PersonDetector, merge_overlaps, frontal_faces, body_has_face
 from . import quality as Q
 from .models import detect_device, _HAS_ORT
 
+# 引擎签名（engine signature）：凡改动了会改变检测输出的公式/阈值/分支（eyes / person /
+# quality / landmarks / expression 等），就把这个整数 +1。软件据此判断“库里这张结果是哪个
+# 版本的引擎扫出来的”，开发版据此提示“有 N 张旧引擎结果需重扫”。它与发版号解耦：
+# 纯注释性版本标签的改动不必 +1，只有真正影响检测结果的变化才动。历史 bump：
+#   1 = 引入签名（此时闭眼冲突修正 + 人数数身体框已在码内，存量库首次按此值回填为“最新”）。
+#   2 = 人数存疑→待确认：无人体框只凭人脸、或判单人却有≥2个够大主体时压成 low 进待确认
+#       （修 7G1A7593 柯基 / 7G1A7833 百合 / 7G1A9900 拥吻 / CHEN0611 / 7G1A8030 被自信当成单人）。
+#   3 = 半截头兜底不再被假脸挡掉：人体框贴顶且无 MediaPipe 确认脸→高置信半截头（修 7G1A9669 香槟塔）。
+#   4 = 回退 sig3：真实转正输入复核发现 sig3 净负（只误标 4 张 faceCount=1 的手部特写/边角残脸，未修好 9669），
+#       半截头兜底门槛改回 `if not faces`。全库仅那 4 张掉标，其余不动。
+#   5 = “主群即主体”几何闸（POSED_DOMINANT）分母改看全图任意最大脸（含侧脸/背影）：修接亲/亲嘴
+#       抓拍被当成合拍照（CHEN9581/9794/9806——全图最大的脸是背对镜头的新人，旧分母只看最大正脸以故看不见）。30 张真合影回归零误伤。
+ENGINE_SIG = 5
+
 
 class DetectEngine:
     def __init__(self, device=None, log=None):
@@ -36,6 +50,7 @@ class DetectEngine:
             "faceOnnx": self.faces.backend == "yunet",  # YuNet 启用（cv2.FaceDetectorYN，不经 ORT）
             "gazeOnnx": self.eyes.gaze.available,
             "ocecOnnx": self.eyes.ocec.available,
+            "engineSig": ENGINE_SIG,  # 引擎签名：软件据此判定存量结果是否需用新引擎重扫
         }
 
     def warmup(self):
@@ -63,7 +78,9 @@ class DetectEngine:
         # 正面主体（新口径的计数单位，用户拍板 2026-10-11）：正脸露脸、头部完整、双眼睁开可判
         frontal = frontal_faces(faces, h)
         # 规整摆拍主群（合影 vs 混合照的分界）：只算一次，人数分支与返回体共用同一结论
-        posed, posed_n, posed_fails = posed_group(frontal, w, h)
+        # 传入全图任意最大脸高（含侧脸/背影），供“主群即主体”闸识破“真主角背对镜头”的抓拍
+        _global_face_h = max((float(f["box"][3]) for f in faces), default=0.0)
+        posed, posed_n, posed_fails = posed_group(frontal, w, h, _global_face_h)
         upper = self.faces.detect_upper_bodies(bgr) if face_count <= 2 else []
 
         dims = {}
@@ -241,6 +258,21 @@ class DetectEngine:
                 dims["mixed_photo"] = {"confidence": 0.86, "reason": "检出 %d 张脸但均非正面（低头/大角度），不可能是摆拍合影" % face_count, "method": "face-count"}
             else:
                 dims["single_person"] = {"confidence": 0.62, "reason": "检出 1 张脸但非正面（低头/大角度）", "method": "face-count"}
+
+        # 存疑→待确认（用户拍板 2026-10-14：拿不准是单人/多人/无人，一律进待确认，绝不自信误判）。
+        # 命中任一即把人数维度置信压到 low(<0.55)，主进程 computeCategory 取不到可用人数标签 → 停待确认：
+        #  ① 人体模型可用却一个人体框都没框到、只凭人脸喊“有人”——YuNet 会把狗脸/花蕊/器物误检成脸
+        #     （实测 7G1A7593 柯基、7G1A7833 百合、7G1A9900 拥吻只拍到后脑，全被自信当成单人交付）；
+        #  ② 判成单人但画面里有 ≥2 个够大的主体——贴脸/拥抱的新人常被人体框合成一大块，2 人被数成 1 人
+        #     （实测 CHEN0611、7G1A8030）。这类“到底 1 个还是多个”的正是该让人过目的，交出去风险太大。
+        if person_count is not None:
+            _uncertain = (not main and face_count > 0) or ("single_person" in dims and n_faces_big >= 2)
+            if _uncertain:
+                for _pk in ("single_person", "group_photo", "mixed_photo"):
+                    if _pk in dims:
+                        dims[_pk]["confidence"] = 0.5
+                        dims[_pk]["reason"] += "；人数存疑(无人体框/多个够大主体)→待确认"
+                        break
 
         # 重复/连拍在跨图层面处理：返回 phash + embedding，由主进程聚类
         out_faces = []

@@ -31,6 +31,15 @@ export const BAD_DIMENSIONS: DimensionKey[] = [
   'exposure'
 ]
 
+/**
+ * 画质类维度（模糊 / 曝光）：云端 AI 复审压根不看这两项（提示词里明写“模糊/曝光/黑白一律不判”，
+ * 见 aiReviewPrompt.ts），而且它也不比本地拿 3185 张标定出来的阈值准（拿它放行会把好片当坏片）。
+ * 所以一张图只要已结案（confirmed）却还挂着这两项里任何一个（非 low），就算“等人工定画质”：
+ * 卡片左上角挂红底角标、在本栏排最前、AI 再次复审（含强制重判）跳过它，卡上把这两枚标签顶到最前
+ * 并保持原色，AI 定过的那几项改暗（用户 10-14 拍板）。这个结论现算而不存标记：画质一删就自动恢复常态。
+ */
+export const QC_MANUAL_DIMENSIONS: DimensionKey[] = ['blur', 'exposure']
+
 /** 中性维度：仅作为分类标签（人数四分类按「少 → 多 → 无」排列，混合照紧跟合拍照） */
 export const NEUTRAL_DIMENSIONS: DimensionKey[] = [
   'single_person',
@@ -417,6 +426,40 @@ export interface DetectResult {
   error?: string
 }
 
+/** AI 复审作用域：待确认栏（'review'）/ 瑕疵片栏（'flaws'）。待确认可自动+手动，瑕疵片仅手动。 */
+export type AiReviewScope = 'review' | 'flaws'
+
+/**
+ * AI 复审（会员专属）单张建议：云端多模态模型对「待确认」图的第二双眼睛。
+ * 与 tags/category 完全正交——它只是「建议」，绝不参与 computeCategory / flawLevel /
+ * isDeliverable / 导出判定；用户点「采纳」前，tags/category/engine_sig 一字不变。
+ * 人数四分类 + 内容型瑕疵（闭眼/半截头/表情崩坏）；画质型（模糊/曝光/黑白）不判。
+ */
+export interface AiReviewSuggestion {
+  /** 生成建议时的引擎签名（重扫后签名变了即作废旧建议） */
+  sig: number
+  /** 出建议的模型名（如 qwen3-vl-plus，由后端下发） */
+  model: string
+  /** 生成时刻 ms */
+  at: number
+  /** 人数四分类建议（与 PERSON_DIMS 同枚举） */
+  person: 'single_person' | 'group_photo' | 'mixed_photo' | 'no_person'
+  /** 内容型瑕疵建议：true=建议标该瑕疵，false=建议清除该瑕疵 */
+  flaws: { eyes_closed: boolean; half_head: boolean; expression: boolean }
+  /** 模型给的一句话理由（供对比界面展示） */
+  reason: string
+  /** 该建议属于哪一栏的复审；旧数据无此字段按 'review' 处理 */
+  scope?: AiReviewScope
+  /** 用户在逐张复核里明确"不采纳"过这条建议：不再计入分歧列表/不被全部采纳；再次复审会重新判并整体覆盖（标记随之作废） */
+  rejected?: boolean
+  /**
+   * 已结案（用户确认过这张）：与“不采纳”相反——用户认可这个结果（一致时原样保留、不一致时已按建议改完）。
+   * 为什么要它：没这个标记时，“已处理”只能靠清空建议表达，一旦图仍留在本栏就会被下轮默认复审重跑（白烧额度）；
+   * 而“AI 与本地一致”的图根本没有差异可采，不结案就永远挂在库里没人管（用户反馈：复审的目的就是把待确认清空）。
+   */
+  confirmed?: boolean
+}
+
 /** 数据库中的一张图片记录 */
 export interface ImageRecord {
   id: number
@@ -446,6 +489,11 @@ export interface ImageRecord {
   tierBy: 'ai' | 'user' | null
   /** 统一废弃库：被丢弃时所在的来源栏 key（library/review/duplicate/flaws/eyes_closed/custom:3 等）；仅 category 为 trash 时有意义，历史数据为 null */
   trashFrom?: string | null
+  /**
+   * AI 复审建议（会员专属，只读旁路）：null/undefined = 无建议。绝不参与任何判定，
+   * 仅在待确认对比界面展示、用户采纳后按重判通道落库。重扫/采纳/跳过时清空。
+   */
+  ai_review?: AiReviewSuggestion | null
 }
 
 /** 一键修正记录（第五章 5.4，用于阈值微调） */
@@ -544,6 +592,13 @@ export interface AppSettings {
   skipUpdateVersion?: string | null
   /** 缩略图方向修正版本：旧版缩略图未应用 EXIF 方向（竖拍显示为横），升级后需一次性重建。不设默认值，未迁移时为 undefined */
   thumbOrientVersion?: number
+  /**
+   * AI 复审（会员专属）：是否开启「筛选完成后自动后台复审待确认」。
+   * 仅存用户偏好开关，不含任何判定含义；非会员恒不生效（后端 403 才是真闸门）。
+   */
+  aiReviewEnabled?: boolean
+  /** AI 复审首次隐私授权是否已同意（未同意则开开关时先弹授权）。仅存偏好，不含判定 */
+  aiReviewConsent?: boolean
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {

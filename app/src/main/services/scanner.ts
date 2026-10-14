@@ -240,7 +240,7 @@ class Scanner extends EventEmitter {
       engine: engineManager.getStatus().type,
       phash: raw.phash
     }
-    updateDetectResult(rec.id, tags, details, null, category, isTrashLike(rec.category) ? 'user' : 'ai', 'done')
+    updateDetectResult(rec.id, tags, details, null, category, isTrashLike(rec.category) ? 'user' : 'ai', 'done', engineManager.getEngineSig())
     const updated = getImage(rec.id)
     this.emit('image', updated)
   }

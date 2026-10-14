@@ -1,12 +1,14 @@
 /**
  * 判定操作工具栏（现在只有放大弹窗右栏在用；以前还服务过独立的「大图」视图，那个视图已下线）：
- * 普通图：[✕ 不合格 废弃库] [移动到 ▾] [✓ 合格 → 交付库（选档）]
+ * 普通图：[✕ 不合格 废弃库] [✓ 合格 → 交付库（选档）] [标签管理]
  * 待确认图（D2 §8）：[✕ 不合格 废弃库] [✓ 好图 → 交付库（选档）] [此判定错误（重判面板）]
+ * 「移动到」整按钮已下线（用户 10-14）：面板里四项——三档/废弃库/待确认/自定义相册——前两项就是旁边
+ * 两个彩色按钮，后两项拖缩略图到左侧栏即可（多选拖一张=整批走），留着一个重复入口反而让人不敢点。
  * 「此判定正确」按钮已下线（用户 10-13 产品判断：真实用户只用“要→交付库 / 不要→废弃库”两个动作，
  *  不会额外去点“判对”）；它的学习职能改出“隐式采样”——放行=该瑕疵误判(wrong)、丢进废弃库=该瑕疵判对(correct)，
  *  两条都从用户真正会点的按钮里自然长出（见 ipc.ts moveOne）。
  * D2 语义：主分类=人数，瑕疵只是标签；“此判定错误”开重判面板（ReviewPanel）：人数单选 + 瑕疵逐项三态。
- * 布局固定为放大弹窗右栏的 2×2 网格（此布局不显🏷 标签入口，标签增删已在右栏内联）。
+ * 布局固定为放大弹窗右栏的 2 列网格（此布局不显🏷 标签入口，标签增删已在右栏内联）。
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -35,14 +37,12 @@ export default function JudgmentBar({
   showTagButton?: boolean
 }): JSX.Element {
   const moveIds = useStore((s) => s.moveIds)
-  const customCategories = useStore((s) => s.customCategories)
   // 档位名（可自定义）：交付库不再是可直接移入的目标，只能移到下面三档之一
   const tierNames = useStore((s) => s.settings.tierNames) ?? DEFAULT_TIER_NAMES
   const openTagManager = useStore((s) => s.openTagManager)
   const openReviewPanel = useStore((s) => s.openReviewPanel)
-  const [panel, setPanel] = useState<'none' | 'move' | 'trash' | 'tier'>('none')
+  const [panel, setPanel] = useState<'none' | 'trash' | 'tier'>('none')
   const anchorRef = useRef<HTMLDivElement>(null)
-  const moveBtnRef = useRef<HTMLButtonElement>(null)
   const trashBtnRef = useRef<HTMLButtonElement>(null)
   const libBtnRef = useRef<HTMLButtonElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
@@ -57,8 +57,8 @@ export default function JudgmentBar({
       return
     }
     const r = anchorRef.current?.getBoundingClientRect()
-    // 面板顶部贴自己的触发按钮（移动到/废弃库）下 5px，而不是整排按钮的底部
-    const br = (panel === 'trash' ? trashBtnRef : panel === 'tier' ? libBtnRef : moveBtnRef).current?.getBoundingClientRect()
+    // 面板顶部贴自己的触发按钮（废弃库/合格入档）下 5px，而不是整排按钮的底部
+    const br = (panel === 'trash' ? trashBtnRef : libBtnRef).current?.getBoundingClientRect()
     if (!r) return
     // 放大弹窗右栏：面板与整条右栏同宽同左边缘（370，而不是比栏窄一截或飘到栏外），
     // 顶部贴触发按钮下 5px，允许盖住下方的「此判定正确」（用户预期：面板属于这个按钮）。
@@ -83,30 +83,10 @@ export default function JudgmentBar({
     </>
   )
 
-  const targets = (onPick: (cat: CategoryKey) => void): JSX.Element => (
-    <>
-      <div className="col-span-full text-fg3">交付库 · 选一个档位（= 放行，同时清除缺陷类标签）：</div>
-      <div className="col-span-full grid grid-cols-3 gap-1.5">{tierButtons(onPick, 'py-2.5 text-sm')}</div>
-      <button className="btn col-span-full bg-warn/20 border-warn/50 text-warn py-1 text-xs" onClick={() => onPick(CAT_REVIEW)}>
-        移入待确认（同时清除缺陷类标签）
-      </button>
-      {customCategories.length > 0 && <div className="col-span-full text-fg3 mt-1">自定义分类：</div>}
-      {customCategories.map((c) => (
-        <button key={c.id} className="btn py-1 text-xs" onClick={() => onPick(`custom:${c.id}`)}>
-          {c.name}
-        </button>
-      ))}
-      <button className="btn py-1 text-xs col-span-full bg-bad/20 border-bad/50 text-bad" onClick={() => setPanel('trash')}>
-        移入废弃库（保留标签作为废弃原因）
-      </button>
-    </>
-  )
-
   const btnPad = size === 'lg' ? 'px-3 py-2.5 text-sm' : 'py-1 text-xs'
 
-  // D2 §8：待确认语境（中置信瑕疵派生或手动停泊）换成四按钮组：废弃库 / 好图→交付库 /
-  // 此判定正确（D1 一步结案）/ 此判定错误（重判面板）。“移动到”在这里是干扰项——
-  // 待确认的出口只有交付库/瑕疵片/废弃库三处，归自定义相册等用侧栏拖拽即可。
+  // D2 §8：待确认语境（中置信瑕疵派生或手动停泊）换成三按钮组：废弃库 / 好图→交付库 /
+  // 此判定错误（重判面板）。图去别的相册一律拖左侧栏，这里不再摆“移动到”。
   const fl = flawLevel(img.tags)
   const inReview = !isTrashLike(img.category) && fl !== 'high' && (img.category === CAT_REVIEW || fl === 'mid')
 
@@ -157,20 +137,7 @@ export default function JudgmentBar({
                   取消
                 </button>
               </>
-            ) : (
-              <>
-                <div className="text-fg3 mb-2">移动到（交付库请选下面一个档位；维度归类用🏷 标签）：</div>
-                <div className="grid grid-cols-2 gap-1.5">
-                  {targets((cat) => {
-                    void moveIds([img.id], cat)
-                    setPanel('none')
-                  })}
-                </div>
-                <button className="btn-ghost text-fg2 text-xs mt-2 w-full text-center" onClick={() => setPanel('none')}>
-                  ✕ 收起
-                </button>
-              </>
-            )}
+            ) : null}
           </div>,
           document.body
         )}
@@ -182,15 +149,8 @@ export default function JudgmentBar({
       >
         ✕ 不合格 废弃库
       </button>
-      <button
-        ref={moveBtnRef}
-        className={`btn whitespace-nowrap ${btnPad} ${panel === 'move' ? 'border-brand text-brand' : ''}`}
-        title="移动到指定分类"
-        onClick={() => setPanel((p) => (p === 'move' ? 'none' : 'move'))}
-        style={inReview ? { display: 'none' } : undefined}
-      >
-        移动到 ▴▾
-      </button>
+      {/* 这里不再摆「移动到」：三档 = 下面的绿色按钮，废弃库 = 左边的红色按钮，
+          待确认与自定义相册拖左侧栏（用户 10-14） */}
       {/* 复审最高频动作的一步直达：点开后选一个档位（= 放行入该档）。主进程 tier 分支对非交付图走
           与“移到→交付库”同一放行口径（清全部坏维度标签、记误判样本、事实标签保留、category_by=user、可撤回），
           额外一步定档；已在库的图只是改档。图离开本分类后 PreviewModal 自然切下一张 */}

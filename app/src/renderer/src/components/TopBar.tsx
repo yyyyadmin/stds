@@ -1,16 +1,61 @@
 /**
  * 顶栏：导入（单图/多选/文件夹三合一入口）/ 开始筛选（进度条+百分比+已处理数量+停止）/ 视图切换 / 排序 / 导出 / 设置
  * 引擎状态徽章（Python 完整引擎 / Node 基础引擎 / GPU-CPU）
+ *
+ * 宽度适配（笔记本上曾经把按钮挤成“一行一个字”，原因见下）：中文可以在任意字间断行，
+ * 一旦子项允许收缩，按钮就会被压到一列宽。所以：所有项 shrink-0 不许压、整行 flex-wrap 允许换行、
+ * 按钮族在 index.css 里统一 whitespace-nowrap；再以 1760px（自定义断点 3xl）为界分两档：
+ * 宽屏按原样铺开，窄屏把撤回/清空图库/大图收进「⋯ 更多」、视图只留图标、搜索与排序框变窄。
  */
 import { useEffect, useRef, useState } from 'react'
 import { useStore, filterByQuery } from '../store'
 import type { SortKey } from '../store'
 
-/** 三种主区布局。以前的第四种「大图」与双击小图的放大弹窗功能重叠，已合并到右边那个按钮 */
-const VIEWS: Array<{ m: 'grid' | 'list' | 'masonry'; label: string; key: string }> = [
-  { m: 'grid', label: '网格', key: '1' },
-  { m: 'list', label: '列表', key: '2' },
-  { m: 'masonry', label: '瀑布流', key: '3' }
+/** 三种主区布局。以前的第四种「大图」与双击小图的放大弹窗功能重叠，已合并到右边那个按钮。
+ *  icon 给窄屏（<1760）用：整组只留图标不放文字，能省 80px 左右。用内联 SVG 而不是 ▦☰ 这类字符——
+ *  符号字符在部分 Windows 中文字体里会缺字变成方框。 */
+const VIEWS: Array<{ m: 'grid' | 'list' | 'masonry'; label: string; key: string; icon: JSX.Element }> = [
+  {
+    m: 'grid',
+    label: '网格',
+    key: '1',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+        <rect x="3" y="3" width="7" height="7" rx="1" />
+        <rect x="14" y="3" width="7" height="7" rx="1" />
+        <rect x="3" y="14" width="7" height="7" rx="1" />
+        <rect x="14" y="14" width="7" height="7" rx="1" />
+      </svg>
+    )
+  },
+  {
+    m: 'list',
+    label: '列表',
+    key: '2',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+        <line x1="8" y1="6" x2="21" y2="6" />
+        <line x1="8" y1="12" x2="21" y2="12" />
+        <line x1="8" y1="18" x2="21" y2="18" />
+        <line x1="3.5" y1="6" x2="3.5" y2="6" />
+        <line x1="3.5" y1="12" x2="3.5" y2="12" />
+        <line x1="3.5" y1="18" x2="3.5" y2="18" />
+      </svg>
+    )
+  },
+  {
+    m: 'masonry',
+    label: '瀑布流',
+    key: '3',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+        <rect x="3" y="3" width="7" height="10" rx="1" />
+        <rect x="14" y="3" width="7" height="6" rx="1" />
+        <rect x="3" y="16" width="7" height="5" rx="1" />
+        <rect x="14" y="12" width="7" height="9" rx="1" />
+      </svg>
+    )
+  }
 ]
 
 /** 把剩余秒数格式化为“预计还需 ~X”文案 */
@@ -60,6 +105,24 @@ export default function TopBar(): JSX.Element {
   // 导入菜单：一个入口按钮，弹开后选“图片（可多选）”或“文件夹”
   const [importMenu, setImportMenu] = useState(false)
   const importRef = useRef<HTMLDivElement>(null)
+  // 「⋯ 更多」菜单：窄屏（<1760）时把低频动作收进去，腾出顶栏横向空间
+  const [moreOpen, setMoreOpen] = useState(false)
+  const moreRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!moreOpen) return
+    const onDown = (e: MouseEvent): void => {
+      if (moreRef.current && !moreRef.current.contains(e.target as Node)) setMoreOpen(false)
+    }
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setMoreOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [moreOpen])
   useEffect(() => {
     if (!importMenu) return
     const onDown = (e: MouseEvent): void => {
@@ -76,9 +139,43 @@ export default function TopBar(): JSX.Element {
     }
   }, [importMenu])
 
+  // 低频动作（撤回 / 清空图库 / 看大图）：大屏（≥1760）行内铺开，笔记本宽度收进「⋯ 更多」。
+  // 描述只写一份，行内按钮和菜单行都从它生成，禁用条件与提示不会两边漂移。
+  const undoSnap = s.undoSnapshots[s.undoSnapshots.length - 1]
+  const secondary = [
+    {
+      key: 'undo',
+      label: `↩ 撤回${undoSnap ? ` (${undoSnap.ids.length}张)` : ''}`,
+      title:
+        s.undoSnapshots.length === 0
+          ? '暂无可撤回的移动操作（移动过图片后这里会变亮）'
+          : `点击撤回最近一次移动（共 ${s.undoSnapshots.length} 步可依次撤回），会提示撤回几张、移回哪里`,
+      disabled: s.undoSnapshots.length === 0,
+      run: (): void => {
+        void s.undoMove()
+      },
+      cls: 'text-xs ' + (s.undoSnapshots.length === 0 ? 'btn border-line text-gray-500 opacity-50 cursor-not-allowed' : 'btn')
+    },
+    {
+      key: 'clear',
+      label: '清空图库',
+      title: '删光软件里的导入记录与修正记录（不会删除磁盘上的原始照片），导入错了想重新来时用',
+      disabled: running || (s.counts.all ?? 0) === 0,
+      run: (): void => setConfirmClear(true),
+      cls: 'btn-danger text-xs'
+    }
+  ]
+  // 「看大图」大屏仍摆在视图组旁边（老用户肌肉记忆），窄屏只出现在「⋯ 更多」里
+  const largeView = {
+    label: '大图',
+    title: '看大图（快捷键 4）：从当前选中的第一张开始，没选中就从列表第一张；← → 翻页，跟双击小图是同一个窗口',
+    disabled: !s.images.length,
+    run: (): void => s.openLargePreview()
+  }
+
   return (
-    <header className="shrink-0 bg-panel border-b border-line px-3 py-2 flex flex-wrap xl:flex-nowrap items-center gap-x-2 gap-y-1.5 text-sm">
-      <div className="relative" ref={importRef}>
+    <header className="shrink-0 bg-panel border-b border-line px-3 py-2 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-sm">
+      <div className="relative shrink-0" ref={importRef}>
         <button
           className="btn"
           disabled={!!s.importProgress}
@@ -121,13 +218,13 @@ export default function TopBar(): JSX.Element {
         )}
       </div>
       {s.importProgress && (
-        <button className="btn-danger" title="取消导入（已导入的记录保留）" onClick={() => void window.api.importCancel()}>
+        <button className="btn-danger shrink-0" title="取消导入（已导入的记录保留）" onClick={() => void window.api.importCancel()}>
           取消导入
         </button>
       )}
       {!running ? (
         <button
-          className="btn-primary"
+          className="btn-primary shrink-0"
           onClick={() => void s.startScan()}
           disabled={s.engineBusy || !!s.importProgress || !!s.thumbsProgress}
           title={s.importProgress || s.thumbsProgress ? '图库导入/缩略图生成中，完成后可开始筛选' : undefined}
@@ -141,15 +238,18 @@ export default function TopBar(): JSX.Element {
                 : '开始筛选'}
         </button>
       ) : (
-        <button className="btn-danger" onClick={() => void s.stopScan()}>
+        <button className="btn-danger shrink-0" onClick={() => void s.stopScan()}>
           停止
         </button>
       )}
       {/* 图库张数 + 失败张数：大屏一行并排（xl 及以上，维持原样），小屏叠成两行省横向空间；无失败时只剩图库一行 */}
       {(!running || (s.counts.error ?? 0) > 0) && (
-        <div className="flex flex-col items-start gap-1 xl:flex-row xl:items-center xl:gap-2">
+        <div className="flex flex-col items-start gap-1 shrink-0 xl:flex-row xl:items-center xl:gap-2">
           {!running && (
-            <span className="chip bg-panel2 text-fg2 border border-line tabular-nums whitespace-nowrap" title="当前图库共导入多少张照片">
+            <span
+              className="chip hidden 3xl:inline-flex bg-panel2 text-fg2 border border-line tabular-nums whitespace-nowrap"
+              title="当前图库共导入多少张照片（窄屏不占顶栏位置，左侧栏里一样看得到总数）"
+            >
               图库 {s.counts.all ?? 0} 张
             </span>
           )}
@@ -198,12 +298,76 @@ export default function TopBar(): JSX.Element {
         </div>
       )}
       {!running && p?.message && !p.total && <span className="text-xs text-gray-500 truncate flex-1">{p.message}</span>}
-      <div className="flex-1 max-xl:hidden" />
+      {/* 弹性占位：把右侧那组（复审/搜索/视图/导出/账号）顶到窗口右边。
+          以前只在 xl 以上开，窄屏会出现「整排靠左、右边空一大块」的失衡，改成一直开：
+          真装不下时它的假想宽度是 0，不影响换行判定。 */}
+      <div className="flex-1" />
 
-      {/* 当前筛选目录：仅当本次导入来自“选择/拖入目录”时显示（纯选照片不显示） */}
+      {/* AI 复审开关（会员专属）：放在筛选目录前。非会员灰锁按钮→会员中心；会员真开关（首次开启弹授权） */}
+      {(() => {
+        const enabled = !!s.settings.aiReviewEnabled
+        // 今日剩余复审张数：跑动中优先用进度里的权威日额度实时算，否则用登录态里 user_info.php 回传的 ai_review.remaining
+        const live = s.aiReview && s.aiReview.dailyLimit > 0 ? Math.max(0, s.aiReview.dailyLimit - s.aiReview.usedToday) : null
+        const remaining = live ?? user?.ai_review?.remaining ?? null
+        const cls =
+          'inline-flex items-center gap-1 shrink-0 rounded-md border px-2 py-1 text-xs font-medium whitespace-nowrap transition-colors cursor-pointer ' +
+          (!isMember
+            ? 'border-line bg-panel2 text-fg3 hover:text-fg2'
+            : enabled
+              ? 'border-good/50 bg-good/10 text-good'
+              : 'border-line bg-panel2 text-fg2 hover:border-fg3')
+        return (
+          <button
+            className={cls}
+            title={
+              !isMember
+                ? 'AI 复审为会员专属功能，点击了解会员'
+                : enabled
+                  ? `AI 复审已开启：分类完成后自动将「待确认」照片提交云端复核，仅生成结论，经确认后方写回判定${remaining != null ? `；今日额度剩 ${remaining} 张` : ''}`
+                  : `开启 AI 复审：分类完成后自动将「待确认」照片提交云端模型二次核验，仅生成结论，经确认后方写回判定${remaining != null ? `；今日额度剩 ${remaining} 张` : ''}`
+            }
+            onClick={() => (isMember ? s.toggleAiReview() : useStore.setState({ showMember: true }))}
+          >
+            {isMember && (
+              <span className={'inline-block w-7 h-3.5 rounded-full transition-colors ' + (enabled ? 'bg-good' : 'bg-line')}>
+                <span className={'block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ' + (enabled ? 'translate-x-3.5' : 'translate-x-0')} />
+              </span>
+            )}
+            {isMember ? (
+              <>
+                AI 复审
+                {/* 窄屏不再把「今日剩 N 张」摊在按钮上（顶栏宽度不够）：数字挪进鼠标悬停提示 */}
+                {remaining != null && (
+                  <span className="hidden 3xl:inline ml-0.5 font-normal text-fg3 tabular-nums">· 今日额度剩 {remaining} 张</span>
+                )}
+              </>
+            ) : (
+              'AI 复审 🔒'
+            )}
+          </button>
+        )
+      })()}
+
+      {/* 顶部非阻塞进度小字：复核在后台跑且用户不在本轮作用域页（待确认/瑕疵片）时显示，切走不遮挡、可点中止；
+          停在该作用域页时由页内独占弹窗接管（Task9），这里不重复显示 */}
+      {s.aiReview?.running && s.activeCategory !== (s.aiReview?.scope ?? 'review') && (
+        <div className="inline-flex items-center gap-2 shrink-0 text-xs whitespace-nowrap">
+          <span className="inline-block w-3 h-3 shrink-0 rounded-full border-2 border-brand border-t-transparent animate-spin" />
+          <span className="text-fg2 tabular-nums">
+            云端复核中 {s.aiReview.done}/{s.aiReview.total}
+            {s.aiReview.current ? ` · ${s.aiReview.current}` : ''}
+          </span>
+          <button className="btn text-xs py-0.5" title="中止复核：在当前张停止，已生成的结论保留" onClick={() => void s.stopAiReview()}>
+            停止
+          </button>
+        </div>
+      )}
+
+      {/* 当前筛选目录：仅当本次导入来自“选择/拖入目录”时显示（纯选照片不显示）；
+          窄屏没地方摆一条路径，收进下面的「⋯ 更多」里给一行完整显示 */}
       {s.settings.lastImportDir && (
         <span
-          className="inline-flex items-center max-w-[280px] px-2 py-1 rounded-md text-xs bg-panel2 text-fg2 border border-line max-xl:hidden"
+          className="inline-flex items-center shrink-0 max-w-[200px] px-2 py-1 rounded-md text-xs bg-panel2 text-fg2 border border-line max-3xl:hidden"
           title={`当前筛选目录：${s.settings.lastImportDir}`}
         >
           <span className="shrink-0">📂 当前筛选目录：</span>
@@ -211,40 +375,56 @@ export default function TopBar(): JSX.Element {
         </span>
       )}
 
-      {/* 撤回移动：仅在有可撤回的移动操作时高亮可点 */}
-      <button
-        className={
-          'text-xs whitespace-nowrap ' +
-          (s.undoSnapshots.length === 0
-            ? 'btn border-line text-gray-500 opacity-50 cursor-not-allowed'
-            : 'btn')
-        }
-        title={
-          s.undoSnapshots.length === 0
-            ? '暂无可撤回的移动操作（移动过图片后这里会变亮）'
-            : `点击撤回最近一次移动（共 ${s.undoSnapshots.length} 步可依次撤回），会提示撤回几张、移回哪里`
-        }
-        onClick={() => void s.undoMove()}
-        disabled={s.undoSnapshots.length === 0}
-      >
-        ↩ 撤回{(() => {
-          const l = s.undoSnapshots[s.undoSnapshots.length - 1]
-          return l ? ` (${l.ids.length}张)` : ''
-        })()}
-      </button>
+      {/* 次要操作行内版（只≥1760 的宽度才摆得开）：窄屏时整组隐藏，改由下面的「⋯ 更多」承载 */}
+      <div className="hidden 3xl:flex items-center gap-x-2 shrink-0">
+        {secondary.map((a) => (
+          <button key={a.key} className={a.cls} title={a.title} disabled={a.disabled} onClick={a.run}>
+            {a.label}
+          </button>
+        ))}
+      </div>
 
-      <button
-        className="btn-danger text-xs whitespace-nowrap"
-        title="删光软件里的导入记录与修正记录（不会删除磁盘上的原始照片），导入错了想重新来时用"
-        onClick={() => setConfirmClear(true)}
-        disabled={running || (s.counts.all ?? 0) === 0}
-      >
-        清空图库
-      </button>
+      {/* 「⋯ 更多」：笔记本 / 小屏宽度下收纳撤回、清空图库、看大图这几个低频动作，
+          菜单靠右展开，免得被窗口右边缘裁掉。 */}
+      <div className="relative shrink-0 3xl:hidden" ref={moreRef}>
+        <button
+          className={'btn text-xs ' + (moreOpen ? 'bg-line' : '')}
+          title="更多操作：撤回 / 清空图库 / 看大图"
+          onClick={() => setMoreOpen((v) => !v)}
+        >
+          ⋯ 更多
+        </button>
+        {moreOpen && (
+          <div className="absolute right-0 top-full mt-1 z-40 w-64 rounded-md border border-line bg-panel shadow-xl py-1">
+            {[...secondary, { key: 'large', label: largeView.label, title: largeView.title, disabled: largeView.disabled, run: largeView.run }].map((a) => (
+              <button
+                key={a.key}
+                className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                title={a.title}
+                disabled={a.disabled}
+                onClick={() => {
+                  setMoreOpen(false)
+                  a.run()
+                }}
+              >
+                {a.label}
+              </button>
+            ))}
+            {s.settings.lastImportDir && (
+              <div className="mt-1 border-t border-line px-3 py-2 text-[11px]">
+                <div className="text-fg3 mb-0.5">当前筛选目录</div>
+                <div className="break-all leading-relaxed text-fg2" title={s.settings.lastImportDir}>
+                  {s.settings.lastImportDir}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
-      <div className="relative flex items-center">
+      <div className="relative flex items-center shrink-0">
         <input
-          className="input text-xs w-40 pr-5"
+          className="input text-xs w-24 xl:w-28 3xl:w-40 pr-5"
           placeholder="搜文件名"
           title="按文件名过滤当前相册（只影响显示，不改库里的分类与标签）。可以一次粘多个名字，用空格、逗号或换行分隔——比如从复查清单里整段粘过来。Esc 清空。"
           value={s.query}
@@ -274,37 +454,39 @@ export default function TopBar(): JSX.Element {
       </div>
 
       {!!s.query.trim() && (
-        <span className="text-xs text-fg3 whitespace-nowrap" title="当前相册里命中的张数 / 本相册总张数">
+        <span className="text-xs text-fg3 whitespace-nowrap shrink-0" title="当前相册里命中的张数 / 本相册总张数">
           命中 {filterByQuery(s.images, s.query).length}/{s.images.length}
         </span>
       )}
 
+      {/* 窄屏只给 96px，选项文案因此压短（完整解释走 title 鼠标悬停） */}
       <select
-        className="input text-xs w-28"
-        title="排序方式"
+        className="input text-xs w-24 3xl:w-28 shrink-0"
+        title="排序方式。最新在前 = 按最近移动/导入的时间；置信度↑ = 把 AI 最没把握的排前面，优先人工抽查"
         value={s.sortKey}
         onChange={(e) => s.setSort(e.target.value as SortKey)}
       >
         <option value="default">默认顺序</option>
         <option value="name">按文件名</option>
         <option value="name-desc">文件名倒序</option>
-        <option value="conf-asc">置信度↑（优先抽查）</option>
+        <option value="conf-asc">置信度↑ 抽查</option>
         <option value="conf-desc">置信度↓</option>
-        <option value="time">最新在前（移动/导入）</option>
+        <option value="time">最新在前</option>
       </select>
 
-      <div className="flex items-center border border-line rounded-md overflow-hidden">
+      <div className="flex items-center shrink-0 border border-line rounded-md overflow-hidden">
         {VIEWS.map((v) => (
           <button
             key={v.m}
             className={
-              'px-2 py-1 text-xs border-r border-line last:border-r-0 transition-colors ' +
+              'inline-flex items-center px-2 py-1 text-xs border-r border-line last:border-r-0 transition-colors ' +
               (s.viewMode === v.m ? 'bg-brand text-white' : 'bg-panel2 hover:bg-line text-gray-400')
             }
             onClick={() => void s.setViewMode(v.m)}
             title={`${v.label}视图（快捷键 ${v.key}）`}
           >
-            {v.label}
+            <span className="hidden 3xl:inline">{v.label}</span>
+            <span className="3xl:hidden">{v.icon}</span>
           </button>
         ))}
       </div>
@@ -313,16 +495,16 @@ export default function TopBar(): JSX.Element {
           两套“大图”各带一套操作太难记，而且原大图视图里的图不如弹窗清楚（弹窗会加载原图）。
           仍放在视图组旁边，保留老用户“右上角切大图”的肌肉记忆（快捷键 4 也照旧）。 */}
       <button
-        className="px-2 py-1 text-xs bg-panel2 hover:bg-line text-gray-400 border border-line rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-panel2"
-        onClick={() => s.openLargePreview()}
-        disabled={!s.images.length}
-        title="看大图（快捷键 4）：从当前选中的第一张开始，没选中就从列表第一张；← → 翻页，跟双击小图是同一个窗口"
+        className="hidden 3xl:inline-block shrink-0 px-2 py-1 text-xs bg-panel2 hover:bg-line text-gray-400 border border-line rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-panel2"
+        onClick={largeView.run}
+        disabled={largeView.disabled}
+        title={largeView.title}
       >
-        大图
+        {largeView.label}
       </button>
 
       <button
-        className="btn-primary inline-flex items-center gap-1.5 disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-brand"
+        className="btn-primary shrink-0 inline-flex items-center gap-1.5 disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-brand"
         onClick={() => void useStore.setState({ showExport: true })}
         disabled={s.counts.all === 0}
         title="导出交付：把选中的分类导出到指定文件夹"
@@ -334,7 +516,7 @@ export default function TopBar(): JSX.Element {
         </svg>
         导出交付
       </button>
-      <button className="btn-ghost text-xl leading-none px-2" title="设置" onClick={() => void useStore.setState({ showSettings: true })}>
+      <button className="btn-ghost shrink-0 text-xl leading-none px-2" title="设置" onClick={() => void useStore.setState({ showSettings: true })}>
         ⚙️
       </button>
       {/* AI 引擎状态徽章（三态动效）：
@@ -342,7 +524,7 @@ export default function TopBar(): JSX.Element {
           启动中 = 琥珀脉冲；空闲就绪 = 青绿柔和呼吸 */}
       <span
         className={
-          'chip !gap-1.5 !border-0 !py-1.5 ' +
+          'chip shrink-0 !gap-1.5 !border-0 !py-1.5 ' +
           (running
             ? 'engine-live engine-glow engine-sheen text-white !px-3 !text-[13px] font-bold tracking-wide'
             : s.engineBusy
@@ -369,23 +551,30 @@ export default function TopBar(): JSX.Element {
             }
           />
         )}
-        {s.engineBusy ? 'AI引擎启动中' : 'AI引擎运行中'}
+        {/* 徽章只说状态：「AI 引擎」四个字靠鼠标提示讲（提示里本来就有），窄屏不必再让位 */}
+        <span>{s.engineBusy ? '启动中' : '运行中'}</span>
       </span>
 
-      {/* 主题切换 */}
-      <button
-        className="btn-ghost text-fg2 text-xl leading-none px-2"
-        title={dark ? '切换到简白主题' : '切换到暗夜主题'}
-        onClick={() => void s.toggleTheme()}
-      >
-        {dark ? '☀️' : '🌙'}
-      </button>
+      {/* 主题切换入口（用户拍板 2026-10-14：默认就是简白主题，顶栏不摆月亮）。
+          刻意不是直接删，而是只在“当前是黑主题”时才显示：
+          主题是会存库的（setTheme → saveSettings），而设置弹窗里没有第二个主题入口，
+          彻底删掉会把以前手滑切过酷黑的机器永久锁在黑主题。
+          要彻底隐藏：把下面的 `dark && (` 改成 `false && (`；要恢复常显：去掉这个条件即可。 */}
+      {dark && (
+        <button
+          className="btn-ghost shrink-0 text-fg2 text-xl leading-none px-2"
+          title="切换到简白主题"
+          onClick={() => void s.toggleTheme()}
+        >
+          ☀️
+        </button>
+      )}
 
       {/* 积分 / 会员 / 登录入口 */}
       {auth.loggedIn ? (
         <button
           className={
-            'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-base font-semibold cursor-pointer transition-colors ' +
+            'inline-flex items-center gap-1.5 shrink-0 rounded-md border px-2.5 py-1 text-base font-semibold cursor-pointer transition-colors ' +
             (isMember ? 'bg-warn/15 text-warn border-warn/40' : 'bg-panel2 text-fg2 border-line hover:bg-line')
           }
           title="打开会员中心：查看积分、开通会员"
@@ -393,10 +582,11 @@ export default function TopBar(): JSX.Element {
         >
           {isMember && <span className="text-lg leading-none">👑</span>}
           <span className="tabular-nums">{balance}</span>
-          <span className="opacity-70 text-sm">积分</span>
+          {/* 「积分」两字只在宽屏留：窄屏靠鼠标提示说明这是什么数 */}
+          <span className="opacity-70 text-sm hidden 3xl:inline">积分</span>
         </button>
       ) : (
-        <button className="btn-primary text-sm py-1.5" onClick={() => useStore.setState({ showLogin: true })}>
+        <button className="btn-primary shrink-0 text-sm py-1.5" onClick={() => useStore.setState({ showLogin: true })}>
           登录 / 注册
         </button>
       )}

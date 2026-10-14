@@ -50,6 +50,15 @@ function toUser(raw: Record<string, unknown>): AuthUser {
           total_earned: 0,
           total_consumed: 0
         }
+  // 今日 AI 复审额度（user_info.php 会员返回 data.ai_review）：缺省时不挂该字段
+  const ar = raw.ai_review && typeof raw.ai_review === 'object' ? (raw.ai_review as Record<string, unknown>) : null
+  const aiReview = ar
+    ? {
+        daily_limit: Number(ar.daily_limit) || 0,
+        used_today: Number(ar.used_today) || 0,
+        remaining: Number(ar.remaining) || 0
+      }
+    : undefined
   return {
     id: Number(raw.id) || 0,
     phone: (raw.phone as string) || null,
@@ -57,7 +66,8 @@ function toUser(raw: Record<string, unknown>): AuthUser {
     nickname: (raw.nickname as string) || null,
     avatar_url: (raw.avatar_url as string) || null,
     membership: { ...membership, level: normLevel(membership.level) },
-    points
+    points,
+    ai_review: aiReview
   }
 }
 
@@ -246,7 +256,9 @@ class AuthManager {
     return {
       wechat_qrcode: (d.wechat_qrcode as string) || null,
       customer_service_qrcode: (d.customer_service_qrcode as string) || null,
-      site_name: (d.site_name as string) || null
+      site_name: (d.site_name as string) || null,
+      // 可选字段：后台没回就是 null，会员中心会改说“每天有上限”而不是编一个数
+      ai_review_daily_limit: d.ai_review_daily_limit != null ? Number(d.ai_review_daily_limit) || 0 : null
     }
   }
 
@@ -334,6 +346,98 @@ class AuthManager {
       }
     }
     return null
+  }
+
+  // ---------- AI 复审（会员专属）：领 key + 上报用量 ----------
+  // 契约见 docs/superpowers/specs/2026-10-14-ai-review-api-contract.md 接口 A/B。
+  // 铁律：拿到的 api_key 仅由调用方存内存，本服务绝不落盘/写日志/进 error message。
+
+  /**
+   * 接口 A：领取复审 Key。服务端是唯一会员闸门（403 not_member）。
+   * 把 HTTP 风格 code + data.reason 归一成机器可判的 reason 枚举。
+   */
+  async getReviewKey(): Promise<{
+    ok: boolean
+    reason: 'ok' | 'unauthorized' | 'not_member' | 'quota_exceeded' | 'rate_limited' | 'bad_request' | 'network' | 'service_unavailable'
+    data?: { api_key: string; endpoint: string; model: string; ttl: number; session_id: string; daily_limit: number; used_today: number; remaining: number }
+    retry_after?: number
+  }> {
+    if (!this.token) return { ok: false, reason: 'unauthorized' }
+    const r = await request<Record<string, unknown>>('ai_review_key.php', { scope: 'review', client_version: app.getVersion() }, this.token)
+    const dr = (r.data?.reason as string) || ''
+    // 成功：必须拿到 api_key + session_id 才算 ok
+    if (r.code === 200 && r.data?.api_key && r.data?.session_id) {
+      const d = r.data
+      return {
+        ok: true,
+        reason: 'ok',
+        data: {
+          api_key: String(d.api_key),
+          endpoint: String(d.endpoint || ''),
+          model: String(d.model || 'qwen3-vl-plus'),
+          ttl: Number(d.ttl) || 600,
+          session_id: String(d.session_id),
+          daily_limit: Number(d.daily_limit) || 0,
+          used_today: Number(d.used_today) || 0,
+          remaining: Number(d.remaining) || 0
+        }
+      }
+    }
+    // 失败：优先用后端 data.reason，否则按 code 推断；拒绝时也带回供展示的额度字段
+    // 后端额外保护分支（契约未列）：403 service_disabled（总开关关）/ 503 key_not_configured（后台未配 key）
+    //   均归一为 service_unavailable（服务暂不可用降级，绝不当作非会员去推开通）
+    let reason: 'unauthorized' | 'not_member' | 'quota_exceeded' | 'rate_limited' | 'bad_request' | 'network' | 'service_unavailable'
+    if (dr === 'not_member' || dr === 'quota_exceeded' || dr === 'rate_limited' || dr === 'unauthorized' || dr === 'bad_request' || dr === 'service_unavailable') {
+      reason = dr
+    } else if (dr === 'service_disabled' || dr === 'key_not_configured') {
+      reason = 'service_unavailable'
+    } else if (r.code === 0) {
+      reason = 'network'
+    } else if (r.code === 503) {
+      reason = 'service_unavailable'
+    } else if (r.code === 401) {
+      reason = 'unauthorized'
+    } else if (r.code === 403) {
+      reason = 'not_member'
+    } else if (r.code === 429) {
+      reason = 'rate_limited'
+    } else {
+      reason = 'bad_request'
+    }
+    const usedToday = Number(r.data?.used_today) || 0
+    const dailyLimit = Number(r.data?.daily_limit) || 0
+    return {
+      ok: false,
+      reason,
+      // 额度展示用：api_key 置空（调用方仅在 reason==='ok' 时才读 api_key）
+      data: { api_key: '', endpoint: '', model: '', ttl: 0, session_id: '', daily_limit: dailyLimit, used_today: usedToday, remaining: Number(r.data?.remaining) || Math.max(0, dailyLimit - usedToday) },
+      retry_after: r.code === 429 ? Number(r.data?.retry_after) || undefined : undefined
+    }
+  }
+
+  /** 接口 B：分批上报本会话成功复审张数（服务端按 (session_id, seq) 幂等累加 used_today）。 */
+  async reportReviewUsage(
+    sessionId: string,
+    seq: number,
+    delta: number
+  ): Promise<{ ok: boolean; usedToday?: number; remaining?: number; reason?: string }> {
+    if (!this.token || !sessionId) return { ok: false, reason: 'unauthorized' }
+    const r = await request<Record<string, unknown>>('ai_review_usage.php', { scope: 'review', session_id: sessionId, seq, delta: Math.max(0, Math.floor(delta)) }, this.token)
+    if (r.code === 200) {
+      return {
+        ok: true,
+        usedToday: Number(r.data?.used_today) || 0,
+        remaining: Number(r.data?.remaining) || 0
+      }
+    }
+    // 归一 reason，与 getReviewKey 同口径：service_disabled/key_not_configured/503 → service_unavailable；
+    // bad_session/quota_exceeded/rate_limited/not_member/unauthorized 原样透传供调用方分支
+    const drB = (r.data?.reason as string) || ''
+    const reason =
+      drB === 'service_disabled' || drB === 'key_not_configured' || r.code === 503
+        ? 'service_unavailable'
+        : drB || (r.code === 0 ? 'network' : String(r.code))
+    return { ok: false, reason }
   }
 }
 

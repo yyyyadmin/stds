@@ -1,7 +1,7 @@
 /**
  * 侧栏分类树（第三章 3.1，D4 面向客户简化 + 分组顺序重排）
  * 上段“交付状态”互斥可求和：全部 / 交付库（三行档位子行带「└──」层级连接符、缩进一档，
- * 子行数字比父行更小更浅、选中也不粗体——从属关系不能反客为主）/ 瑕疵片 / 待确认；
+ * 子行数字比父行更小更浅、选中也不粗体——从属关系不能反客为主）/ 待确认 / 瑕疵片；
  * 下段按“先看后弃”排序：人物与影调 → 瑕疵（按缺陷类型）→ 自定义相册 → 废片（最底，确定不要的垫底）。
  * 原“按内容分”折叠开关已取消：分组固定排序后直接摊开，遮起来反而找不到。
  * 层级只靠排版（标题 13px 粗体 fg 不可点、行 13px fg2、着色词 10px），
@@ -13,6 +13,7 @@ import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { NavIcon } from './SidebarIcons'
 import TutorialCenter from './TutorialCenter'
+import AiReviewTag from './AiReviewTag'
 import { useStore } from '../store'
 import {
   BAD_DIMENSIONS,
@@ -177,6 +178,8 @@ function Row(props: {
   emphasis?: 'total' | 'status'
   /** 传了就在标签后紧跟一枚绿色小字「导出」，点击直接开导出面板（不触发选中分类） */
   onExport?: () => void
+  /** 标签文字后、数字前的一块自定义区域（如「待确认」行后的 AI 复审运行态小字）：靠排版内联，不改变行点击语义 */
+  after?: ReactNode
 }): JSX.Element {
   const active = useStore((s) => s.activeCategory === props.cat)
   const openCategory = useStore((s) => s.openCategory)
@@ -225,6 +228,11 @@ function Row(props: {
           >
             「导出」
           </button>
+        </span>
+      ) : props.after ? (
+        <span className="flex-1 flex items-center min-w-0">
+          <span className={'truncate' + (props.emphasis === 'status' ? ' font-semibold text-fg' : '')}>{props.label}</span>
+          {props.after}
         </span>
       ) : (
         <span className={'flex-1 truncate' + (props.emphasis === 'status' ? ' font-semibold text-fg' : '')}>
@@ -381,8 +389,8 @@ export default function Sidebar(): JSX.Element {
           <Row connector="└──" label={tierNames[t - 1] || String(t)} cat={`tier:${t}`} count={counts[`tier:${t}`]} tip={`${tierTips[t]}；点看只显示这一档，拖入可改档`} />
         </div>
       ))}
-      <Row emphasis="status" label="瑕疵片" cat={CAT_FLAWS} count={counts[CAT_FLAWS]} icon="face_ugly" color={lit(counts[CAT_FLAWS], '#ef4444')} noDrop tip="AI 判出缺陷的照片，默认不导出；确认为误判可删标签放行" />
-      <Row emphasis="status" label="待确认" cat={CAT_REVIEW} count={counts[CAT_REVIEW]} icon="review" color={lit(counts[CAT_REVIEW], '#eab308')} tip="AI 拿不准的图，复核后再决定；也可拖入手动搁置。暂不导出" />
+      <Row emphasis="status" label="待确认" cat={CAT_REVIEW} count={counts[CAT_REVIEW]} icon="review" color={lit(counts[CAT_REVIEW], '#eab308')} after={<AiReviewTag scope="review" />} tip="本地检测中置信（拿不准）及人工搁置的照片；云端复核确认后自动归档。不计入导出" />
+      <Row emphasis="status" label="瑕疵片" cat={CAT_FLAWS} count={counts[CAT_FLAWS]} icon="face_ugly" color={lit(counts[CAT_FLAWS], '#ef4444')} noDrop after={<AiReviewTag scope="flaws" />} tip="本地检测判出缺陷（高置信）的照片，默认不导出；经云端复核或人工确认为误判后，删除对应标签即可放行" />
       {/* 重复照片（v2.0.67，客户看到的名字从“重复多余”改成“重复照片”）：本身没拍坏、只因同组已经有一张进了交付库而不导出的那批图。
           以前它们混在“瑕疵片”里，用户看到的就是“好片被当坏片”，10-13 投诉的根源。
           数字只数“单因冗余被拦下”的张数；点进去是整组视图（每组到底有几张、含已入库的代表帧），两个数不同义。 */}

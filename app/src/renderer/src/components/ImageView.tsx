@@ -1,21 +1,23 @@
 /**
- * 多视图（9.2）：网格(160px 4-6列自适应) / 列表(80px) / 瀑布流(保留比例)
+ * 多视图（9.2）：网格(格子最小 160px，列数自适应并把整行铺满) / 列表(80px) / 瀑布流(保留比例)
  * 缩略图带 AI 标签名（不显示置信度数字）；单击选中 / Shift 连选 / Ctrl 加选 / 双击放大预览
  * （以前还有第四种「大图」布局，与双击小图弹出的放大弹窗功能重叠，已下线：顶栏「大图」直接开那个弹窗）
  */
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import { createPortal } from 'react-dom'
-import { useStore, sortConf, filterByQuery } from '../store'
+import { useStore, sortConf, filterByQuery, needsManualReview, aiReviewRank } from '../store'
 import DuplicateGroupsView from './DuplicateGroupsView'
 import { TrashView } from './TrashView'
+import AiReviewBar from './AiReviewBar'
 import { toSrc, ThumbImg } from './imageSrc'
 import type { ImageRecord, DimensionKey } from '../../../shared/types'
-import { ALL_TAG_DIMENSIONS, CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, DIMENSION_LABELS, isLibraryBucket, isDupRedundant, flawLevel, DEFAULT_TIER_NAMES, PERSON_DIMS } from '../../../shared/types'
+import { ALL_TAG_DIMENSIONS, CAT_LIBRARY, CAT_REVIEW, CAT_FLAWS, CAT_TRASH, CAT_DUP_TRASH, DIMENSION_LABELS, QC_MANUAL_DIMENSIONS, isLibraryBucket, isDupRedundant, flawLevel, DEFAULT_TIER_NAMES, PERSON_DIMS } from '../../../shared/types'
 import { dimTagColor } from './Sidebar'
 
 /**
- * 网格 Ctrl+滚轮缩放的上下限。上限 610 是按窗口宽度反推的：主区实宽≈2040 CSS px
+ * 网格 Ctrl+滚轮缩放的上下限（现在是「一格最小宽」，实际格子会再撑大一点铺满整行）。
+ * 上限 610 是按窗口宽度反推的：主区实宽≈2040 CSS px
  * （2560 屏 − 侧栏 224 − 滚动条与内边距），auto-fill 下“一行三张”最多能放到 672 一格，
  * 610 留了余量（再往上就变成一行两张，没意义了）；以前卡在 360，最多只能放到一行五张。
  * 清晰度已与主进程同步提档：importer.ts 的 THUMB_MAX 已从 640 提到 960，3:2 横片短边
@@ -52,13 +54,16 @@ function tint(hex: string, p: number): string {
  * 人物分类标签例外（用户拍板 2026-10-12）：实心蓝底白字、无描边——它回答的是
  * “这是什么图”，和瑕疵标签“这图哪里有问题”不是一类信息，视觉语言必须拉开。
  */
-function DimTag(props: { dim: string }): JSX.Element {
+function DimTag(props: { dim: string; faded?: boolean }): JSX.Element {
   const c = dimTagColor(props.dim)
+  // faded：这张已转人工定画质，除模糊/曝光以外的标签都是“AI 已定过”的，压淡一点让待定的两项跳出来（用户 10-14）
+  const fade = props.faded ? ' opacity-50 saturate-[.6]' : ''
   if (isPersonDim(props.dim)) {
     return (
       <span
-        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[5px] text-[11px] leading-none font-medium text-white shadow-[0_1px_3px_rgba(0,0,0,0.65)]"
+        className={'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[5px] text-[11px] leading-none font-medium text-white shadow-[0_1px_3px_rgba(0,0,0,0.65)]' + fade}
         style={{ background: c }}
+        title={props.faded ? '该项已由云端复核确认；待人工裁定的是画面模糊、曝光异常' : undefined}
       >
         {DIMENSION_LABELS[props.dim as keyof typeof DIMENSION_LABELS]}
       </span>
@@ -66,8 +71,9 @@ function DimTag(props: { dim: string }): JSX.Element {
   }
   return (
     <span
-      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[5px] text-[11px] leading-none font-medium border shadow-[0_1px_3px_rgba(0,0,0,0.65)]"
+      className={'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[5px] text-[11px] leading-none font-medium border shadow-[0_1px_3px_rgba(0,0,0,0.65)]' + fade}
       style={{ color: tint(c, -0.35), background: tint(c, 0.88) + 'F2', borderColor: tint(c, 0.2) }}
+      title={props.faded ? '该项已由云端复核确认；待人工裁定的是画面模糊、曝光异常' : undefined}
     >
       {DIMENSION_LABELS[props.dim as keyof typeof DIMENSION_LABELS]}
     </span>
@@ -90,6 +96,15 @@ function sortTagsPersonFirst<T extends [string, { confidence?: number } | undefi
 }
 
 /**
+ * 已转人工定画质的卡片用这个序：模糊/曝光顶到最前（它们正是“还没定完”的那两项，被折叠就看不到了），
+ * 其次人物标签（旧规则：固定第一位），再其余按置信度（用户 10-14：“一眼没看到这两个标签等待人工复审”是不行的）。
+ */
+function sortManualQcFirst<T extends [string, { confidence?: number } | undefined]>(list: T[]): T[] {
+  const rank = (d: string): number => ((QC_MANUAL_DIMENSIONS as string[]).includes(d) ? 0 : isPersonDim(d) ? 1 : 2)
+  return [...list].sort((a, b) => rank(a[0]) - rank(b[0]) || (b[1]?.confidence || 0) - (a[1]?.confidence || 0))
+}
+
+/**
  * 导入/缩略图生成期间的点击拦截层（挂在 App 的 main 相对容器上，盖住整个中部内容区）：
  * 一次导入几千张时，主进程在批量解码生成缩略图，渲染层同时再加载大量原图/响应点击会明显卡顿。
  * 这层半透明遮罩自带 pointer-events，吸收照片点击/拖拽；「开始筛选」按钮在 TopBar 同步禁用。
@@ -103,7 +118,7 @@ export function BusyOverlay(): JSX.Element | null {
   const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0
   return (
     <div
-      className="absolute inset-0 z-40 flex items-center justify-center bg-base/55 backdrop-blur-[2px] cursor-progress"
+      className="absolute inset-0 z-40 flex items-center justify-center bg-canvas/55 backdrop-blur-[2px] cursor-progress"
       title="导入与缩略图生成完成前请暂缓操作"
     >
       <div className="flex flex-col items-center gap-3 rounded-2xl border border-line bg-panel/95 px-8 py-6 shadow-2xl">
@@ -180,6 +195,42 @@ function TagBtn({ img, variant = 'hover' }: { img: ImageRecord; variant?: 'hover
 }
 
 /**
+ * 卡片左上角的「人工复审」红底角标：这张已经 AI 复审并结案，但还卡着云端不看的模糊/曝光，只能人工定（用户 10-14）。
+ * 待确认页写「人工复审」、瑕疵片页写「画质需人工复审」（用户 10-14 二次拍板，原先叫「画质待人工」）：同一个标记两种字——瑕疵片那张已经确定是坏片，
+ * 要留意的只是画质两项；待确认那张还没定完，所以直接叫人。用贴角红底（语义令牌 bad，随主题换深浅）而不是又一枚方框 chip：
+ * 层级靠形状与颜色，不再加边框块（UI 铁律 a387a39d）。用户 10-14 追加：不要前缀符号、要更大一号、字要居中。
+ * 点它直接打开重判面板：这批图已结案、不在逐张复核队列里了，不把入口放在标记上用户就只能自己找“此判定错误”。
+ */
+function ManualFlag({ img }: { img: ImageRecord }): JSX.Element | null {
+  const openReviewPanel = useStore((s) => s.openReviewPanel)
+  if (!needsManualReview(img)) return null
+  const flaws = flawLevel(img.tags || {}) === 'high'
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      className="absolute left-0 top-0 z-20 flex cursor-pointer items-center justify-center rounded-br-[12px] bg-bad px-3.5 py-1.5 text-xs font-bold leading-none text-white shadow-[0_1px_4px_rgba(0,0,0,0.7)] hover:brightness-110"
+      title={
+        flaws
+          ? '本张已完成云端复核；画面模糊、曝光异常不在复核范围内，请在此人工裁定画质'
+          : '本张已完成云端复核；画面模糊、曝光异常不在复核范围内，云端结论不构成画质放行依据，请在此人工裁定'
+      }
+      onClick={(e) => {
+        e.stopPropagation()
+        openReviewPanel([img.id])
+      }}
+      onKeyDown={(e) => {
+        if (e.key !== 'Enter') return
+        e.stopPropagation()
+        openReviewPanel([img.id])
+      }}
+    >
+      {flaws ? '画质需人工复审' : '人工复审'}
+    </span>
+  )
+}
+
+/**
  * 卡片左下角的维度标签条：按置信度取前 3 枚，剩下的折成「+N」。
  * 悬停 +N 只弹被折叠的剩余标签（用户拍板：不重复显示卡片上已有的前 3 枚）。
  * 弹层走 portal + fixed：卡片根节点是 overflow-hidden，弹在卡片内部会被剪掉；
@@ -189,14 +240,16 @@ function TagBtn({ img, variant = 'hover' }: { img: ImageRecord; variant?: 'hover
 function TagChips({ img }: { img: ImageRecord }): JSX.Element | null {
   const entries = Object.entries(img.tags || {}).filter(([, t]) => t && t.level !== 'low')
   if (!entries.length) return null
-  // 人物分类标签固定第一位（用户拍板），其余按置信度从高到低；互斥保证人数标签至多一枚
-  const sorted = sortTagsPersonFirst(entries)
+  // 已转人工定画质的卡片：模糊/曝光顶最前且保持原色，AI 定过的几项压淡；其余卡片仍按人物标签第一
+  const manual = needsManualReview(img)
+  const sorted = manual ? sortManualQcFirst(entries) : sortTagsPersonFirst(entries)
+  const fadedOf = (dim: string): boolean => manual && !(QC_MANUAL_DIMENSIONS as string[]).includes(dim)
   const hidden = sorted.length > 3 ? sorted.slice(3) : []
   const [morePos, setMorePos] = useState<{ left: number; bottom: number; maxW: number } | null>(null)
   return (
     <div className="absolute left-1 bottom-1 right-16 flex flex-wrap gap-1 pointer-events-none">
       {sorted.slice(0, 3).map(([dim]) => (
-        <DimTag key={dim} dim={dim} />
+        <DimTag key={dim} dim={dim} faded={fadedOf(dim)} />
       ))}
       {hidden.length > 0 && (
         <span
@@ -220,7 +273,7 @@ function TagChips({ img }: { img: ImageRecord }): JSX.Element | null {
             style={{ left: morePos.left, bottom: morePos.bottom, maxWidth: morePos.maxW }}
           >
             {hidden.map(([dim]) => (
-              <DimTag key={dim} dim={dim} />
+              <DimTag key={dim} dim={dim} faded={fadedOf(dim)} />
             ))}
           </div>,
           document.body
@@ -360,7 +413,7 @@ function ThumbBase({ img, size, index, onClick, onDoubleClick, dragIds }: {
             ? 'border-brand ring-2 ring-brand shadow-[0_0_0_2px_rgba(59,130,246,0.45)]'
             : 'border-line hover:border-gray-500')
       }
-      style={{ width: size, height: size }}
+      style={{ width: '100%', aspectRatio: '1 / 1' }}
       draggable
       // 自由排序已取消（用户拍板 2026-10-11）：这里只保留 HTML5 拖拽的 dataTransfer，
       // 供“拖到左侧分类移动”使用（与瀑布流 MasonryThumb 同一套），不再回调实时换位
@@ -384,8 +437,14 @@ function ThumbBase({ img, size, index, onClick, onDoubleClick, dragIds }: {
       title={img.filename}
     >
       <ThumbImg img={img} cellPx={size} className="w-full h-full object-cover pointer-events-none" />
-      {selected && <span className="absolute left-1 top-1 w-4 h-4 rounded-full bg-brand text-white text-[10px] flex items-center justify-center">✓</span>}
-      {isScanning && <span className="absolute left-1 top-1 z-10 px-1.5 py-0.5 rounded bg-red-500 text-white text-[10px] font-bold animate-pulse shadow">检测中</span>}
+      <ManualFlag img={img} />
+      {/* 左上角已被「人工复审」红底占住时，选中圆点/检测中往下让一格，不叠在一起（两者都是左对齐）*/}
+      {selected && (
+        <span className={'absolute left-1 z-20 w-4 h-4 rounded-full bg-brand text-white text-[10px] flex items-center justify-center ' + (needsManualReview(img) ? 'top-[26px]' : 'top-1')}>✓</span>
+      )}
+      {isScanning && (
+        <span className={'absolute left-1 z-10 px-1.5 py-0.5 rounded bg-red-500 text-white text-[10px] font-bold animate-pulse shadow ' + (needsManualReview(img) ? 'top-[26px]' : 'top-1')}>检测中</span>
+      )}
       <StatusRibbon img={img} />
       <TagChips img={img} />
       <TagBtn img={img} />
@@ -505,8 +564,14 @@ function GridView(props: {
   return (
     <div
       ref={containerRef}
-      className="grid gap-3 justify-center"
-      style={{ gridTemplateColumns: `repeat(auto-fill, ${props.size}px)` }}
+      className="grid gap-3"
+      /* minmax(size, 1fr)：size 是「一格最小宽」而不是固定宽——先按能塞下几列，
+         再把行剩下的零头均摊给这几列，所以每行必定正好铺满整宽，不会再出现
+         “每行张数不同 → 左右留白一会在这一会在那”。以前列宽钉死 + justify-center
+         就是把那块零头居中，才看着边距忽宽忽窄。
+         必须用 auto-fill 而不是 auto-fit：auto-fit 会折叠空列，库里只剩三张图时
+         会被拉成三块大饼。 */
+      style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${props.size}px, 1fr))` }}
       onMouseDown={onMouseDown}
     >
       {props.images.map((img, i) => (
@@ -712,6 +777,11 @@ export default function ImageView(): JSX.Element {
         arr.sort((a, b) => viewTime(b) - viewTime(a))
         break
       default:
+        // 待确认 / 瑕疵片的默认顺序先按“还没定完的”分层（用户 10-14）：
+        // 人工复审的排最前，其次是被你不采纳、等下一轮 AI 重判的，再其余；层内保持库里顺序
+        if (activeCategory === CAT_REVIEW || activeCategory === CAT_FLAWS) {
+          arr.sort((a, b) => aiReviewRank(a) - aiReviewRank(b))
+        }
         break
     }
     return arr
@@ -832,17 +902,22 @@ export default function ImageView(): JSX.Element {
   }
 
   if (viewMode === 'grid') {
-    // 网格容器已经用 callback ref 绑滚轮缩放，这里把同一个节点也交给滚动锚定
+    // 网格容器已经用 callback ref 绑滚轮缩放，这里把同一个节点也交给滚动锚定。
+    // AiReviewBar 放在滚动容器外面（不参与滚动）：sticky+负 margin 在带 padding 的滚动容器里
+    // 顶部总会被 sticky 偏移留出缝（用户实抓），改成固定行后天然顶满、图从其下方滚过
     return (
-      <div
-        ref={(el) => {
-          scrollRef.current = el
-          bindGridWheel(el)
-        }}
-        className="gallery-scroll h-full overflow-auto p-3 fade-in"
-      >
-        <BusyBanner />
-        <GridView images={sorted} size={gridSize} click={click} dbl={dbl} dragIds={dragIds} />
+      <div className="h-full flex flex-col">
+        <AiReviewBar />
+        <div
+          ref={(el) => {
+            scrollRef.current = el
+            bindGridWheel(el)
+          }}
+          className="gallery-scroll flex-1 min-h-0 overflow-auto p-3 fade-in"
+        >
+          <BusyBanner />
+          <GridView images={sorted} size={gridSize} click={click} dbl={dbl} dragIds={dragIds} />
+        </div>
       </div>
     )
   }
@@ -851,18 +926,20 @@ export default function ImageView(): JSX.Element {
     const scanning = scanProgress?.running === true && scanProgress?.phase === 'scanning'
     const currentName = scanProgress?.current ?? ''
     return (
-      <div ref={scrollRef} className="gallery-scroll h-full overflow-auto px-2 py-1 fade-in">
-        <BusyBanner />
-        <table className="w-full text-xs border-separate border-spacing-0">
+      <div className="h-full flex flex-col">
+        <AiReviewBar />
+        <div ref={scrollRef} className="gallery-scroll flex-1 min-h-0 overflow-auto px-2 py-1 fade-in">
+          <BusyBanner />
+          <table className="w-full text-xs border-separate border-spacing-0">
           <thead>
             <tr className="text-fg3 text-left">
-              <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium w-24"></th>
-              <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium">文件名</th>
-              <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium">AI 标签</th>
-              <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium w-36">最高置信度</th>
-              <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium w-28">分类</th>
-              <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium w-20">状态</th>
-              <th className="sticky top-0 z-10 bg-base px-2 py-1.5 font-medium w-14">标签</th>
+              <th className="sticky top-0 z-10 bg-canvas px-2 py-1.5 font-medium w-24"></th>
+              <th className="sticky top-0 z-10 bg-canvas px-2 py-1.5 font-medium">文件名</th>
+              <th className="sticky top-0 z-10 bg-canvas px-2 py-1.5 font-medium">AI 标签</th>
+              <th className="sticky top-0 z-10 bg-canvas px-2 py-1.5 font-medium w-36">最高置信度</th>
+              <th className="sticky top-0 z-10 bg-canvas px-2 py-1.5 font-medium w-28">分类</th>
+              <th className="sticky top-0 z-10 bg-canvas px-2 py-1.5 font-medium w-20">状态</th>
+              <th className="sticky top-0 z-10 bg-canvas px-2 py-1.5 font-medium w-14">标签</th>
             </tr>
           </thead>
           <tbody>
@@ -885,13 +962,18 @@ export default function ImageView(): JSX.Element {
                   </td>
                   <td className="border-b border-line/50 px-2 py-1 max-w-[280px] align-middle">
                     <div className="truncate font-mono text-fg2" title={img.path}>{img.filename}</div>
+                    {needsManualReview(img) && <div className="text-[11px] font-bold text-bad" title="本张已完成云端复核；画面模糊、曝光异常不在复核范围内，需人工裁定">待人工裁定画质</div>}
                     {isCurrent && <div className="text-[10px] text-red-500">正在检测…</div>}
                   </td>
                   <td className="border-b border-line/50 px-2 py-1 align-middle">
                     <div className="flex flex-wrap gap-1">
-                      {sortTagsPersonFirst(tags).map(([d]) => (
-                        <DimTag key={d} dim={d} />
-                      ))}
+                      {(() => {
+                        const manual = needsManualReview(img)
+                        const isQc = (d: string): boolean => (QC_MANUAL_DIMENSIONS as string[]).includes(d)
+                        return (manual ? sortManualQcFirst(tags) : sortTagsPersonFirst(tags)).map(([d]) => (
+                          <DimTag key={d} dim={d} faded={manual && !isQc(d)} />
+                        ))
+                      })()}
                       {!tags.length && <span className="text-fg3">—</span>}
                     </div>
                   </td>
@@ -920,6 +1002,7 @@ export default function ImageView(): JSX.Element {
             })}
           </tbody>
         </table>
+        </div>
       </div>
     )
   }
@@ -927,14 +1010,17 @@ export default function ImageView(): JSX.Element {
   // 瀑布流是剩下的默认布局（老版本还有个 'large' 独立大图视图，已并入双击放大弹窗，
   // 顶栏「大图」现在走 store.openLargePreview；bootstrap 会把库里残留的旧值兜成 grid）
   return (
-    <div ref={scrollRef} className="gallery-scroll h-full overflow-auto p-3 fade-in">
-      <BusyBanner />
-      <div style={{ columnGap: 12 }} className="columns-2 md:columns-3 xl:columns-4 2xl:columns-5">
+    <div className="h-full flex flex-col">
+      <AiReviewBar />
+      <div ref={scrollRef} className="gallery-scroll flex-1 min-h-0 overflow-auto p-3 fade-in">
+        <BusyBanner />
+        <div style={{ columnGap: 12 }} className="columns-2 md:columns-3 xl:columns-4 2xl:columns-5">
         {sorted.map((img, i) => (
           <div key={img.id} className="mb-3 break-inside-avoid" style={{ breakInside: 'avoid' }}>
             <MasonryThumb img={img} index={i} onClick={click} onDoubleClick={dbl} dragIds={dragIds} />
           </div>
         ))}
+        </div>
       </div>
     </div>
   )
@@ -1010,7 +1096,10 @@ function MasonryThumb(props: { img: ImageRecord; index: number; onClick: (i: num
       onDoubleClick={() => onDoubleClick(img)}
     >
       <img src={img.thumb ? toSrc(img.thumb) : toSrc(img.path)} loading="lazy" className="w-full object-cover" style={{ aspectRatio: String(ratio) }} alt={img.filename} draggable={false} />
-      {isScanning && <span className="absolute left-1 top-1 z-10 px-1.5 py-0.5 rounded bg-red-500 text-white text-[10px] font-bold animate-pulse shadow">检测中</span>}
+      <ManualFlag img={img} />
+      {isScanning && (
+        <span className={'absolute left-1 z-10 px-1.5 py-0.5 rounded bg-red-500 text-white text-[10px] font-bold animate-pulse shadow ' + (needsManualReview(img) ? 'top-[26px]' : 'top-1')}>检测中</span>
+      )}
       <StatusRibbon img={img} />
       <TagChips img={img} />
       <TagBtn img={img} />

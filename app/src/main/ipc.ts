@@ -16,8 +16,6 @@ import {
   setCategory,
   deleteImages,
   addCorrection,
-  correctionStats,
-  totalCorrections,
   listCustomCategories,
   addCustomCategory,
   removeCustomCategory,
@@ -29,9 +27,15 @@ import {
   clearLibrary,
   resetSkipped,
   resetForRescan,
+  countStaleImages,
+  resetStaleForRescan,
+  setAiReview,
+  rejectAiReview,
+  confirmAiReview,
   processChunked
 } from './db'
 import { scanner, reclassifyAll, type ScanProgress } from './services/scanner'
+import { aiReview } from './services/aiReview'
 import { exporter, type ExportOptions } from './services/exporter'
 import { importPaths, backfillThumbnails, backfillSmallThumbs, clearThumbCache } from './services/importer'
 import { ensureBigPreview, clearBigCache } from './services/big'
@@ -39,7 +43,6 @@ import { readImageMeta } from './services/exifMeta'
 import { clearEngineInputCache } from './services/rawPreview'
 import { authManager } from './services/auth'
 import { engineManager } from './engine'
-import { autoTune, resetTuned } from './services/tuner'
 import { CAT_LIBRARY, CAT_TRASH, CAT_FLAWS, CAT_REVIEW, isBadDim, isStructuralDim, isTrashLike, BAD_DIMENSIONS, SUPPORTED_EXTS, PERSON_DIMS, guessMidDim, tierOfCat, isDeliverable, type CategoryKey, type DimensionKey, type ImageRecord } from '../shared/types'
 import { computeCategory } from './classify'
 
@@ -81,6 +84,8 @@ export function registerIpc(win: BrowserWindow): void {
   })
   scanner.on('image', (img) => send(CH.E_scanImage, img))
   exporter.on('progress', (p) => send(CH.E_exportProgress, p))
+  // AI 复审事件桥：主进程后台任务的进度单向推给渲染层（不阻塞、不劫持界面）
+  aiReview.on('progress', (p) => send(CH.E_aiReviewProgress, p))
 
   ipcMain.handle(CH.appBootstrap, (): BootstrapInfo => ({
     settings: getSettings(),
@@ -89,7 +94,8 @@ export function registerIpc(win: BrowserWindow): void {
     engine: engineManager.getStatus(),
     progress: scanner.getProgress(),
     version: app.getVersion(),
-    platform: process.platform
+    platform: process.platform,
+    isDev: !app.isPackaged
   }))
 
   ipcMain.handle(CH.pickFolder, async () => {
@@ -225,6 +231,9 @@ export function registerIpc(win: BrowserWindow): void {
       }
       if (req.physical && !isTrashLike(req.category)) {
         // 物理移动：移动到 <原目录>/筛图结果/<分类名>/
+        // 注意：这是真剪切（renameSync），原路径下文件不再——以前底部“移动到”面板里那个
+        // 「同时移动物理文件（…不删除原图）」的勾文案与行为不符，该面板连同这个入口已于 10-14 下线，
+        // 渲染层现在没人再传 physical=true；通道保留（导出弹窗自己那套物理移动走另一条路），删了怕断旧数据。
         try {
           const label = exporter.categoryLabel(req.category)
           const targetDir = join(rec.dir, '筛图结果', label.replace(/[\\/:*?"<>|]/g, '_'))
@@ -497,19 +506,37 @@ export function registerIpc(win: BrowserWindow): void {
     const r = await scanner.start(false)
     return { ...r, reset }
   })
+  // 引擎签名过期信息：直接数出"旧引擎结果"的张数。引入签名机制前从未盖过签名的存量图（engine_sig
+  // IS NULL）如实计为旧结果——客户升级到新引擎一打开就被提示重扫，不再回填掩盖。
+  ipcMain.handle(CH.scanStaleInfo, () => {
+    const sig = engineManager.getEngineSig()
+    return { ready: sig != null, sig, staleCount: countStaleImages(sig) }
+  })
+  // 只重扫旧引擎结果的图（非全库）：按全量重扫同等语义把过期 done 图置 pending，再起跑仅重扫这批。
+  ipcMain.handle(CH.scanRescanStale, async () => {
+    const reset = resetStaleForRescan(engineManager.getEngineSig())
+    const r = await scanner.start(false)
+    return { ...r, reset }
+  })
   ipcMain.handle(CH.reclassify, () => reclassifyAll())
+
+  // ---------- AI 复审（会员专属·后台任务）----------
+  ipcMain.handle(CH.aiReviewStart, (_e, scope?: 'review' | 'flaws', opts?: { force?: boolean }) => aiReview.start(scope, opts))
+  ipcMain.handle(CH.aiReviewStop, () => {
+    aiReview.stop()
+  })
+  // 采纳/跳过后清掉某张图的只读建议（走 Task2 的 setAiReview，不碰 tags/category）
+  ipcMain.handle(CH.aiReviewClear, (_e, id: number) => setAiReview(id, null))
+  // 用户"不采纳"某张的建议：只在建议 JSON 上打标记，不改任何判定；再次复审会重判该张
+  ipcMain.handle(CH.aiReviewReject, (_e, id: number) => rejectAiReview(id))
+  // 用户确认某张已结案（一致时保留现状、采纳后留痕）：只打标记，不改 tags/category
+  ipcMain.handle(CH.aiReviewConfirm, (_e, id: number) => confirmAiReview(id))
 
   ipcMain.handle(CH.exportPreview, (_e, opts: ExportOptions) => exporter.previewCount(opts))
   ipcMain.handle(CH.exportRun, (_e, opts: ExportOptions) => exporter.run(opts))
   ipcMain.handle(CH.exportCancel, () => exporter.cancel())
 
   ipcMain.handle(CH.engineStatus, () => engineManager.getStatus())
-  ipcMain.handle(CH.tuneNow, () => autoTune())
-  ipcMain.handle(CH.tuneReset, () => resetTuned())
-  ipcMain.handle(CH.tuneStats, () => ({
-    total: totalCorrections(),
-    perDim: correctionStats()
-  }))
 
   ipcMain.handle(CH.fileUrl, (_e, p: string) => 'localfile://x/' + encodeURIComponent(p))
   ipcMain.handle(CH.revealInFolder, (_e, p: string) => shell.showItemInFolder(p))

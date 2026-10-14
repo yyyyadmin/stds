@@ -265,7 +265,11 @@ def half_head_score(bgr_shape, faces, upper_bodies, scale, person_boxes=None):
     # 躯干多于人脸：部分人头被裁/未入镜
     if faces and upper_bodies and len(upper_bodies) > len(faces):
         bump(0.72, "躯干 %d 但人脸 %d→疑有人头未完整入镜" % (len(upper_bodies), len(faces)))
-    # 脸检不到时的身体安全网：主体人身框上缘贴画布顶边 → 头顶已出框（半脸也算半截头）
+    # 脸检不到时的身体安全网：主体人身框上缘贴画布顶边 → 头顶已出框。
+    # 门槛只看 len(faces)：一个脸都没检到才走兜底。
+    # （ENGINE_SIG 3 曾把门槛放宽成 `not _head_in_frame`——“有假脸也兜底”，本意修 7G1A9669 香槟塔；
+    #   实测在软件真实转正输入上净负：只给 4 张 faceCount=1 的手部特写/边角残脸误贴半截头，且没修好目标，
+    #   故 ENGINE_SIG 4 回退。详见 __init__.py 签名注释。）
     if not faces and person_boxes:
         for b in person_boxes:
             pb = b.get("box")

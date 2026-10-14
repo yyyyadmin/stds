@@ -396,7 +396,9 @@ function ZoomViewer({
                 )
               })}
             </div>
-            <button className="mt-4 w-full rounded-md px-4 py-2.5 text-base font-bold text-gray-700 bg-gray-100 hover:bg-gray-200 border border-gray-300 transition-colors" onClick={() => setTierPick(false)}>取消</button>
+            {/* 颜色写死：面板本身 bg-white（不随主题），而项目的 gray-* 已重映射为主题令牌
+                （bg-gray-100 在浅色主题下是近黑），不写死会变成黑底灰字。 */}
+            <button className="mt-4 w-full rounded-md px-4 py-2.5 text-base font-bold text-[#374151] bg-[#f3f4f6] hover:bg-[#e5e7eb] border border-[#d1d5db] transition-colors" onClick={() => setTierPick(false)}>取消</button>
           </div>
         </div>
       )}

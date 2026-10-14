@@ -33,6 +33,8 @@ export interface EngineCapabilities {
   faceOnnx?: boolean
   gazeOnnx?: boolean
   ocecOnnx?: boolean
+  /** 引擎签名：引擎自报的整数，改动检测公式即 +1，软件据此判断存量结果是否需用新引擎重扫 */
+  engineSig?: number
   [k: string]: unknown
 }
 

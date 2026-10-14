@@ -1,3 +1,16 @@
 # 可选增强：MediaPipe FaceLandmarker（478 点 + eyeBlink blendshape）
-# 装不上（如某平台无 wheel）时引擎自动回落 YuNet，构建不失败。
-mediapipe>=0.10.14
+# 装不上（如某平台无 wheel）时引擎自动回落 YuNet；构建脚本仍会单独安装本文件，
+# 但装完后由 engine selfcheck 把关——自检不过 CI 会拦下发版（2026-10-14 起，见 .github/workflows/release.yml）。
+#
+# 【为什么按平台分开写死版本（用户拍板：开发版怎样，正式版就要怎样）】
+# 官方 1.x 全系列都没有 Intel Mac 的包（PyPI 上 mediapipe 1.1.0 只有 win_amd64 / win_arm64 /
+# macosx_11_0_arm64 / manylinux 四种 wheel）。所以 Intel Mac 那台打包机不可能装到跟 Windows
+# 一样的 1.1.0，只能退到 0.10.x。写死而不是 ">=" 是为了：
+#   1) 开发版（Windows，mediapipe 1.1.0）与 Windows / Apple 新芯片 Mac 正式版逐位一致；
+#   2) Intel Mac 版明确固定在 0.10.21，差异摆在明面上、可复现，不再随官方发新版而悄悄变化。
+# 注：Windows 上 pip 的 platform_machine 报告的是 "AMD64" 而非 "x86_64"，所以这里用 sys_platform 判定。
+# 改动任何一个版本都要同步更新 ENGINE_SIG（engine/__init__.py），让库里旧结果被识别为过期。
+mediapipe==1.1.0 ; sys_platform == "win32"
+mediapipe==1.1.0 ; platform_system == "Darwin" and platform_machine == "arm64"
+mediapipe==1.1.0 ; platform_system == "Linux"
+mediapipe==0.10.21 ; platform_system == "Darwin" and platform_machine == "x86_64"

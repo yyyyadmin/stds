@@ -24,6 +24,16 @@ export class EngineManager {
     return this.status
   }
 
+  /**
+   * 当前引擎签名：Python 引擎在 capabilities 里自报的 engineSig（整数）。
+   * 用于判断存量结果是否需用新引擎重扫。Node 降级引擎无此字段时返回 null，
+   * 调用方须把 null 当作“签名未知、不做过期判断”，避免把整库误标为待重扫。
+   */
+  getEngineSig(): number | null {
+    const s = (this.status.capabilities as Record<string, unknown>).engineSig
+    return typeof s === 'number' ? s : null
+  }
+
   /** 引擎初始化：enginePreference = auto | python | node；devicePreference = auto | cpu | cuda */
   async init(enginePreference: 'auto' | 'python' | 'node', devicePreference: 'auto' | 'cpu' | 'cuda'): Promise<EngineStatus> {
     this.shutdown()

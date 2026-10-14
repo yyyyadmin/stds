@@ -142,13 +142,18 @@ POSED_H_RATIO = 2.0     # 1 同纵深：簇内最大脸高 / 最小脸高
 POSED_GAP_RATIO = 1.5   # 3 紧挨着：按 x 排序后净间距中位数 / 平均脸宽（v2.0.77 由 1.3 放宽到 1.5：
                         #   新人并肩自然站位中间常留 ~1.4 个脸宽的缝，1.3 会把这些正常合影误降级成混合照）
 POSED_MAX_YAW = 0.24    # 4 共同面向：簇内最大 yaw（比正面主体闸 0.30 更严——看镜头是摆拍的强信号）
-POSED_DOMINANT = 0.55   # 5 主群即主体：簇内最大脸高 / 全图最大脸高
+POSED_DOMINANT = 0.85   # 5 主群即主体：簇内最大正脸高 / 全图任意最大脸高（含侧脸/背影，由调用方传入 global_face_h）。
+                        #   v2.0 sig5 修：旧版分母误用 max(正脸高) 恒等于簇自身→这道闸永不触发，接亲/亲吻那种
+                        #   "最大的脸是背对镜头的新人"的抓拍因此被当成合影（CHEN9581/9794/9806）。改看全图最大脸后，
+                        #   真合影最大脸必是正脸→比值≈1.0 全留，误标比值≈0.71~0.78 全掉（30 张真合影回归零误伤）。
 POSED_FRONT_RATIO = 0.6 # 7 合影得绝大多数人朝镜头（v2.0.78 用户拍板 2026-10-14，在 __init__.py 判定）：
                         #   正面主体数 / 在场总人数 < 此线 → 是抓拍不是摆拍合影（DHT12399 敬茶仅 2/4 朝镜头）
 
 
-def posed_group(frontal, img_w, img_h):
+def posed_group(frontal, img_w, img_h, global_face_h=0.0):
     """在“≥2 个正面主体”的前提下，回答“这是不是一张摆拍合影”。
+    global_face_h：全图任意一张脸（含侧脸/背影）的最大脸框高，供第5道“主群即主体”闸当分母；
+    不传（=0）时退回旧行为（用正脸里的最大脸高），兼容既有测试。
     用户拍板 2026-10-11：合影 = 人人在同一纵深平面、横向并排紧贴、共同面向镜头（沙发全家福、
     伴娘团、双人摆拍）；接亲/做游戏那种人物扎堆、前后多层、各干各的 = 多人混合照。
 
@@ -203,7 +208,10 @@ def posed_group(frontal, img_w, img_h):
             yaws.append(p[0])
     if yaws and max(yaws) > POSED_MAX_YAW:
         fails.append("未共同面向镜头")
-    if max(gh) / max(1e-6, max(hs)) < POSED_DOMINANT:
+    # 分母优先用全图任意最大脸高（含侧脸/背影）：真主角背对镜头时它最大、却被排除在正脸簇外，
+    # 该闸才能识破“合影群其实是围观亲友”的抓拍。未传则退回旧的正脸最大高（恒等于簇→闸不触发）。
+    _dom_den = global_face_h if global_face_h and global_face_h > 0 else max(hs)
+    if _dom_den > 0 and max(gh) / max(1e-6, _dom_den) < POSED_DOMINANT:
         fails.append("画面主体在簇外")
     return (not fails), len(group), fails
 

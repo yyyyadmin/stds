@@ -5,14 +5,25 @@
  * 待确认图重判清楚：人数是什么、哪些瑕疵真有、哪些没有，提交后图离开待确认。
  *
  * 交互模型（批量 D3 增量式，绝不覆盖式压平）：
- * - 人数：单选 4 项（单人/多人合拍/多人混合/无人物），默认"不改"；单张且已有人数标签时预填当前。
+ * - 人数：单选 4 项（单人/多人合拍/多人混合/无人物）。这批图有统一的人数标签时**直接预选它、不给
+ *   「不改」按钮**（用户 10-14：人数必须一个且只能一个，「不改」和高亮中的当前值是同一句话，摆两个
+ *   反而像 bug）；只有「多张人数不一致」或「这张压根没标人数」时才留「保持现状」——没得预选的情况下
+ *   只剩 4 个按钮，面板一开随手点一个就把整批压平成同一类了。
  *   人数是"待确认只由瑕疵派生、绝不由人数不确定派生"的纠偏入口——AI 没标人数（597 那批）
  *   手动停泊的图，靠这里选定人数归位。
  * - 瑕疵：5 项多选（闭眼/表情崩坏/模糊/曝光/半截头；重复归分组视图管，不在此列）。
  *   每项三态：✓该有（补标）/ ✗不该有（删标）/ 未动（保留）。
  *   未动的中置信瑕疵在提交时按 D1"用户判定"提为高置信（存疑→确定，图落瑕疵片）；
  *   黑白开关没有——黑白是客观事实标签，与"这图有没有毛病"的判定无关。
- * - 提交顺序：删标 → 补标 → 逐张把剩余中置信瑕疵提为高置信（记"判对"样本）→ 人数移动（若选）。
+ * - 提交顺序：删标 → 补标 → 逐张把剩余中置信瑕疵提为高置信（记"判对"样本）→ 人数移动（只移动
+ *   「选的和当前不一样」的那几张，见 submit 第 3 步）。
+ *
+ * 入口有三个，都是这同一个组件：卡片底部工具栏「此判定错误（重判）」、多选工具条的批量版、
+ * 逐张复核弹窗里人工裁定的「逐项改判」；卡片左上角红角标（人工复审）点的也是它。
+ *
+ * 尺寸（用户 10-14：太小了，按钮也要大点）：宽 max-w-2xl，正文与按钮一律 text-sm，
+ * 段标题 text-sm 加粗（不得小于它管辖的内容行），说明文字 text-sm；按钮 padding px-3 py-2。
+ * 层级 z-[75]：要能从逐张复核弹窗（z-[70]）上面打开而不把主弹窗挤走，压在它下面等于没给入口。
  */
 import { useEffect, useMemo, useState } from 'react'
 import { useStore } from '../store'
@@ -77,12 +88,43 @@ export default function ReviewPanel(): JSX.Element | null {
   const [flaw, setFlaw] = useState<Record<string, FlawChoice>>({})
   const [busy, setBusy] = useState(false)
 
-  // 换图（或兑底数据到达后图集合变化）时重置选择：单张预填它当前的人数；批量人数不一致则"不改"
   const imgKey = imgs.map((i) => i.id).join(',')
+  /**
+   * 这批图是否共用同一个人数标签（每张都有、且是同一个）。是 → 预选它并且不显示「保持现状」；
+   * 否（多张之间不一致 / 有图压根没标）→ 才显示「保持现状」，因为它没有"当前值"可以高亮。
+   */
+  const commonPerson = useMemo<DimensionKey | null>(() => {
+    if (!imgs.length) return null
+    const ps = imgs.map(visiblePerson)
+    if (ps.some((p) => !p)) return null
+    const first = ps[0] as DimensionKey
+    return ps.every((p) => p === first) ? first : null
+    // 依赖 imgKey 而非 imgs：后者会随乐观更新换引用，边改选边被重置
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [imgKey])
+  // 换图（或兑底数据到达后图集合变化）时重置选择：有统一当前值就预选它，否则「保持现状」
   useEffect(() => {
-    const ps = imgs.map(visiblePerson).filter(Boolean) as DimensionKey[]
-    setPerson(ps.length === 1 && imgs.length === 1 ? ps[0] : 'same')
-    setFlaw(Object.fromEntries(FLAW_CHOICES.map((d) => [d, 'same' as FlawChoice])))
+    setPerson(commonPerson ?? 'same')
+    const fl = Object.fromEntries(FLAW_CHOICES.map((d) => [d, 'same' as FlawChoice])) as Record<string, FlawChoice>
+    setFlaw(fl)
+    // AI 复审"改一改"入口：单张且有预填建议时，人数按建议预选、内容型瑕疵三态按建议+现状设好（用户可微调）
+    const prefill = useStore.getState().reviewPanelPrefill
+    if (prefill && imgs.length === 1) {
+      const img = imgs[0]
+      setPerson(prefill.person)
+      const wantByDim: Record<string, boolean> = {
+        eyes_closed: prefill.flaws.eyes_closed,
+        half_head: prefill.flaws.half_head,
+        face_ugly: prefill.flaws.expression
+      }
+      const next = { ...fl }
+      for (const d of Object.keys(wantByDim) as DimensionKey[]) {
+        const want = wantByDim[d]
+        const has = !!img.tags?.[d] && img.tags[d]!.level !== 'low'
+        next[d] = want ? 'add' : has ? 'remove' : 'same'
+      }
+      setFlaw(next)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imgKey])
 
@@ -97,6 +139,17 @@ export default function ReviewPanel(): JSX.Element | null {
 
   if (!imgs.length) return null
   const multi = imgs.length > 1
+  const showKeep = commonPerson === null
+  // 「保持现状」出现时把原因写在标题旁（而不是让用户猜为什么多一个按钮）：这批各自是什么 / 有几张没标
+  const keepNote = (() => {
+    if (!showKeep) return ''
+    const parts = PERSON_DIMS.map((d) => ({ d, n: imgs.filter((i) => visiblePerson(i) === d).length }))
+      .filter((x) => x.n > 0)
+      .map((x) => `${DIMENSION_LABELS[x.d]} ${x.n}`)
+    const none = imgs.filter((i) => !visiblePerson(i)).length
+    if (!multi) return '这张还没标人数，选一个即归位'
+    return `这 ${imgs.length} 张人数不一样：${[...parts, ...(none ? [`未标 ${none}`] : [])].join(' · ')}`
+  })()
 
   /** 各瑕疵维度在这批图上的现状：带可见标签的张数 / 其中中置信（存疑）张数 */
   const flawStats = new Map<DimensionKey, { has: number; mid: number }>()
@@ -144,16 +197,22 @@ export default function ReviewPanel(): JSX.Element | null {
           confirmed++
         }
       }
-      // 3) 人数归位（选了才动；moveIds 对人数维不清瑕疵标签，只互斥换人数标 + category=user）
-      if (person !== 'same') await moveIds(idList, person)
+      // 3) 人数归位：只动“选的和当前不一样”的那几张。预选就是当前值，点回它等于没改——
+      //    真去走一次移动会白写一条人工改标记录、白刷 cat_changed_at（图跳列表最前），所以逐张比一下再筛。
+      //    （moveIds 对人数维不清瑕疵标签，只互斥换人数标 + category=user）
+      let personIds: number[] = []
+      if (person !== 'same') {
+        personIds = imgs.filter((i) => visiblePerson(i) !== person).map((i) => i.id)
+        if (personIds.length) await moveIds(personIds, person)
+      }
       // 兑底：没选人数的图也已被 2) 的结案重算 category（主进程侧 computeCategory），这里统一刷新即可
       await useStore.getState().refreshImagesFor(idList)
       await useStore.getState().refreshCounts()
-      const parked = imgs.filter((i) => person === 'same' && !isTrashLike(i.category) && flawStatsGet(i) === 0 && !wasMid(i)).length
+      const parked = imgs.filter((i) => person === 'same' && !visiblePerson(i) && !isTrashLike(i.category) && flawStatsGet(i) === 0 && !wasMid(i)).length
       useStore.setState({
         toast: {
           msg: `重判已保存（${imgs.length} 张）${confirmed ? `：${confirmed} 条存疑瑕疵确认为瑕疵片` : ''}${
-            person !== 'same' ? `，归属改为「${DIMENSION_LABELS[person]}」` : ''
+            personIds.length ? `，${personIds.length} 张归属改为「${DIMENSION_LABELS[person as DimensionKey]}」` : ''
           }${parked ? `；${parked} 张无瑕疵也没选人数的仍留在待确认（想搁置请用侧栏拖入）` : ''}`,
           kind: 'success',
           duration: 2000
@@ -180,31 +239,33 @@ export default function ReviewPanel(): JSX.Element | null {
   const wasMid = (img: ImageRecord): boolean => BAD_DIMENSIONS.some((d) => flaw[d] !== 'remove' && img.tags?.[d]?.level === 'mid')
 
   const segCls = (on: boolean, tone: 'good' | 'bad' | 'idle'): string =>
-    'px-2 py-1 rounded-md border text-xs font-medium transition-all cursor-pointer ' +
+    // 选中态的文字用 fg，不用 good/bad/brand 本身：彩色字 + 同色 15% 底在两个主题下都只到 3.3~3.6:1，
+    // 14px 看不清（逐张复核弹窗里同问题已实测过）；颜色信号由描边与底色承担，按钮上本来就写着“该有/不该有/未动”。
+    'px-3 py-2 rounded-md border text-sm font-medium transition-all cursor-pointer ' +
     (on
       ? tone === 'good'
-        ? 'border-good/60 bg-good/15 text-good'
+        ? 'border-good/60 bg-good/15 text-fg'
         : tone === 'bad'
-          ? 'border-bad/60 bg-bad/15 text-bad'
-          : 'border-brand/60 bg-brand/15 text-brand'
-      : 'border-line bg-panel text-fg3 hover:border-fg3')
+          ? 'border-bad/60 bg-bad/15 text-fg'
+          : 'border-brand/60 bg-brand/15 text-fg'
+      : 'border-line bg-panel text-fg2 hover:border-fg3')
 
   return (
-    <div className="fixed inset-0 z-[60] bg-black/75 flex items-center justify-center p-4" onClick={(e) => e.target === e.currentTarget && !busy && closeReviewPanel()}>
-      <div className="w-full max-w-lg max-h-[88vh] overflow-y-auto rounded-xl border border-line bg-panel shadow-2xl fade-in">
+    <div className="fixed inset-0 z-[75] bg-black/75 flex items-center justify-center p-4" onClick={(e) => e.target === e.currentTarget && !busy && closeReviewPanel()}>
+      <div className="w-full max-w-2xl max-h-[88vh] overflow-y-auto rounded-xl border border-line bg-panel shadow-2xl fade-in">
         {/* 头部：缩略图 + 张数（同标签管理器版式） */}
-        <div className="sticky top-0 z-10 flex items-center gap-3 px-4 py-3 bg-panel border-b border-line">
+        <div className="sticky top-0 z-10 flex items-center gap-3 px-5 py-4 bg-panel border-b border-line">
           <img
             src={imgs[0].thumb ? toSrc(imgs[0].thumb) : toSrc(imgs[0].path)}
-            className="w-12 h-12 rounded-lg object-cover ring-1 ring-line shrink-0 bg-panel2"
+            className="w-14 h-14 rounded-lg object-cover ring-1 ring-line shrink-0 bg-panel2"
             alt=""
             draggable={false}
           />
           <div className="flex-1 min-w-0">
-            <div className="text-base text-fg truncate" title={imgs[0].path}>
+            <div className="text-base font-bold text-fg truncate" title={imgs[0].path}>
               {multi ? `重判 ${imgs.length} 张图` : imgs[0].filename}
             </div>
-            <div className="text-xs text-fg3 mt-0.5">逐项改正 AI 判定，提交后这些图离开待确认{multi ? '；勾加 / 叉删 / 没动保留，不会把每张图压平成同一组标签' : ''}</div>
+            <div className="text-sm text-fg2 mt-0.5">逐项改正 AI 判定，提交后这些图离开待确认{multi ? '；勾加 / 叉删 / 没动保留，不会把每张图压平成同一组标签' : ''}</div>
           </div>
           <button
             className="shrink-0 grid place-items-center w-9 h-9 rounded-lg border border-line bg-panel2 text-fg2 hover:bg-bad hover:border-bad hover:text-white transition-colors cursor-pointer"
@@ -218,22 +279,34 @@ export default function ReviewPanel(): JSX.Element | null {
           </button>
         </div>
 
-        <div className="px-4 py-3">
-          {/* 人数：单选（互斥身份，只能选一个或不动） */}
-          <div className="text-xs text-fg3 mb-1.5 uppercase tracking-wide">人数归属（单选）</div>
-          <div className="grid grid-cols-5 gap-1.5 mb-1">
-            <button className={segCls(person === 'same', 'idle')} onClick={() => setPerson('same')} title="不改现有归属">
-              不改
-            </button>
+        <div className="px-5 py-4">
+          {/* 人数：单选（互斥身份，必须且只能一个）。有统一当前值时直接预选它、不再摆「不改」；
+              整批不一致 / 这张没标 才多一个「保持现状」，并把原因写在标题旁，不让人猜为何多一个按钮 */}
+          <div className="flex items-baseline gap-2 mb-2 flex-wrap">
+            <span className="text-sm font-semibold text-fg2 tracking-wide">人数归属（单选）</span>
+            {keepNote && <span className="text-sm text-fg2">{keepNote}</span>}
+          </div>
+          <div className={`grid ${showKeep ? 'grid-cols-5' : 'grid-cols-4'} gap-2 mb-1`}>
+            {showKeep && (
+              <button className={segCls(person === 'same', 'idle')} onClick={() => setPerson('same')} title="人数按每张现状保留，只提交下面的瑕疵判定">
+                保持现状
+              </button>
+            )}
             {PERSON_DIMS.map((d) => {
               const c = dimTagColor(d)
               return (
                 <button
                   key={d}
                   className={segCls(person === d, 'idle')}
-                  style={person === d ? { color: c, borderColor: c + '99', background: c + '1f' } : undefined}
+                  // 选中态只换描边与底色，不换字色：人数用的蓝（#3b82f6）叠在 12% 同色底上实测只 3.2:1（浅色）/ 4.07:1（深色），
+                  // 14px 中等字没到 4.5 线（与逐张复核弹窗同一类坑）；改文本色后 14.0 / 10.7，颜色身份由底/框承担。
+                  style={person === d ? { borderColor: c + '99', background: c + '1f' } : undefined}
                   onClick={() => setPerson(d)}
-                  title={`把这张${multi ? '批' : ''}图归为「${DIMENSION_LABELS[d]}」（人数标签互斥替换，并离开待确认）`}
+                  title={
+                    d === commonPerson
+                      ? `当前就是「${DIMENSION_LABELS[d]}」：不点别的即保持不变${multi ? '' : '（提交时不会重走一次移动）'}`
+                      : `把这张${multi ? '批' : ''}图归为「${DIMENSION_LABELS[d]}」（人数标签互斥替换，并离开待确认）`
+                  }
                 >
                   {DIMENSION_LABELS[d]}
                 </button>
@@ -242,21 +315,21 @@ export default function ReviewPanel(): JSX.Element | null {
           </div>
 
           {/* 瑕疵：逐项三态 */}
-          <div className="text-xs text-fg3 mt-3 mb-1.5 uppercase tracking-wide">瑕疵逐项判定（✓该有 / ✗不该有 / 未动保留）</div>
-          <div className="flex flex-col gap-1.5">
+          <div className="text-sm font-semibold text-fg2 mt-4 mb-2 tracking-wide">瑕疵逐项判定（✓该有 / ✗不该有 / 未动保留）</div>
+          <div className="flex flex-col gap-2">
             {FLAW_CHOICES.map((d) => {
               const st = flawStats.get(d)!
               const cur = flaw[d]
               const c = dimTagColor(d)
               return (
-                <div key={d} className="flex items-center gap-2 rounded-lg border border-line bg-panel2 px-2.5 py-1.5">
-                  <span className="shrink-0 rounded px-2 py-0.5 leading-none text-[11px] font-medium text-white" style={{ background: c }}>
+                <div key={d} className="flex items-center gap-3 rounded-lg border border-line bg-panel2 px-3 py-2.5">
+                  <span className="shrink-0 rounded px-2.5 py-1 leading-none text-sm font-medium text-white" style={{ background: c }}>
                     {DIMENSION_LABELS[d]}
                   </span>
-                  <span className="text-[11px] text-fg3 flex-1 min-w-0 truncate">
+                  <span className="text-sm text-fg2 flex-1 min-w-0 truncate">
                     {st.has ? `已标 ${st.has}/${imgs.length} 张${st.mid ? `（其中 ${st.mid} 张存疑）` : ''}` : '未标'}
                   </span>
-                  <div className="flex items-center gap-1 shrink-0">
+                  <div className="flex items-center gap-1.5 shrink-0">
                     <button
                       className={segCls(cur === 'add', 'good')}
                       disabled={busy || st.has === imgs.length}
@@ -286,18 +359,18 @@ export default function ReviewPanel(): JSX.Element | null {
               )
             })}
           </div>
-          <div className="text-[11px] text-fg3 mt-2 leading-relaxed">
+          <div className="text-sm text-fg2 mt-3 leading-relaxed">
             提交后：标“不该有”的删掉这个瑕疵标签，标“该有”的补上；“未动”的按你的确认处理。
             确认下来没有瑕疵的图回【交付库】方向，由人数标签自动归位。黑白照是事实标签，不在这个判定里。
           </div>
         </div>
 
         {/* 底部动作 */}
-        <div className="px-4 py-3 border-t border-line flex items-center gap-2">
-          <button className="btn flex-1 !py-2 text-sm bg-emerald-700 hover:bg-emerald-600 text-white border-transparent font-medium" disabled={busy} onClick={() => void submit()}>
+        <div className="px-5 py-4 border-t border-line flex items-center gap-3">
+          <button className="btn flex-1 text-base px-4 py-2.5 bg-emerald-700 hover:bg-emerald-600 text-white border-transparent font-medium" disabled={busy} onClick={() => void submit()}>
             {busy ? '保存中…' : '提交重判（离开待确认）'}
           </button>
-          <button className="btn !py-2 text-sm" disabled={busy} onClick={() => closeReviewPanel()}>
+          <button className="btn text-base px-5 py-2.5" disabled={busy} onClick={() => closeReviewPanel()}>
             取消
           </button>
         </div>

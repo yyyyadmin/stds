@@ -8,6 +8,27 @@ import sys
 import numpy as np
 
 
+def _dep_versions():
+    """当前引擎实际在用的检测库版本。正式版必须与开发版逐位一致，因此把版本连同
+    引擎签名一起写进自检产物，CI 日志可直接比对三个平台是否同一套。
+    用模块自带的 __version__（不用 importlib.metadata）：PyInstaller 冻结包常常不
+    带 .dist-info 元数据，拿 metadata 会误报成“未安装”。"""
+    d = {}
+    d["python"] = sys.version.split()[0]
+    for name, mod in (("numpy", "numpy"), ("cv2", "cv2"), ("mediapipe", "mediapipe")):
+        try:
+            m = __import__(mod)
+            d[name] = getattr(m, "__version__", "?")
+        except Exception as e:  # noqa: BLE001
+            d[name] = "ABSENT:%s" % type(e).__name__
+    try:
+        from . import ENGINE_SIG
+        d["engine_sig"] = ENGINE_SIG
+    except Exception as e:  # noqa: BLE001
+        d["engine_sig"] = "?%s" % type(e).__name__
+    return d
+
+
 def _find_task():
     from .models import find_model
     return find_model("face_landmarker.task", "*.task")
@@ -383,6 +404,8 @@ def run():
     except Exception as _hh:  # noqa: BLE001
         out["half_head_fallback_ok"] = False
         out["error"] = (out["error"] or "") + " |half_head: %s: %s" % (type(_hh).__name__, _hh)
+    # --- 依赖版本与引擎签名快照（不参与旧版退出码，但在 main() 里作为发布门禁的依据）---
+    out["deps"] = _dep_versions()
     return out
 
 
@@ -390,5 +413,21 @@ def main():
     result = run()
     sys.stdout.write(json.dumps(result, ensure_ascii=True) + "\n")
     sys.stdout.flush()
-    # detect_ok 为真即 spike 通过
-    return 0 if result["detect_ok"] else 1
+    # 发布门禁（2026-10-14 用户拍板：“开发版怎样，正式版就要怎样，特别是检测优化”）。
+    # 以前只看了 detect_ok，并且 CI 那步还是“失败也放行”，所以 mediapipe 装不上时会静默
+    # 打出一个没有脸点/闭眼增强的降级引擎还报“发布成功”。现在三件事缺一就不出包：
+    #   detect_ok            —— mediapipe + face_landmarker.task 真的能跑（认脸/闭眼的根）
+    #   person_count_run_ok  —— efficientdet 人体模型真的能跑（人数分类的根，不则只能回落数脸）
+    #   e2e_ok               —— 完整 detect() 不崩且维度齐全（今天改的“人数存疑”块也在这条里跑）
+    blockers = []
+    for key, what in (("detect_ok", "mediapipe/FaceLandmarker"),
+                      ("person_count_run_ok", "person model (ObjectDetector)"),
+                      ("e2e_ok", "full detect() pipeline")):
+        if not result.get(key):
+            blockers.append(what)
+    deps = result.get("deps") or {}
+    sys.stderr.write("[selfcheck] deps: %s\n" % json.dumps(deps, ensure_ascii=True))
+    if blockers:
+        sys.stderr.write("[selfcheck] BLOCKED, engine is degraded vs dev build: %s\n" % ", ".join(blockers))
+        return 1
+    return 0

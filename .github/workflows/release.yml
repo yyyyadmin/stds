@@ -64,8 +64,7 @@ jobs:
         run: npm run fetch-models
       - name: 构建自带 Python AI 引擎（PyInstaller）
         run: npm run build:engine
-      - name: 引擎自检（验证 mediapipe 打包，失败仅告警不阻断 spike 记录）
-        continue-on-error: true
+      - name: 引擎自检（硬门禁：mediapipe/人体模型/端到端任一不通就不出包，绝不发降级引擎）
         shell: bash
         run: |
           mkdir -p engine-dist/win/tests/fixtures
@@ -101,8 +100,7 @@ jobs:
         run: npm run fetch-models
       - name: 构建自带 Python AI 引擎（PyInstaller, arm64）
         run: npm run build:engine
-      - name: 引擎自检（mediapipe 打包）
-        continue-on-error: true
+      - name: 引擎自检（硬门禁：降级引擎一律不发）
         run: |
           mkdir -p engine-dist/mac/tests/fixtures
           cp ../ai-engine/tests/fixtures/*.jpg engine-dist/mac/tests/fixtures/ 2>/dev/null || true
@@ -156,8 +154,7 @@ jobs:
         run: npm run fetch-models
       - name: 构建自带 Python AI 引擎（PyInstaller, x64）
         run: npm run build:engine
-      - name: 引擎自检（mediapipe 打包）
-        continue-on-error: true
+      - name: 引擎自检（硬门禁：降级引擎一律不发；Intel Mac 固定 mediapipe 0.10.21，与 Win/arm 的 1.1.0 不同属官方无包所致）
         run: |
           mkdir -p engine-dist/mac/tests/fixtures
           cp ../ai-engine/tests/fixtures/*.jpg engine-dist/mac/tests/fixtures/ 2>/dev/null || true

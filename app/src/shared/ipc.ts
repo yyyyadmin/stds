@@ -1,12 +1,11 @@
 /**
  * IPC 通道与渲染层 API 契约（preload <-> renderer 共享）
  */
-import type { AppSettings, CategoryKey, DimensionKey, ImageRecord, PerfHint } from './types'
+import type { AppSettings, CategoryKey, DimensionKey, ImageRecord, PerfHint, AiReviewScope } from './types'
 import type { ScanProgress } from '../main/services/scanner'
 import type { ExportOptions, ExportProgress } from '../main/services/exporter'
 import type { EngineStatus } from '../main/engine'
 import type { ImportProgress } from '../main/services/importer'
-import type { TuneReport } from '../main/services/tuner'
 
 // ---------- 账号 / 会员 / 积分（对接 API 接口文档） ----------
 
@@ -27,6 +26,8 @@ export interface AuthUser {
   avatar_url?: string | null
   membership: MembershipInfo
   points: { balance: number; total_earned: number; total_consumed: number }
+  /** 服务端权威的今日 AI 复审额度（user_info.php 会员返回）；非会员/无此字段时缺省 */
+  ai_review?: { daily_limit: number; used_today: number; remaining: number }
 }
 
 export interface AuthState {
@@ -61,6 +62,9 @@ export interface SysConfig {
   wechat_qrcode: string | null
   customer_service_qrcode: string | null
   site_name: string | null
+  /** 后端可选回传：AI 复审每日张数上限。非会员拿不到 user_info.ai_review（那是会员接口才回的字段），
+   *  但会员中心想给他展示“每天 N 张”做促单；config.php 愿意回一份就能显示真数，没回则 null（界面退回定性说法，不编数字） */
+  ai_review_daily_limit?: number | null
 }
 
 /** 一条积分变动记录（points_history.php）。consume_points 负=扣费、正=充值；remark 格式为「类型说明-备注」 */
@@ -115,14 +119,19 @@ export const CH = {
   scanStop: 'scan:stop',
   scanProgress: 'scan:progress',
   scanRescanAll: 'scan:rescan-all',
+  scanStaleInfo: 'scan:stale-info', // 引擎签名过期信息（仅开发版横幅消费）
+  scanRescanStale: 'scan:rescan-stale', // 只重扫旧引擎结果的 N 张
   reclassify: 'scan:reclassify',
+  // AI 复审（会员专属·后台任务）
+  aiReviewStart: 'aireview:start',
+  aiReviewStop: 'aireview:stop',
+  aiReviewClear: 'aireview:clear', // 采纳/跳过某张后清掉它的建议
+  aiReviewReject: 'aireview:reject', // 用户"不采纳"某张的建议（不改判定，仅从分歧列表剔除；再次复审会重判）
+  aiReviewConfirm: 'aireview:confirm', // 用户确认某张已结案（一致时原样保留、采纳后留痕；不会被默认复审重跑）
   exportPreview: 'export:preview',
   exportRun: 'export:run',
   exportCancel: 'export:cancel',
   engineStatus: 'engine:status',
-  tuneNow: 'tune:now',
-  tuneReset: 'tune:reset',
-  tuneStats: 'tune:stats',
   fileUrl: 'file:url', // 本地文件 -> 可展示 URL
   revealInFolder: 'file:reveal',
   // 账号 / 会员 / 积分
@@ -150,7 +159,8 @@ export const CH = {
   E_importProgress: 'evt:import-progress',
   E_exportProgress: 'evt:export-progress',
   E_thumbsReady: 'evt:thumbs-ready',
-  E_authChanged: 'evt:auth-changed'
+  E_authChanged: 'evt:auth-changed',
+  E_aiReviewProgress: 'evt:ai-review-progress'
 } as const
 
 /** 软件更新（check_update.php，后台按 platform 返回对应平台安装包：windows=Windows，mac=macOS Intel，arm=macOS Apple 芯片） */
@@ -170,6 +180,28 @@ export interface MetaItem {
   v: string
 }
 
+/**
+ * AI 复审进度（主进程→渲染 send 事件）。全局后台任务，不冻结软件；
+ * 渲染层用它在顶部显非阻塞小字，在待确认页显独占进度弹窗。
+ */
+export interface AiReviewProgress {
+  running: boolean
+  total: number
+  done: number
+  /** 当前正在复审的文件名（basename） */
+  current: string
+  phase: 'preparing' | 'reviewing' | 'done' | 'stopped' | 'error'
+  message: string
+  /** 解析/解码失败跳过的张数 */
+  failCount: number
+  /** 今日额度已用尽而提前停 */
+  quotaExceeded: boolean
+  usedToday: number
+  dailyLimit: number
+  /** 本轮复审作用域：待确认栏 / 瑕疵片栏 */
+  scope: AiReviewScope
+}
+
 export interface BootstrapInfo {
   settings: AppSettings
   counts: Record<string, number>
@@ -178,6 +210,8 @@ export interface BootstrapInfo {
   progress: ScanProgress
   version: string
   platform: string
+  /** 是否未打包的开发版（!app.isPackaged）：旧引擎重扫横幅仅在此为 true 时显示 */
+  isDev: boolean
 }
 
 export interface MoveRequest {
@@ -235,14 +269,25 @@ export interface RendererApi {
   scanStart(): Promise<{ started: boolean; message: string }>
   scanStop(): Promise<void>
   scanRescanAll(): Promise<{ started: boolean; message: string; reset?: number }>
+  /** 引擎签名过期信息：ready=引擎已拿到签名；sig=当前引擎签名（null 为签名未知）；staleCount=旧结果张数 */
+  staleInfo(): Promise<{ ready: boolean; sig: number | null; staleCount: number }>
+  /** 只重扫旧引擎结果的图（非扣积分），返回同 scanRescanAll */
+  scanRescanStale(): Promise<{ started: boolean; message: string; reset?: number }>
   reclassify(): Promise<void>
+  /** AI 复审：启动后台任务（非会员/未授权/额度尽均不会真跑）。返回是否启动及原因；scope 默认待确认；opts.force 重判本栏每一张（含已判过的，橙色「再次AI复审」用） */
+  aiReviewStart(scope?: AiReviewScope, opts?: { force?: boolean }): Promise<{ started: boolean; reason?: string; usedToday?: number; dailyLimit?: number }>
+  /** AI 复审：请求停止（停在当前张，已完成建议保留） */
+  aiReviewStop(): Promise<void>
+  /** AI 复审：采纳/跳过后清掉某张图的只读建议 */
+  aiReviewClear(id: number): Promise<void>
+  /** AI 复审：把某张的建议标记为"用户已不采纳"（从分歧列表剔除；再次复审会重新判） */
+  aiReviewReject(id: number): Promise<void>
+  /** AI 复审：把某张的建议标为"已确认结案"（标签不动，只留痕；不再计入待处理、不被默认复审重跑） */
+  aiReviewConfirm(id: number): Promise<void>
   exportPreview(opts: ExportOptions): Promise<{ will: number; total: number; byTier: Record<1 | 2 | 3, number>; sizeMB: number | null }>
   exportRun(opts: ExportOptions): Promise<ExportProgress['finished']>
   exportCancel(): Promise<void>
   engineStatus(): Promise<EngineStatus>
-  tuneNow(): Promise<TuneReport>
-  tuneReset(): Promise<void>
-  tuneStats(): Promise<{ total: number; perDim: Record<string, { falsePositive: number; truePositive: number; total: number }> }>
   fileUrl(path: string): Promise<string>
   revealInFolder(path: string): Promise<void>
   // 账号 / 会员 / 积分
@@ -273,4 +318,5 @@ export interface RendererApi {
   onExportProgress(cb: (p: ExportProgress) => void): () => void
   onThumbsReady(cb: (count: number) => void): () => void
   onAuthChanged(cb: (state: AuthState, consume?: ConsumeResult) => void): () => void
+  onAiReviewProgress(cb: (p: AiReviewProgress) => void): () => void
 }

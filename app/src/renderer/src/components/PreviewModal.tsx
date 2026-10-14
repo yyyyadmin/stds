@@ -1,9 +1,9 @@
 /**
  * 大图预览层（9.2 + 第五章）
- * - 滚轮缩放 / 拖拽平移 / 双击复位 / ←→切换 / ESC 关闭
+ * - 滚轮缩放 / 拖拽平移 / 双击复位 / ←→切换 / ESC 关闭；顶部文件名点击即复制
  * - AI 标记叠加（人脸框/关键点）：默认关，点顶部「标记叠加」才开；判定理由长句只写库不渲染（showReason 默认关）
- * - 一键修正："✓ 合格 → 交付库 / 此判定正确（仅记录）"；原"此判定错误"已下线（与标签增删、移动到重叠），
- *   换分类用「移动到」/拖侧栏，换维度归属用标签管理（两条路径都会写学习样本）
+ * - 一键修正："✓ 合格 → 交付库 / 此判定正确（仅记录）"；原"此判定错误"与右栏的「移动到」都已下线（与标签增删重叠），
+ *   换分类用右栏两个彩色按钮或拖左侧栏，换维度归属用标签管理（两条路径都会写学习样本）
  * - 原图对比切换
  * - 布局：左缩略列 + 中画布 + 右判定信息/工具列（三栏并排常驻）
  */
@@ -180,6 +180,16 @@ export default function PreviewModal(): JSX.Element | null {
   const src = compareOriginal ? big.src : img.thumb ? toSrc(img.thumb) : big.src
   const faces = lazyFaces
 
+  // 复制文件名到剪贴板：成功/失败都有 toast 反馈，不用弹任何确认框
+  const copyFilename = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(img.filename)
+      useStore.setState({ toast: { msg: `已复制文件名：${img.filename}`, kind: 'success', duration: 1200 } })
+    } catch {
+      useStore.setState({ toast: { msg: '复制文件名失败，请手动选择复制', kind: 'error' } })
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-40 bg-black/85 flex flex-col fade-in" onClick={(e) => e.target === e.currentTarget && closePreview()}>
       {/* 顶部工具条 */}
@@ -205,9 +215,19 @@ export default function PreviewModal(): JSX.Element | null {
             ▶ 开始复核
           </button>
         ))}
-        {/* 居中（顶部中间）：文件名 + 尺寸 + 格式 + 文件大小 */}
+        {/* 居中（顶部中间）：文件名（点击复制） + 尺寸 + 格式 + 文件大小 */}
         <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-baseline gap-2.5 max-w-[50%]">
-          <span className="text-[15px] text-white/90 truncate" title={img.path}>{img.filename}</span>
+          <span
+            className="group inline-flex items-baseline gap-1 min-w-0 cursor-pointer"
+            title={`${img.path}\n点击复制文件名`}
+            onClick={() => void copyFilename()}
+          >
+            <span className="text-[15px] text-white/90 truncate group-hover:text-white transition-colors">{img.filename}</span>
+            <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 shrink-0 self-center text-white/40 opacity-0 group-hover:opacity-90 transition-opacity" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="9" y="9" width="11" height="11" rx="2" />
+              <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+            </svg>
+          </span>
           <span className="text-[13px] text-white/60 whitespace-nowrap">{img.width}×{img.height} · {img.format?.toUpperCase()}{img.fileSize ? ` · ${(img.fileSize / 1048576).toFixed(1)} MB` : ''}</span>
         </div>
         <div className="flex-1" />

@@ -97,25 +97,33 @@ body {
 }
 
 @layer components {
+  /* 按钮族统一禁止折行：中文可在任意字间断行，窄容器里不加 nowrap 的按钮会被压成一行一个字
+     （笔记本上顶栏「导入照片」竖排就是这么来的）。宁可整项换行，也不许折字。 */
   .btn {
-    @apply px-3 py-1.5 rounded-md text-sm bg-panel2 hover:bg-line border border-line transition-colors cursor-pointer;
+    /* text-fg 不可省：以前 .btn 不写文字色，一旦继承到页面底色（比如误用 text-base —— 它跟颜色令牌 base 同名）
+       就会白底白字 / 黑底黑字看不见字（用户 10-14 实测：复核结果弹窗的两个次级按钮）。 */
+    @apply px-3 py-1.5 rounded-md text-sm text-fg bg-panel2 hover:bg-line border border-line transition-colors cursor-pointer whitespace-nowrap;
   }
   .btn-primary {
-    @apply px-3 py-1.5 rounded-md text-sm bg-brand hover:bg-blue-600 text-white transition-colors cursor-pointer border border-transparent;
+    @apply px-3 py-1.5 rounded-md text-sm bg-brand hover:bg-blue-600 text-white transition-colors cursor-pointer border border-transparent whitespace-nowrap;
   }
   .btn-danger {
-    @apply px-3 py-1.5 rounded-md text-sm bg-bad hover:bg-red-600 text-white transition-colors cursor-pointer border border-transparent;
+    @apply px-3 py-1.5 rounded-md text-sm bg-bad hover:bg-red-600 text-white transition-colors cursor-pointer border border-transparent whitespace-nowrap;
+  }
+  /* 橙色警示按钮（AI 复审「再次复审」——会消耗今日额度的重复动作）：与蓝色主按钮拉开，提醒这是二次烧额度的操作 */
+  .btn-warn {
+    @apply px-3 py-1.5 rounded-md text-sm bg-orange-500 hover:bg-orange-600 text-white transition-colors cursor-pointer border border-transparent whitespace-nowrap;
   }
   /* 绿色确认按钮（重复/连拍「保留」等主动作）：hover 必须自带深绿，否则被基类 .btn 的 hover:bg-line 盖成灰白底看不见字 */
   .btn-good {
-    @apply px-3 py-1.5 rounded-md text-sm bg-good hover:bg-[#15803d] text-white transition-colors cursor-pointer border border-transparent;
+    @apply px-3 py-1.5 rounded-md text-sm bg-good hover:bg-[#15803d] text-white transition-colors cursor-pointer border border-transparent whitespace-nowrap;
   }
   /* 中性灰实心按钮（交付库「一般」档）：与档位标签 bg-gray-500(=fg3) 同色，hover 转深一档 fg2 提对比 */
   .btn-neutral {
-    @apply px-3 py-1.5 rounded-md text-sm bg-fg3 hover:bg-fg2 text-white transition-colors cursor-pointer border border-transparent;
+    @apply px-3 py-1.5 rounded-md text-sm bg-fg3 hover:bg-fg2 text-white transition-colors cursor-pointer border border-transparent whitespace-nowrap;
   }
   .btn-ghost {
-    @apply px-2 py-1 rounded-md text-sm hover:bg-panel2 transition-colors cursor-pointer border border-transparent;
+    @apply px-2 py-1 rounded-md text-sm hover:bg-panel2 transition-colors cursor-pointer border border-transparent whitespace-nowrap;
   }
   /* 大图预览等深色遮罩层专用：hover 用半透明白而非随主题的 bg-panel2（浅色主题下 bg-panel2 近白，会白底白字看不清） */
   .btn-ghost-dark {

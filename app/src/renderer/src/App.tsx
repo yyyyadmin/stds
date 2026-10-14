@@ -18,6 +18,9 @@ import LoginDialog from './components/LoginDialog'
 import MemberCenterDialog from './components/MemberCenterDialog'
 import UpdateDialog from './components/UpdateDialog'
 import FailedImagesDialog from './components/FailedImagesDialog'
+import AiReviewConsent from './components/AiReviewConsent'
+import AiReviewModal from './components/AiReviewModal'
+import StaleBanner from './components/StaleBanner'
 
 export default function App(): JSX.Element {
   const ready = useStore((s) => s.ready)
@@ -118,7 +121,7 @@ export default function App(): JSX.Element {
   }, [])
 
   return (
-    <div className="h-full flex flex-col bg-base" onDragOver={(e) => {
+    <div className="h-full flex flex-col bg-canvas" onDragOver={(e) => {
       if (e.dataTransfer.types.includes('Files')) {
         e.preventDefault()
         setDragOver(true)
@@ -147,6 +150,7 @@ export default function App(): JSX.Element {
       ) : (
         <>
           <TopBar />
+          <StaleBanner />
           <div className="flex-1 flex min-h-0">
             <Sidebar />
             <main className="flex-1 min-w-0 relative">
@@ -154,6 +158,8 @@ export default function App(): JSX.Element {
               <DropZone />
               {/* 导入/缩略图生成期间盖住内容区，吸收点击（开始筛选按钮在 TopBar 同步禁用） */}
               <BusyOverlay />
+              {/* AI 复审内容区三态（进度/小结/对比）：移进 main 是为了让「复审中」遮罩只盖当前分类内容区、不挡侧栏与顶栏 */}
+              <AiReviewModal />
             </main>
           </div>
           <SelectionBar />
@@ -166,6 +172,8 @@ export default function App(): JSX.Element {
           {showMember && <MemberCenterDialog />}
           {showUpdate && <UpdateDialog />}
           {showFailedImages && <FailedImagesDialog />}
+          {/* AI 复审首次授权弹窗（组件自管开关，未开启时返回 null） */}
+          <AiReviewConsent />
           {/* 标签写入中：不阻断操作的进度胶囊（乐观更新已先改好界面，这里只说明“正在喂 AI”） */}
           {tagBusy && (
             <div className="fixed inset-x-0 bottom-0 z-[60] flex justify-center pointer-events-none pb-3">

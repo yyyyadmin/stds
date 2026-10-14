@@ -8,6 +8,7 @@ import { join } from 'path'
 import { mkdirSync } from 'fs'
 import type {
   AppSettings,
+  AiReviewSuggestion,
   CategoryKey,
   CorrectionRecord,
   DimResult,
@@ -17,6 +18,7 @@ import type {
 } from '../shared/types'
 import {
   BAD_DIMENSIONS,
+  QC_MANUAL_DIMENSIONS,
   NEUTRAL_DIMENSIONS,
   STRUCTURAL_DIMENSIONS,
   PERSON_DIMS,
@@ -117,6 +119,21 @@ export async function initDbAsync(): Promise<void> {
   } catch {
     /* 列已存在，忽略 */
   }
+  // 一次性迁移（引擎签名重扫提示）：记录每张图是被哪个签名的引擎扫出结果的，供判断
+  // “有 N 张旧引擎结果需重扫”。默认 NULL；引入本功能前已扫完的存量图保持 NULL，会被如实
+  // 计为旧结果——升级到新引擎后横幅会提示重扫（开发版与正式版都显示），不再回填掩盖。
+  try {
+    db.exec(`ALTER TABLE images ADD COLUMN engine_sig INTEGER`)
+  } catch {
+    /* 列已存在，忽略 */
+  }
+  // 一次性迁移（AI 复审·会员专属）：只读建议列，与 tags/category 正交，绝不参与任何判定。
+  // 存 JSON（AiReviewSuggestion）或 NULL；重扫（updateDetectResult）/采纳/跳过时清空。
+  try {
+    db.exec(`ALTER TABLE images ADD COLUMN ai_review TEXT`)
+  } catch {
+    /* 列已存在，忽略 */
+  }
   // 把历史的“重复照片-废弃”(dup_trash) 并入统一废弃库(trash)，来源标为 duplicate；
   // 还原时可回到重复分组。历史 trash 行 trash_from 保持 NULL，页面归入“其他来源”。
   db.exec(`UPDATE images SET category = 'trash', trash_from = 'duplicate' WHERE category = 'dup_trash'`)
@@ -163,7 +180,18 @@ function rowToImage(r: Record<string, unknown>, slim = false): ImageRecord {
     categoryBy: (r.category_by as ImageRecord['categoryBy']) || null,
     tier: ((r.tier as number) === 1 || (r.tier as number) === 2 || (r.tier as number) === 3 ? (r.tier as TierKey) : null),
     tierBy: (r.tier_by as ImageRecord['tierBy']) || null,
-    trashFrom: (r.trash_from as string) ?? null
+    trashFrom: (r.trash_from as string) ?? null,
+    ai_review: parseAiReview(r.ai_review)
+  }
+}
+
+/** 行 ai_review JSON → AiReviewSuggestion；空/解析失败一律置 null（宁可不显示建议，不可崩列表） */
+function parseAiReview(raw: unknown): AiReviewSuggestion | null {
+  if (!raw) return null
+  try {
+    return JSON.parse(raw as string) as AiReviewSuggestion
+  } catch {
+    return null
   }
 }
 
@@ -325,7 +353,8 @@ export function updateDetectResult(
   dupGroup: string | null,
   category: CategoryKey,
   categoryBy: ImageRecord['categoryBy'],
-  status: ImageRecord['status']
+  status: ImageRecord['status'],
+  engineSig: number | null = null
 ): void {
   // 分类真正变化才算“刚进入这个分类”（刷新 cat_changed_at）；同分类重扫保留旧值，
   // 避免每次改阈值/重扫把全库排序时戳刷成同一时刻。
@@ -347,10 +376,12 @@ export function updateDetectResult(
   db.prepare(`
     UPDATE images SET tags = ?, details = ?, dup_group = ?, category = ?, category_by = ?, status = ?, scanned_at = ?,
       cat_changed_at = COALESCE(?, cat_changed_at),
+      engine_sig = COALESCE(?, engine_sig),
+      ai_review = NULL,
       tier = CASE WHEN tier_by = 'user' THEN tier ELSE ? END,
       tier_by = CASE WHEN tier_by = 'user' THEN tier_by ELSE ? END
     WHERE id = ?
-  `).run(JSON.stringify(safeTags), JSON.stringify(details), dupGroup, finalCategory, categoryBy, status, Date.now(), prev === finalCategory ? null : Date.now(), tier, tier ? 'ai' : null, id)
+  `).run(JSON.stringify(safeTags), JSON.stringify(details), dupGroup, finalCategory, categoryBy, status, Date.now(), prev === finalCategory ? null : Date.now(), engineSig, tier, tier ? 'ai' : null, id)
 }
 
 export function setCategory(id: number, category: CategoryKey, categoryBy: 'ai' | 'user' | null): void {
@@ -552,7 +583,23 @@ export function countImages(): { total: number; done: number; pending: number } 
 export function resetForRescan(): number {
   const rows = db
     .prepare(`SELECT id, category, category_by, tags FROM images WHERE status != 'skip'`)
-    .all() as Array<{ id: number; category: string; category_by: string | null; tags: string | null }>
+    .all() as RescanRow[]
+  return applyRescanReset(rows)
+}
+
+interface RescanRow {
+  id: number
+  category: string
+  category_by: string | null
+  tags: string | null
+}
+
+/**
+ * 重扫前置归位的共用逻辑：对传入行按全量重扫同等语义处理——
+ * 用户手动放置/废弃桶仅置 pending（保分类保标签），AI 归属行回到 library 且只留手动标签。
+ * resetForRescan（全量）与 resetStaleForRescan（只重扫过期）共用此函数，保证手动保护口径一致。
+ */
+function applyRescanReset(rows: RescanRow[]): number {
   const setPending = db.prepare(`UPDATE images SET status = 'pending' WHERE id = ?`)
   const resetOne = db.prepare(
     `UPDATE images SET status = 'pending', category = ?, category_by = NULL, tags = ?, dup_group = NULL WHERE id = ?`
@@ -579,6 +626,32 @@ export function resetForRescan(): number {
   })
   tx()
   return moved
+}
+
+/** 当前签名下“旧引擎结果”的 done 图数（排除废弃库；sig=null 视为不判，返 0）。 */
+export function countStaleImages(sig: number | null): number {
+  if (sig == null) return 0
+  return (
+    db
+      .prepare(
+        `SELECT COUNT(*) c FROM images WHERE status = 'done' AND category NOT IN ('trash','dup_trash') AND (engine_sig IS NULL OR engine_sig != ?)`
+      )
+      .get(sig) as { c: number }
+  ).c
+}
+
+/**
+ * 只重扫过期：把当前签名下的过期 done 图按全量重扫同等语义重置为 pending，返回张数。
+ * 随后调 scanner.start(false) 即仅重扫这批（pendingImages 取 pending/error）。
+ */
+export function resetStaleForRescan(sig: number | null): number {
+  if (sig == null) return 0
+  const rows = db
+    .prepare(
+      `SELECT id, category, category_by, tags FROM images WHERE status = 'done' AND category NOT IN ('trash','dup_trash') AND (engine_sig IS NULL OR engine_sig != ?)`
+    )
+    .all(sig) as RescanRow[]
+  return applyRescanReset(rows)
 }
 
 /**
@@ -777,6 +850,109 @@ export function listImagesByDupGroups(gids: string[]): ImageRecord[] {
     }
   }
   return out
+}
+
+// ---------- AI 复审（只读建议，与判定正交） ----------
+
+/** 写入/清空某张图的 AI 复审建议（s=null 即清除）。不参与任何判定，仅供对比界面。 */
+export function setAiReview(id: number, s: AiReviewSuggestion | null): void {
+  db.prepare('UPDATE images SET ai_review = ? WHERE id = ?').run(s ? JSON.stringify(s) : null, id)
+}
+
+/** 读单张图的 AI 复审建议（无/解析失败返回 null） */
+export function getAiReview(id: number): AiReviewSuggestion | null {
+  const r = db.prepare('SELECT ai_review FROM images WHERE id = ?').get(id) as { ai_review: string | null } | undefined
+  if (!r || !r.ai_review) return null
+  try {
+    return JSON.parse(r.ai_review) as AiReviewSuggestion
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 把某张图已有的建议标记为"用户已不采纳"：不改任何判定，仅从分歧列表剔除、不被全部采纳；
+ * 再次复审会把该图重新判一遍并整体覆盖 JSON（rejected 标记随之作废）。无建议/解析失败静默跳过。
+ */
+export function rejectAiReview(id: number): void {
+  const s = getAiReview(id)
+  if (!s) return
+  s.rejected = true
+  db.prepare('UPDATE images SET ai_review = ? WHERE id = ?').run(JSON.stringify(s), id)
+}
+
+/**
+ * 这张是否已转人工定画质：AI 复审过且已结案（confirmed），但标签里仍挂着云端不看的模糊/曝光。
+ * 为什么不存一个标记而要现算：存了就会烂——用户后来在判定面板里把模糊标签删了，
+ * 那个死标记还会留着，角标一直挂在本不该再复审的图上排最前。现算的话画质一清就自动恢复常态。
+ */
+function isManualQc(r: ImageRecord): boolean {
+  const s = r.ai_review
+  if (!s || !s.confirmed) return false
+  return QC_MANUAL_DIMENSIONS.some((d) => !!r.tags?.[d] && r.tags[d]!.level !== 'low')
+}
+
+/**
+ * 这张是否“已复核干净、只差一个归位动作”：已结案且身上再没有任何中/高置信瑕疵，却还停在待确认
+ * （以前手动停泊的干净图）。重跑它拿到的还是“没意见”，白烧额度；它要的是渲染层把它按人数搬走
+ * （store.homeIfCleanParked），不是云端再审一遍。与渲染层 aiReviewShouldHome 同口径。
+ */
+function isCleanParked(r: ImageRecord): boolean {
+  const s = r.ai_review
+  if (!s || !s.confirmed || s.rejected) return false
+  return r.category === CAT_REVIEW && flawLevel(r.tags || {}) === 'none'
+}
+
+/**
+ * 把某张图的建议标为"用户已确认结案"：不改任何判定，只留一个痕。
+ * 两个入口共用：① AI 与本地一致时点「确认保留」（标签原样不动）；② 按 AI 改完标签后的「采纳」。
+ * 为什么要留痕而不是清空：清空后这张图看起来像"从没判过"，仍留在本栏的话会被下轮默认复审重跑、白烧额度。
+ * 图上若还带着模糊/曝光，这个 confirmed 就同时意味着“转人工复审”（见 isManualQc）。
+ */
+export function confirmAiReview(id: number): void {
+  const s = getAiReview(id)
+  if (!s) return
+  s.confirmed = true
+  db.prepare('UPDATE images SET ai_review = ? WHERE id = ?').run(JSON.stringify(s), id)
+}
+
+/**
+ * 当前待确认集的图片 id（复审队列）。谓词直接复用 `listByCategory(CAT_REVIEW)` 的 matchesView
+ * 口径（D2 派生：非废弃 ∩ 非 flaw-high ∩（category=review ∪ flaw=mid）），与侧栏待确认完全一致。
+ */
+export function listReviewIds(): number[] {
+  return listByCategory(CAT_REVIEW).map((r) => r.id)
+}
+
+/**
+ * 某栏里「待复审」的图 id。适用 CAT_REVIEW / CAT_FLAWS。
+ *  默认（只补没判过的）：尚无建议的（ai_review 为空）+ 建议被用户"不采纳"过的
+ *  （按用户决定：不采纳的图支持再次 AI 复审，重判后新建议整体覆盖旧 JSON，rejected 标记自然作废）。
+ *  force=true（重判全部）：本栏除了已转人工定画质的每一张都重跑。
+ * 两种跑法都跳过 needManual（已转人工）的图（用户 10-14）：那张卡在模糊/曝光上，
+ * 而云端根本不看这两项，重跑一遍得到的还是“没意见”，白烧额度；它只等人自己在判定面板定。
+ * 同样跳过“已结案且身上没任何瑕疵、只等归位”的干净停泊图（isCleanParked）：它缺的是一个搬移动作，不是再审。
+ * （顶部条的“将重判 N 张”与这里同一口径，否则报的数与实际烧的额度不一致。）
+ * 已结案（confirmed）的图也不算待复审：那张已有结论且用户表过态，不重烧额度。
+ * 为什么要 force：用户实测抓到死胡同——一张图已判过且 AI 没提不同意见（无分歧）时，它既不会出现在
+ * 采纳列表里，也不在默认复审队列里，点"再次AI复审"只会得到"没有可复审的照片"，那张图彻底没法再动。
+ */
+export function listPendingAiReviewIds(cat: CategoryKey, force = false): number[] {
+  const rows = listByCategory(cat)
+  if (force) return rows.filter((r) => !isManualQc(r) && !isCleanParked(r)).map((r) => r.id)
+  return rows
+    .filter((r) => !isManualQc(r) && !isCleanParked(r) && (!r.ai_review || r.ai_review.rejected) && !r.ai_review?.confirmed)
+    .map((r) => r.id)
+}
+
+/** 待确认中“已有 AI 建议”的张数（侧栏“有 N 张建议”徽章与小结用）。 */
+export function countReviewPending(): number {
+  return listByCategory(CAT_REVIEW).reduce((n, r) => n + (r.ai_review ? 1 : 0), 0)
+}
+
+/** 清空全库 AI 建议（退出会员/重置场景兑底；重扫单张作废走 updateDetectResult）。 */
+export function clearAllAiReview(): void {
+  db.prepare('UPDATE images SET ai_review = NULL WHERE ai_review IS NOT NULL').run()
 }
 
 export function _helpers_for_test_only() {

@@ -2,13 +2,25 @@
 # 基础必装：无需任何模型下载即可运行全部规则/传统算法检测
 # 统一为 opencv-contrib-python（单一 cv2 提供方）：mediapipe 依赖 contrib，若与 opencv-python
 # 并存会双份 cv2 冲突；contrib 是 base 超集，FaceDetectorYN/haarcascade 等照常可用。
-opencv-contrib-python>=4.9.0
-numpy>=1.26,<2.0
-Pillow>=10.2.0
+#
+# 【版本写死的缘由（2026-10-14 用户拍板：开发版怎样，正式版就要怎样）】
+# 这三个库直接决定像素计算结果：模糊/曝光/黑白/半截头走 cv2+numpy，解码归一化走 Pillow。
+# 写成 ">=某版本" 时，CI 每台机器每次新装 venv 都会解析到“当天最新版”——官方一发新版，
+# 我们一行检测代码都没改，正式版的判定效果却会变，而开发版仍是旧版，两边对不上且不报错。
+# 因此钉成开发机实测组合（py -3 -m pip list：opencv 4.11.0.86 / numpy 1.26.4 / Pillow 12.3.0）。
+# 三个库的官方 wheel 在 win_amd64 / macosx arm64 / macosx x86_64 上都存在（已逐一到 PyPI 核对），
+# 因此钉死不会让某个平台的打包因“找不到该版本的包”而失败。
+# 升级这三个库时必须同步更新 ENGINE_SIG（engine/__init__.py），让库里旧结果被识别为过期并重扫。
+opencv-contrib-python==4.11.0.86
+numpy==1.26.4
+Pillow==12.3.0
 
 # 可选增强：ONNX 深度学习模型（闭眼 OCEC / 视线 MobileGaze / 表情 / 人脸检测 / 嵌入）
 # 未安装或未放置 models/ 权重时，引擎自动降级为规则算法，功能不中断
-# MediaPipe FaceLandmarker 见 requirements-optional.txt（best-effort，构建脚本单独非致命安装）
+# MediaPipe FaceLandmarker 见 requirements-optional.txt（构建脚本单独安装，自检不过会拦下发版）
+# 这里保持范围不写死：随包只发 YuNet（走 cv2 FaceDetectorYN，不经 onnxruntime）+ MediaPipe 权重，
+# 没有任何 .onnx 权重进入正式产物，故 onnxruntime 的实际版本不参与当前判定；写死反而有
+# “某平台该版本无 wheel 直接装不上、卡住整个平台发版”的风险。
 onnxruntime>=1.17.0 ; platform_machine != "loongarch64"
 # NVIDIA GPU 用户改装 onnxruntime-gpu 获得加速（Windows）
 # onnxruntime-gpu>=1.17.0
