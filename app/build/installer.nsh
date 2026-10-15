@@ -17,6 +17,9 @@
 ; 系统盘根：模型副本的第三顺位落点。用命名变量而非 $9 之类寄存器，
 ; 免得和 electron-builder 自己的脚本抢占同一个寄存器。
 Var ScreenerSysDrive
+; 「AI筛图助手」运行时拼装结果与临时寄存（见 ScreenerBuildCnName）
+Var ScreenerCnName
+Var ScreenerTmp
 
 ; ---------------------------------------------------------------------------
 ; ScreenerCleanCacheRoot：清理一个 userData 目录下的全部可再生缓存
@@ -66,25 +69,47 @@ Var ScreenerSysDrive
 ; ---------------------------------------------------------------------------
 !macro ScreenerCleanModelCopies
   RMDir /r "$TEMP\screener-engine-models"
-  RMDir /r "$COMMONAPPDATA\screener-engine-models"
+  ; NSIS 没有 $COMMONAPPDATA 这个内置常量（本机用云端同款编译器实测抓到 warning 6000；
+  ; 云端 v2.0.86 只是在它前面先死在了另一处）。所有用户共用的 ProgramData 只能
+  ; 从 PROGRAMDATA 环境变量读——和下面 SYSTEMDRIVE 同一个套路。
+  ReadEnvStr $ScreenerTmp PROGRAMDATA
+  RMDir /r "$ScreenerTmp\screener-engine-models"
   ReadEnvStr $ScreenerSysDrive SYSTEMDRIVE
   RMDir /r "$ScreenerSysDrive\screener-engine-models"
+!macroend
+
+; ---------------------------------------------------------------------------
+; ScreenerBuildCnName：把历史中文目录名「AI筛图助手」拼进 $ScreenerCnName
+;   本文件必须保持纯 ASCII：云端编译器按本机 ANSI 代码页读源文件，直接写中文
+;   会变乱码；而 $\uXXXX 这种转义 NSIS 根本不支持（v2.0.86 云端打包实测
+;   warning 6000 unknown variable/constant，警告被当错误直接中断）。所以唯一的
+;   编码无关写法是运行时按 Unicode 码点逐字拼：AI + 筛(7B5B) 图(56FE) 助(52A9) 手(624B)
+; ---------------------------------------------------------------------------
+!macro ScreenerBuildCnName
+  IntFmt $ScreenerCnName "%c" 0x7B5B
+  IntFmt $ScreenerTmp "%c" 0x56FE
+  StrCpy $ScreenerCnName "$ScreenerCnName$ScreenerTmp"
+  IntFmt $ScreenerTmp "%c" 0x52A9
+  StrCpy $ScreenerCnName "$ScreenerCnName$ScreenerTmp"
+  IntFmt $ScreenerTmp "%c" 0x624B
+  StrCpy $ScreenerCnName "$ScreenerCnName$ScreenerTmp"
+  StrCpy $ScreenerCnName "AI$ScreenerCnName"
 !macroend
 
 ; ---------------------------------------------------------------------------
 ; ScreenerCleanAll：当前目录名 + 历史遗留目录名一次清完
 ;   产品改过名（ai-photo-screener -> AI筛图助手 -> screener-master），老机器上
 ;   三个目录都可能躺着残留，逐个点名清；不写通配符遍历，避免误删其它软件的数据。
-;   中文名 "AI筛图助手" 写成 Unicode 转义，本文件因此保持纯 ASCII。
-;   "AI筛图助手" = "AI$\u7B5B\u56FE\u52A9\u624B"
+;   中文名「AI筛图助手」由 ScreenerBuildCnName 运行时拼装（为何不直写见该宏注释）。
 ; ---------------------------------------------------------------------------
 !macro ScreenerCleanAll
+  !insertmacro ScreenerBuildCnName
   !insertmacro ScreenerCleanCacheRoot "screener-master"
   !insertmacro ScreenerCleanCacheRoot "ai-photo-screener"
-  !insertmacro ScreenerCleanCacheRoot "AI$\u7B5B\u56FE\u52A9\u624B"
+  !insertmacro ScreenerCleanCacheRoot $ScreenerCnName
   ; 旧目录名只有 4 个文件，缓存子项删完后顺手把空壳目录也带走（非空时 NSIS 自动跳过）
   RMDir "$APPDATA\ai-photo-screener"
-  RMDir "$APPDATA\AI$\u7B5B\u56FE\u52A9\u624B"
+  RMDir "$APPDATA\$ScreenerCnName"
   !insertmacro ScreenerCleanModelCopies
 !macroend
 
