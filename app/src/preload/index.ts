@@ -62,6 +62,7 @@ const api: RendererApi = {
   authLoginCode: (req) => ipcRenderer.invoke(CH.authLoginCode, req),
   authLogout: () => ipcRenderer.invoke(CH.authLogout),
   authMe: () => ipcRenderer.invoke(CH.authMe),
+  redeemCode: (code: string) => ipcRenderer.invoke(CH.authRedeem, code),
   plansList: () => ipcRenderer.invoke(CH.plansList),
   orderCreate: (t: string, id: string) => ipcRenderer.invoke(CH.orderCreate, t, id),
   sysConfig: () => ipcRenderer.invoke(CH.sysConfig),

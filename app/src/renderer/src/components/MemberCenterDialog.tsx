@@ -2,7 +2,12 @@
  * 会员中心对话框（③）
  * - 展示积分余额 / 会员等级 / 到期时间
  * - 套餐列表（plans.php）；点「开通」弹「联系客服开通」二维码弹窗（ContactServiceDialog）
- * - 退出登录
+ * - 退出登录：与身份行的到期时间同一水平线，靠右排成一行；右上角只留关闭 ✕
+ *
+ * 会员身份下两个积分数字（当前积分 / 累计消耗）不抹掉也不置零：数字原样留着但划上中间横线、
+ * 颜色改浅，旁边一句「会员期间不扣积分 / 会员到期后即恢复积分制」说清它为什么暂停（用户 2026-10-15 定）。
+ * 会员只是这段不记账，到期后接着用原来的余额，所以这两个数字仍是真数据，不能假装它不存在。
+ * 退出登录不放在右上角 ✕ 旁边：用户 2026-10-15 要求与到期时间同一水平行，且得是个真按钮（带边框底色）。
  *
  * 2026-10-15 改了收款路径：不再调 create_order.php 下单，也不再把二维码摊在本页滚动区最底下
  * （那个位置用户点完常以为“没反应”，而终身卡后端根本不支持下单）。现在只在这里放价目表，
@@ -10,15 +15,9 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store'
+import { membershipName, isVip } from '../../../shared/membership'
 import { CAT_REVIEW, CAT_FLAWS } from '../../../shared/types'
 import type { PlanInfo, SysConfig, PointsHistoryItem } from '../../../shared/ipc'
-
-const LEVEL_LABEL: Record<string, string> = {
-  free: '普通用户',
-  monthly: '月度会员',
-  quarterly: '季度会员',
-  yearly: '年度会员'
-}
 
 export default function MemberCenterDialog(): JSX.Element | null {
   const showMember = useStore((s) => s.showMember)
@@ -44,6 +43,14 @@ export default function MemberCenterDialog(): JSX.Element | null {
   const [histPages, setHistPages] = useState(1)
   const [histLoading, setHistLoading] = useState(false)
   const [histErr, setHistErr] = useState('')
+
+  // 兑换码：直接摆输入框+按钮（用户 2026-10-15 定，不要点按钮才弹窗）；
+  // 会员码 / 积分码同一个接口（redeem_code.php），返回什么兑什么
+  const [redeemCode, setRedeemCode] = useState('')
+  const [redeeming, setRedeeming] = useState(false)
+  const [redeemMsg, setRedeemMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  // AI 复审特权卡：权益明细默认收起，一句话概括 + 点「展开」看全部（用户 2026-10-15 定：四行规格表太占位置）
+  const [aiDetailOpen, setAiDetailOpen] = useState(false)
 
   // remark 格式为「类型说明-备注」：按第一个 - 拆分，前半放主行，后半放副行
   const histTitle = (it: PointsHistoryItem): string =>
@@ -72,6 +79,34 @@ export default function MemberCenterDialog(): JSX.Element | null {
     await loadHistory(1)
   }
 
+  /** 兑换码提交：成功后按码的类型给一句人话，并刷新用户信息同步顶栏身份与积分 */
+  const onRedeem = async (): Promise<void> => {
+    const code = redeemCode.trim()
+    if (!code) {
+      setRedeemMsg({ ok: false, text: '请填写兑换码' })
+      return
+    }
+    setRedeeming(true)
+    setRedeemMsg(null)
+    const r = await window.api.redeemCode(code)
+    if (r.ok && r.result) {
+      const d = r.result
+      const text =
+        d.type === 'points'
+          ? `兑换成功，到账 ${d.points} 积分，当前余额 ${d.balance}`
+          : d.level === 'lifetime'
+            ? '兑换成功！会员已开通，永久有效'
+            : `兑换成功！会员有效期至 ${String(d.expire_at || '').slice(0, 10) || '—'}`
+      setRedeemMsg({ ok: true, text })
+      setRedeemCode('')
+      void refreshAuth()
+    } else {
+      // 后端 400 文案（码不存在/已被使用/已过期）原样给人看，不改编不包装
+      setRedeemMsg({ ok: false, text: r.message || '兑换失败，请稍后再试' })
+    }
+    setRedeeming(false)
+  }
+
   useEffect(() => {
     if (!showMember) return
     void (async () => {
@@ -88,8 +123,10 @@ export default function MemberCenterDialog(): JSX.Element | null {
 
   const user = auth.user
   const balance = user?.points.balance ?? 0
-  const level = user?.membership.level || 'free'
-  const isMember = auth.loggedIn && level !== 'free' && !user?.membership.is_expired
+  // 是不是会员一律走单一真源（后端 membership.is_vip 优先，含体验卡等动态套餐；见 shared/membership.ts）
+  const isMember = auth.loggedIn && isVip(user)
+  // 身份名与顶栏同源：后端 membership.name 优先，本地只兜底
+  const memberLabel = membershipName(user)
   // 这两栏正是 AI 复审的作用域，拿真实张数促单比形容词管用
   const reviewPending = counts[CAT_REVIEW] ?? 0
   const flawsPending = counts[CAT_FLAWS] ?? 0
@@ -108,24 +145,40 @@ export default function MemberCenterDialog(): JSX.Element | null {
         {/* 头部用户卡 */}
         <div className="p-5 bg-gradient-to-br from-brand/15 to-transparent border-b border-line">
           <div className="flex items-start justify-between">
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <div className="text-lg font-bold text-fg truncate">
                 {user?.nickname || user?.phone || user?.email || (auth.loggedIn ? '已登录' : '未登录')}
               </div>
               {auth.loggedIn ? (
+                // 这一行横向铺满（左列 flex-1）：身份章 + 剩余时长靠左，退出登录靠右，与到期时间同一水平线（用户 2026-10-15 定）
                 <div className="flex items-center gap-2 mt-1.5">
                   <span className={'chip ' + (isMember ? 'bg-warn/20 text-warn border border-warn/40' : 'bg-panel2 text-fg2 border border-line')}>
-                    {isMember ? '👑 ' + LEVEL_LABEL[level] : LEVEL_LABEL[level]}
+                    {isMember ? '👑 ' + memberLabel.text : memberLabel.text}
                   </span>
-                  {isMember && user?.membership.expire_at && (
-                    <span className="text-xs text-fg2">到期 {String(user.membership.expire_at).slice(0, 10)}</span>
-                  )}
+                  {/* 剩余时长：后端 days_left 优先；但像体验卡填了 2101 年这种超十年到期日，
+                      报「剩 27500 天」看着像 bug，回退成日期更可读 */}
+                  {isMember &&
+                    (typeof user?.membership.days_left === 'number' && user.membership.days_left <= 3650 ? (
+                      <span className="text-xs text-fg2">剩 {user.membership.days_left} 天到期</span>
+                    ) : user?.membership.expire_at ? (
+                      <span className="text-xs text-fg2">到期 {String(user.membership.expire_at).slice(0, 10)}</span>
+                    ) : null)}
+                  <span className="flex-1" />
+                  {/* 要像个按钮（带边框底色），不是普通灰文字（用户 2026-10-15：“这是按钮不是普通文字”）；
+                      尺寸比下方主按钮小一档，不与它抢视觉中心 */}
+                  <button
+                    className="btn text-xs px-2.5 py-1 text-fg2"
+                    onClick={() => void doLogout()}
+                    title="退出当前账号：本地图库、标签与判定记录都保留，重新登录后接着用"
+                  >
+                    退出登录
+                  </button>
                 </div>
               ) : (
                 <div className="text-xs text-fg2 mt-1.5">登录后可查看积分与会员权益</div>
               )}
             </div>
-            <button className="btn-ghost text-fg3" onClick={close} title="关闭">✕</button>
+            <button className="btn-ghost shrink-0 text-fg3" onClick={close} title="关闭">✕</button>
           </div>
 
           {/* 会员专属「AI 云端复审」特权卡：整宽铺在用户行与积分行之间，不再挤在邮箱下面当一小坨灰字。
@@ -160,22 +213,9 @@ export default function MemberCenterDialog(): JSX.Element | null {
             <div className="mt-1 text-[12px] leading-relaxed text-fg2">
               本地拿不准的，云端大模型再看一遍：只给建议，采纳才生效、可撤回。
             </div>
-            <div className="mt-2.5 space-y-1 border-t border-line/70 pt-2.5">
-              {[
-                ['复核范围', '仅「待确认」「瑕疵片」两栏'],
-                ['复核项目', '人数归属、闭眼、半截头、表情崩坏'],
-                ['不复核', '模糊、曝光、黑白（本地引擎判得更准）'],
-                ['费用额度', dailyLimit > 0 ? `云端费平台承担、不扣积分；每天可复审 ${dailyLimit} 张，次日恢复` : '云端费由平台承担、不扣积分；每天有上限，次日恢复']
-              ].map(([k, v]) => (
-                <div key={k} className="flex gap-3 text-[12px] leading-5">
-                  <span className="w-14 shrink-0 text-[10px] leading-5 text-fg3">{k}</span>
-                  <span className="min-w-0 flex-1 text-fg2">{v}</span>
-                </div>
-              ))}
-            </div>
-            {/* 非会员多给一句“他自己的数字”；库里还没这两栏照片时退回通用引导句 */}
+            {/* 非会员多给一句“他自己的数字”；库里还没这两栏照片时退回通用引导句。这句是促单钩子，留在外面不收进展开区 */}
             {!isMember && (
-              <div className="mt-2 text-[11px] leading-relaxed text-fg2">
+              <div className="mt-1.5 text-[11px] leading-relaxed text-fg2">
                 {reviewPending + flawsPending > 0 ? (
                   <>
                     你的图库现在有 <b className="text-warn tabular-nums">{reviewPending}</b> 张待确认、<b className="text-warn tabular-nums">{flawsPending}</b> 张瑕疵片，开通后当天就能送云端复审。
@@ -187,23 +227,52 @@ export default function MemberCenterDialog(): JSX.Element | null {
                 )}
               </div>
             )}
-            <div className="mt-2 text-[10px] leading-relaxed text-fg3">
-              {isMember
-                ? '开关在顶栏「AI 复审」，跑动时两页顶部有进度条；完整说明见侧栏「教程中心」→「AI 复审」。'
-                : '完整说明见侧栏「教程中心」→「AI 复审」。'}
-            </div>
+            {/* 权益明细（四行规格表 + 完整说明指引）默认收起，点一下展开/收起；用小字链接不用按钮框（用户审美红线） */}
+            <button
+              className="mt-1.5 cursor-pointer text-[11px] text-fg3 transition-colors hover:text-brand"
+              onClick={() => setAiDetailOpen((v) => !v)}
+            >
+              {aiDetailOpen ? '收起全部权益 ▴' : '展开全部权益 ▾'}
+            </button>
+            {aiDetailOpen && (
+              <>
+                <div className="mt-2 space-y-1 border-t border-line/70 pt-2.5">
+                  {[
+                    ['复核范围', '仅「待确认」「瑕疵片」两栏'],
+                    ['复核项目', '人数归属、闭眼、半截头、表情崩坏'],
+                    ['不复核', '模糊、曝光、黑白（本地引擎判得更准）'],
+                    ['费用额度', dailyLimit > 0 ? `云端费平台承担、不扣积分；每天可复审 ${dailyLimit} 张，次日恢复` : '云端费由平台承担、不扣积分；每天有上限，次日恢复']
+                  ].map(([k, v]) => (
+                    <div key={k} className="flex gap-3 text-[12px] leading-5">
+                      <span className="w-14 shrink-0 text-[10px] leading-5 text-fg3">{k}</span>
+                      <span className="min-w-0 flex-1 text-fg2">{v}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-2 text-[10px] leading-relaxed text-fg3">
+                  {isMember
+                    ? '开关在顶栏「AI 复审」，跑动时两页顶部有进度条；完整说明见侧栏「教程中心」→「AI 复审」。'
+                    : '完整说明见侧栏「教程中心」→「AI 复审」。'}
+                </div>
+              </>
+            )}
           </div>
 
           {auth.loggedIn && (
+            <>
+            {/* 两个积分数字：会员期间不扣积分，数字不抹不置零，只划横线 + 改浅（冻结），右边一句说清为什么。
+                非会员一切照旧（品牌色实底数字，不划横线）。 */}
             <div className="mt-4 flex items-center gap-6">
               <div>
-                <div className="text-2xl font-bold text-brand tabular-nums">{balance}</div>
+                <div className={isMember ? 'text-2xl font-bold text-fg3 line-through tabular-nums' : 'text-2xl font-bold text-brand tabular-nums'} title={isMember ? '会员期间筛选不扣积分，余额保持不动；到期后接着从这里扣' : undefined}>
+                  {balance}
+                </div>
                 <div className="text-xs text-fg2">当前积分</div>
               </div>
               <div>
                 <div
-                  className="text-2xl font-bold text-fg tabular-nums cursor-pointer hover:text-brand transition-colors"
-                  title="点击查看消费记录"
+                  className={(isMember ? 'text-2xl font-bold text-fg3 line-through tabular-nums' : 'text-2xl font-bold text-fg tabular-nums') + ' cursor-pointer hover:text-brand transition-colors'}
+                  title={isMember ? '会员期间不计消耗，到期后恢复累计；点击仍可查看历史消费记录' : '点击查看消费记录'}
                   onClick={() => void openHistory()}
                 >
                   {user?.points.total_consumed ?? 0}
@@ -216,19 +285,53 @@ export default function MemberCenterDialog(): JSX.Element | null {
                 </div>
               </div>
               <div className="flex-1" />
-              <div className="flex gap-2">
-                {!auth.loggedIn && (
-                  <button className="btn-primary" onClick={() => { close(); openLogin() }}>登录</button>
-                )}
-                <button className="btn text-fg2" onClick={() => void doLogout()}>退出登录</button>
-              </div>
+              {isMember && (
+                // 只解释“这两条横线是什么意思”，不重复下面那句“会员不扣积分”的规矩（同一信息只留一处）；
+                // 层级靠排版：小字靠右、不给边框色块（数字上的横线已是标记）
+                <div className="shrink-0 text-right text-[11px] leading-relaxed text-warn">
+                  会员期间不扣积分
+                  <div className="text-fg3">会员到期后即恢复积分制</div>
+                </div>
+              )}
             </div>
+
+            {/* 兑换码：单独一张卡（用户 2026-10-15 定：原来挤在积分行下面不明显）；不弹窗直接兑，
+                成功绿字/失败红字各一句（对齐消费记录正负色）。层级靠排版：标题粗 fg，副标小字 fg2 */}
+            <div className="mt-4 rounded-xl border border-line bg-panel2/40 p-4">
+              <div className="text-sm font-bold text-fg">兑换码</div>
+              <div className="mt-0.5 text-xs text-fg2">会员码延长会员有效期，积分码加积分，兑换成功即可生效</div>
+              <div className="mt-3 flex gap-2">
+                <input
+                  className="input flex-1 py-2 text-sm"
+                  placeholder="粘贴 16 位兑换码，不区分大小写"
+                  value={redeemCode}
+                  maxLength={32}
+                  onChange={(e) => { setRedeemCode(e.target.value); setRedeemMsg(null) }}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && !redeeming) void onRedeem() }}
+                />
+                <button
+                  className="btn-primary text-sm px-6 whitespace-nowrap"
+                  disabled={redeeming || !redeemCode.trim()}
+                  onClick={() => void onRedeem()}
+                >
+                  {redeeming ? '兑换中…' : '兑换'}
+                </button>
+              </div>
+              {redeemMsg && (
+                <div className={'mt-2 text-xs leading-relaxed ' + (redeemMsg.ok ? 'text-good' : 'text-bad')}>
+                  {redeemMsg.text}
+                </div>
+              )}
+            </div>
+            </>
           )}
         </div>
 
-        {/* 积分说明 */}
+        {/* 积分说明：会员时“到期后恢复积分制”已由积分行右边那句说了，这里不再重复一遍，只留计费单位与赠分规则 */}
         <div className="px-5 py-3 text-xs text-fg2 bg-panel2/50 border-b border-line">
-          1 张照片消耗 <b className="text-fg">1 积分</b>；开通会员后筛选<b className="text-fg">不扣积分</b>，且新会员赠送积分。
+          {isMember
+            ? <>1 张照片消耗 <b className="text-fg">1 积分</b>；新会员赠送积分，赠送部分不会因为开通会员而少。</>
+            : <>1 张照片消耗 <b className="text-fg">1 积分</b>；开通会员后筛选<b className="text-fg">不扣积分</b>，且新会员赠送积分。</>}
         </div>
 
         {/* 未登录：不给看套餐（用户 2026-10-15 定），但得给两条路：注册拿免费积分，或直接扫码问客服 */}
@@ -272,21 +375,14 @@ export default function MemberCenterDialog(): JSX.Element | null {
                     {plan.points_gift > 0 && (
                       <div className="text-xs text-warn mt-0.5">赠 {plan.points_gift} 积分</div>
                     )}
-                    <ul className="mt-2 space-y-0.5 text-[11px] text-fg2 min-h-[3.2em]">
-                      {/* AI 复审特权（本版本主推卖点）：会员全档位固定包含，置顶品牌色高亮表达"会员专属、开通解锁"；
-                          后端 features 若也配了同义项则跳过，避免同一特权出现两次 */}
-                      {!plan.features.some((f) => f.includes('复审')) && (
-                        <li
-                          className="text-brand font-medium"
-                          title="会员专属特权：筛完后自动用云端 AI 复核「待确认」照片，只给建议、点采纳才生效"
-                        >
-                          🔓 解锁 AI 复审（会员专属）
-                        </li>
-                      )}
-                      {plan.features.slice(0, 3).map((f, i) => (
-                        <li key={i}>· {f}</li>
-                      ))}
-                    </ul>
+                    {/* 套餐卡只留一句 AI 复审权益（用户 2026-10-15 定：详细介绍全砍，权益讲清楚是上方特权卡的事，
+                        卡片别再重复一遍——同一信息只留一处） */}
+                    <div
+                      className="mt-2 min-h-[1.25em] text-xs font-medium text-brand"
+                      title="会员专属特权：筛完后自动用云端 AI 复核「待确认」照片，只给建议、点采纳才生效"
+                    >
+                      🔓 解锁 AI 复审（会员专属）
+                    </div>
                     <button className="btn-primary w-full mt-2 text-xs py-1" onClick={() => buy(plan)} title="扫码加客服，报这一档名字付款（本软件不在应用内直接收款）">
                       开通
                     </button>

@@ -7,6 +7,7 @@ import { create } from 'zustand'
 import type { AppSettings, CategoryKey, ImageRecord, DimensionKey, PerfHint, TierKey, AiReviewSuggestion, AiReviewScope } from '../../shared/types'
 import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, CAT_FLAWS, QC_MANUAL_DIMENSIONS, DIMENSION_LABELS, isBadDim, isStructuralDim, isTrashLike, NEUTRAL_DIMENSIONS, PERSON_DIMS, guessMidDim, flawLevel, isDupRedundant, SUPPORTED_EXTS, tierOfCat, DEFAULT_TIER_NAMES } from '../../shared/types'
 import type { AiReviewProgress, AuthState, BootstrapInfo, ConsumeResult, MoveRequest, PlanInfo, UpdateInfo } from '../../shared/ipc'
+import { isVip } from '../../shared/membership'
 import type { ScanProgress } from '../../main/services/scanner'
 import type { ExportProgress } from '../../main/services/exporter'
 
@@ -513,6 +514,9 @@ let updateChecked = false
  */
 let stalePollTimer: ReturnType<typeof setTimeout> | null = null
 let stalePollTries = 0
+// IPC 事件监听器的退订清单（见 bindEvents 尾部）：模块级，重跑 bindEvents 前逐个退订，
+// 保证任何重复初始化（HMR / 未来可能的重连场景）都只留一套监听器
+let unsubEvents: Array<() => void> = []
 function startStalePoll(): void {
   if (stalePollTimer || stalePollTries >= 20) return
   stalePollTimer = setTimeout(() => {
@@ -847,104 +851,139 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   bindEvents() {
+    // 重复调用先退订旧的：每个 onXxx 都返回退订函数，这里收集成清单，重绑前统一清。
+    // 开发期 HMR 让模块重新执行会再次 init + bindEvents，旧监听器还挂在同一个
+    // ipcRenderer 上（18:52 实测刷出 MaxListenersExceededWarning：scan-progress 挂了 11 个），
+    // 后果是每份旧闭包都在重复对账，误报事件还会被处理多遍。正式包里 init 只跑一次，
+    // 这里的守卫不改变其行为，只是保证“bindEvents 跑两次也只剩一套监听器”。
+    unsubEvents.forEach((f) => f())
+    unsubEvents = []
     // 筛选结束事件也会被标签/移动等操作的收尾 send 重复触发：若每个事件都立刻重拉全量列表，
     // 一次点标签就是两三千行 JSON 重解析（用户看到的“反应本该很快却很慢”）。防抖合并成一次。
     let settleTimer: ReturnType<typeof setTimeout> | null = null
-    window.api.onScanProgress((p) => {
-      set({ scanProgress: p })
-      if (!p.running && (p.phase === 'done' || p.phase === 'stopped')) {
-        if (settleTimer) clearTimeout(settleTimer)
-        settleTimer = setTimeout(() => {
-          settleTimer = null
-          void get().refreshCounts()
-          void get().refreshImages()
-          // 一轮扫描结束：重扫的图已盖上当前签名，刷新横幅计数（归零则自动收起）
-          void get().refreshStale()
-          // 筛完自动触发 AI 复审（会员专属·后台不劫持界面）：开关/授权/会员齐备且未在为跑时
-          // 才起；待确认是否真的有照片由主进程服务自己判（空则 reason:'empty' 不跑）。
-          const { auth, settings, aiReview } = get()
-          const isMember = auth.user && auth.user.membership.level !== 'free' && !auth.user.membership.is_expired
-          if (isMember && settings.aiReviewEnabled && settings.aiReviewConsent && !aiReview?.running) {
-            void get().startAiReview()
-          }
-        }, 260)
-      }
-    })
-    window.api.onScanImage((img) => {
-      const { activeCategory, images } = get()
-      const next = [...images]
-      const idx = next.findIndex((i) => i.id === img.id)
-      if (idx >= 0) next[idx] = img
-      else if (activeCategory == null || img.category === activeCategory) next.push(img)
-      set({ images: next })
-      // 节流刷新计数
-      void get().refreshCounts()
-    })
-    window.api.onImportProgress((p) => set({ importProgress: p }))
-    window.api.onThumbsProgress((p) => set({ thumbsProgress: p }))
+    // “筛完自动跳待确认”只认真正跑完一轮：主进程在移动/加删标签/判定这些 IPC 的收尾也会重发
+    // 同一份进度快照（phase:'done'、done=上一轮遗留的张数、running 恒 false），渲染层无从分辨。
+    // 用户实测（10-15）：在瑕疵片逐张复核点「采纳这张」，采纳走的就是删标/补标/移动通道，260ms 后
+    // 被这个误报弹到待确认页。所以加了这一道闸：只有亲眼看到本轮 running 从 true 翻成终态才允许跳，
+    // 静态快照重发多少次都不算数（get().scanProgress 在收到事件的第一步就被覆盖，必须在此之前取旧值）。
+    let sawRoundRunning = false
+    unsubEvents.push(
+      window.api.onScanProgress((p) => {
+        const wasRunning = get().scanProgress?.running === true
+        if (p.running) sawRoundRunning = true
+        set({ scanProgress: p })
+        if (!p.running && (p.phase === 'done' || p.phase === 'stopped')) {
+          if (settleTimer) clearTimeout(settleTimer)
+          settleTimer = setTimeout(() => {
+            settleTimer = null
+            const realRoundEnd = sawRoundRunning && wasRunning
+            sawRoundRunning = false
+            void (async () => {
+              await get().refreshCounts()
+              // 筛完自动落到「待确认」（用户 2026-10-15 定）：这一栏有图就直接打开它，让人一眼看到还欠多少张要拍板；
+              // 一栏空了就不跳（没东西要人工定），回「交付库」看筛片产出，不给人开白屏。
+              // 只在真的处理过图时跳（p.done > 0）：空跑一轮就把用户界面弹走，是劫持不是引导。
+              // 误报的标签/移动收尾（realRoundEnd=false）只静默对账列表与计数，绝不替用户切页（用户 10-15 拍板）。
+              // 另外只在用户已经离开本轮筛选那一栏时才跳：人就在待确认里点「停止筛选」，
+              // 原位刷新就行，把他弹去交付库同样是劫持（上一版只认 target≠当前页，会误弹）。
+              if (realRoundEnd && p.done > 0) {
+                const target: CategoryKey = (get().counts[CAT_REVIEW] ?? 0) > 0 ? CAT_REVIEW : CAT_LIBRARY
+                if (get().activeCategory === target) await get().refreshImages()
+                else await get().openCategory(target)
+              } else {
+                void get().refreshImages()
+              }
+              // 一轮筛选结束：重扫的图已盖上当前签名，刷新横幅计数（归零则自动收起）
+              void get().refreshStale()
+              // 筛完自动触发 AI 复审（会员专属·后台不劫持界面）：开关/授权/会员齐备且未在为跑时
+              // 才起；待确认是否真的有照片由主进程服务自己判（空则 reason:'empty' 不跑）。
+              const { auth, settings, aiReview } = get()
+              const isMember = isVip(auth.user)
+              if (isMember && settings.aiReviewEnabled && settings.aiReviewConsent && !aiReview?.running) {
+                void get().startAiReview()
+              }
+            })()
+          }, 260)
+        }
+      }),
+      window.api.onScanImage((img) => {
+        const { activeCategory, images } = get()
+        const next = [...images]
+        const idx = next.findIndex((i) => i.id === img.id)
+        if (idx >= 0) next[idx] = img
+        else if (activeCategory == null || img.category === activeCategory) next.push(img)
+        set({ images: next })
+        // 节流刷新计数
+        void get().refreshCounts()
+      }),
+      window.api.onImportProgress((p) => set({ importProgress: p })),
+      window.api.onThumbsProgress((p) => set({ thumbsProgress: p }))
+    )
     // 后台缩略图逐批就绪：节流刷新当前视图
     let thumbTimer: ReturnType<typeof setTimeout> | null = null
-    window.api.onThumbsReady(() => {
-      if (thumbTimer) return
-      thumbTimer = setTimeout(() => {
-        thumbTimer = null
-        void get().refreshImages()
-        void get().refreshCounts()
-      }, 900)
-    })
     // 登录态 / 积分变化（含筛选后自动扣费的不足提醒）
-    window.api.onAuthChanged((state: AuthState, consume?: ConsumeResult) => {
-      set({ auth: state })
-      if (consume && consume.insufficient) {
-        set({
-          showMember: true,
-          toast: { msg: `积分不足：本次需 ${consume.required ?? '?'} 分，当前 ${consume.balance ?? 0} 分，请充值或开通会员`, kind: 'error' }
-        })
-      } else if (consume && consume.ok && consume.consumed > 0) {
-        set({ toast: { msg: `本次消耗 ${consume.consumed} 积分，剩余 ${consume.remaining ?? 0}`, kind: 'info' } })
-      }
-      // 复审跑中途登出/会员失效：真闸门在后端会 403 停，客户端也主动叫停（已完成建议保留）
-      const wasRunning = get().aiReview?.running
-      const nowMember = state.loggedIn && state.user && state.user.membership.level !== 'free' && !state.user.membership.is_expired
-      if (wasRunning && !nowMember) {
-        void get().stopAiReview()
-        set({ toast: { msg: '登录/会员状态变化，已停止 AI 复审（已完成建议保留）', kind: 'info' } })
-      }
-    })
-    window.api.onExportProgress((p) => {
-      set({ exportProgress: p })
-      if (!p.running && p.finished) {
-        set({
-          toast: {
-            msg: `成功导出 ${p.finished.success} 张，跳过 ${p.finished.skipped} 张${p.finished.failed ? `，失败 ${p.finished.failed} 张` : ''} → ${p.finished.target}`,
-            kind: 'success'
-          }
-        })
-      }
-    })
-    // AI 复审后台任务进度回填（全局事件，与用户当前在哪个页无关）：顶部小字/待确认独占弹窗都读它
-    window.api.onAiReviewProgress(async (p) => {
-      const prev = get().aiReview
-      // 新一轮完成（phase done）：重置小结收起标记，让用户下次进待确认页重新看到小结
-      const wasDone = prev?.phase === 'done'
-      set({ aiReview: p, aiReviewSummaryDismissed: p.phase === 'done' && !wasDone ? false : get().aiReviewSummaryDismissed })
-      // 从"在跑"转为终态：断网/错误给错字 toast，额度尽给提示（小结/对比不弹因无可用建议）
-      if (prev?.running && !p.running) {
-        if (p.phase === 'error' && p.message) set({ toast: { msg: p.message, kind: 'error' } })
-        else if (p.phase === 'stopped' && p.quotaExceeded) set({ toast: { msg: '今日云端复核额度已用完，本轮已自动中止', kind: 'info' } })
-        // 额度是后端记的账：本轮到底烧了多少张，只有重拉 /me 返回的 ai_review.remaining 才准。
-        // 不刷就会出现“复审跑完了，会员中心今日剩余还是老数字”，看着就像没扣次数（用户 10-15 拍到）。
-        // 只在终态分支发这一次请求，不在每张进度里刷。
-        void get().refreshAuth()
-        // 关键：AI 建议是主进程写进库的，内存 images 还带着旧的"无 ai_review"→不刷新则 diffs 恒空、采纳面板不弹。
-        // 收尾期间亮"整理结果"遮罩（不可关），刷完 images 再收起→面板随即弹出。
-        if (p.phase === 'done' || p.phase === 'stopped') {
-          set({ aiReviewSettling: true })
-          await get().refreshImages()
-          set({ aiReviewSettling: false })
+    unsubEvents.push(
+      window.api.onThumbsReady(() => {
+        if (thumbTimer) return
+        thumbTimer = setTimeout(() => {
+          thumbTimer = null
+          void get().refreshImages()
+          void get().refreshCounts()
+        }, 900)
+      }),
+      window.api.onAuthChanged((state: AuthState, consume?: ConsumeResult) => {
+        set({ auth: state })
+        if (consume && consume.insufficient) {
+          set({
+            showMember: true,
+            toast: { msg: `积分不足：本次需 ${consume.required ?? '?'} 分，当前 ${consume.balance ?? 0} 分，请充值或开通会员`, kind: 'error' }
+          })
+        } else if (consume && consume.ok && consume.consumed > 0) {
+          set({ toast: { msg: `本次消耗 ${consume.consumed} 积分，剩余 ${consume.remaining ?? 0}`, kind: 'info' } })
         }
-      }
-    })
+        // 复审跑中途登出/会员失效：真闸门在后端会 403 停，客户端也主动叫停（已完成建议保留）
+        const wasRunning = get().aiReview?.running
+        const nowMember = state.loggedIn && isVip(state.user)
+        if (wasRunning && !nowMember) {
+          void get().stopAiReview()
+          set({ toast: { msg: '登录/会员状态变化，已停止 AI 复审（已完成建议保留）', kind: 'info' } })
+        }
+      }),
+      window.api.onExportProgress((p) => {
+        set({ exportProgress: p })
+        if (!p.running && p.finished) {
+          set({
+            toast: {
+              msg: `成功导出 ${p.finished.success} 张，跳过 ${p.finished.skipped} 张${p.finished.failed ? `，失败 ${p.finished.failed} 张` : ''} → ${p.finished.target}`,
+              kind: 'success'
+            }
+          })
+        }
+      }),
+      // AI 复审后台任务进度回填（全局事件，与用户当前在哪个页无关）：顶部小字/待确认独占弹窗都读它
+      window.api.onAiReviewProgress(async (p) => {
+        const prev = get().aiReview
+        // 新一轮完成（phase done）：重置小结收起标记，让用户下次进待确认页重新看到小结
+        const wasDone = prev?.phase === 'done'
+        set({ aiReview: p, aiReviewSummaryDismissed: p.phase === 'done' && !wasDone ? false : get().aiReviewSummaryDismissed })
+        // 从"在跑"转为终态：断网/错误给错字 toast，额度尽给提示（小结/对比不弹因无可用建议）
+        if (prev?.running && !p.running) {
+          if (p.phase === 'error' && p.message) set({ toast: { msg: p.message, kind: 'error' } })
+          else if (p.phase === 'stopped' && p.quotaExceeded) set({ toast: { msg: '今日云端复核额度已用完，本轮已自动中止', kind: 'info' } })
+          // 额度是后端记的账：本轮到底烧了多少张，只有重拉 /me 返回的 ai_review.remaining 才准。
+          // 不刷就会出现“复审跑完了，会员中心今日剩余还是老数字”，看着就像没扣次数（用户 10-15 拍到）。
+          // 只在终态分支发这一次请求，不在每张进度里刷。
+          void get().refreshAuth()
+          // 关键：AI 建议是主进程写进库的，内存 images 还带着旧的"无 ai_review"→不刷新则 diffs 恒空、采纳面板不弹。
+          // 收尾期间亮"整理结果"遮罩（不可关），刷完 images 再收起→面板随即弹出。
+          if (p.phase === 'done' || p.phase === 'stopped') {
+            set({ aiReviewSettling: true })
+            await get().refreshImages()
+            set({ aiReviewSettling: false })
+          }
+        }
+      })
+    )
   },
 
   async openCategory(cat) {
@@ -1379,7 +1418,7 @@ export const useStore = create<StoreState>((set, get) => ({
       set({ showLogin: true, toast: { msg: '请先登录后再开始筛选', kind: 'info' } })
       return
     }
-    const isMember = auth.user && auth.user.membership.level !== 'free' && !auth.user.membership.is_expired
+    const isMember = isVip(auth.user)
     if (!isMember && (auth.user?.points.balance ?? 0) <= 0) {
       set({ showMember: true, toast: { msg: '积分不足，请充值或开通会员后再筛选', kind: 'error' } })
       return
@@ -1406,7 +1445,7 @@ export const useStore = create<StoreState>((set, get) => ({
       set({ showLogin: true, toast: { msg: '请先登录后再使用 AI 复审', kind: 'info' } })
       return
     }
-    const isMember = auth.user && auth.user.membership.level !== 'free' && !auth.user.membership.is_expired
+    const isMember = isVip(auth.user)
     if (!isMember) {
       set({ showMember: true, toast: { msg: 'AI 复审为会员专属功能', kind: 'info' } })
       return

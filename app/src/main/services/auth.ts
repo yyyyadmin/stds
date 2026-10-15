@@ -7,6 +7,7 @@
 import { app } from 'electron'
 import { join } from 'path'
 import { readFileSync, writeFileSync, existsSync } from 'fs'
+import { isVip } from '../../shared/membership'
 import type {
   AuthState,
   AuthUser,
@@ -14,6 +15,7 @@ import type {
   MembershipInfo,
   MembershipLevel,
   PlanInfo,
+  RedeemResult,
   SysConfig,
   PointsHistoryItem,
   PointsHistoryResult,
@@ -21,15 +23,19 @@ import type {
 } from '../../shared/ipc'
 
 const API_BASE = 'https://st.uxuuu.cn/api/client'
-const LEVELS: MembershipLevel[] = ['free', 'monthly', 'quarterly', 'yearly']
 
 function authFile(): string {
   return join(app.getPath('userData'), 'auth.json')
 }
 
+/**
+ * 等级代号只做“空值兜底”，绝不按写死名单收口。
+ * 后台可自建动态套餐（custom3d 这类），一旦被判成不认识的代号归为 free，
+ * 体验卡用户就会被误当成普通会员（2026-10-15 真实账号实测抓到）。
+ * 是不是会员一律走 isVip()（后端 is_vip 优先，见 shared/membership.ts）。
+ */
 function normLevel(v: unknown): MembershipLevel {
-  const s = String(v || 'free')
-  return (LEVELS.includes(s as MembershipLevel) ? s : 'free') as MembershipLevel
+  return String(v || 'free')
 }
 
 /** 归一化 login.user 与 user_info 两种结构 */
@@ -39,6 +45,8 @@ function toUser(raw: Record<string, unknown>): AuthUser {
       ? (raw.membership as MembershipInfo)
       : {
           level: normLevel(raw.membership_level),
+          // 身份名（如「年卡会员」）：嵌套走 membership.name，老接口扁平字段叫 membership_name
+          name: ((raw.membership as MembershipInfo | null)?.name ?? raw.membership_name as string | undefined) || null,
           expire_at: (raw.membership_expire_at as string) || null,
           is_expired: false
         }
@@ -112,7 +120,7 @@ class AuthManager {
   }
 
   isMember(): boolean {
-    return !!this.user && this.user.membership.level !== 'free' && !this.user.membership.is_expired
+    return isVip(this.user)
   }
 
   private persist(): void {
@@ -358,6 +366,38 @@ class AuthManager {
       }
     }
     return { ok: false, message: r.message || '获取消费记录失败', ...empty }
+  }
+
+  /**
+   * 兑换码（redeem_code.php，后端 2026-10-15 对接单）：会员码 / 积分码同一个接口，
+   * 码的类型由后端定，前端只负责展示。后端对大小写、首尾空格都不敏感，客户端只 trim。
+   * 401（token 失效）时清登录态，让界面自然回到「登录 / 注册」。
+   */
+  async redeemCode(rawCode: string): Promise<{ ok: boolean; message: string; result?: RedeemResult }> {
+    const code = String(rawCode || '').trim()
+    if (!code) return { ok: false, message: '请填写兑换码' }
+    if (!this.token) return { ok: false, message: '登录已失效，请重新登录' }
+    const r = await request<Record<string, unknown>>('redeem_code.php', { code }, this.token)
+    if (r.code === 200) {
+      const d = r.data || {}
+      return {
+        ok: true,
+        message: r.message || '兑换成功',
+        result: {
+          type: d.type === 'points' ? 'points' : 'membership',
+          level: (d.level as string) || null,
+          expire_at: (d.expire_at as string) || null,
+          points: Number(d.points) || 0,
+          balance: Number(d.balance) || 0
+        }
+      }
+    }
+    if (r.code === 401) {
+      this.token = null
+      this.user = null
+      this.persist()
+    }
+    return { ok: false, message: r.message || '兑换失败，请稍后再试' }
   }
 
   async checkUpdate(): Promise<UpdateInfo | null> {

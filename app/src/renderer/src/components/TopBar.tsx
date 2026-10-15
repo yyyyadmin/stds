@@ -10,6 +10,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore, filterByQuery } from '../store'
 import type { SortKey } from '../store'
+import { membershipName, isVip } from '../../../shared/membership'
 
 /** 三种主区布局。以前的第四种「大图」与双击小图的放大弹窗功能重叠，已合并到右边那个按钮。
  *  icon 给窄屏（<1760）用：整组只留图标不放文字，能省 80px 左右。用内联 SVG 而不是 ▦☰ 这类字符——
@@ -102,8 +103,9 @@ export default function TopBar(): JSX.Element {
       : ''
   const auth = s.auth
   const user = auth.user
-  const isMember = auth.loggedIn && (user?.membership.level || 'free') !== 'free' && !user?.membership.is_expired
-  const balance = user?.points.balance ?? 0
+  const isMember = auth.loggedIn && isVip(user)
+  // 身份名单一取数口（后端 membership.is_vip / name 优先，见 shared/membership.ts）；积分数字不再上顶栏（用户 10-15 定）
+  const memberLabel = membershipName(user)
   const dark = s.settings.theme === 'dark'
   // 导入菜单：一个入口按钮，弹开后选“图片（可多选）”或“文件夹”
   const [importMenu, setImportMenu] = useState(false)
@@ -608,7 +610,8 @@ export default function TopBar(): JSX.Element {
         </button>
       )}
 
-      {/* 积分 / 会员 / 登录入口 */}
+      {/* 会员身份 / 登录入口（2026-10-15 起：登录后只摆身份名不摆积分数，积分去会员中心看）。
+          名字是后端下发什么就显示什么；普通会员/未登录走灰底，付费身份金色+皇冠 */}
       {auth.loggedIn ? (
         <button
           className={
@@ -618,10 +621,8 @@ export default function TopBar(): JSX.Element {
           title="打开会员中心：查看积分、开通会员"
           onClick={() => useStore.setState({ showMember: true })}
         >
-          {isMember && <span className="text-lg leading-none">👑</span>}
-          <span className="tabular-nums">{balance}</span>
-          {/* 「积分」两字只在宽屏留：窄屏靠鼠标提示说明这是什么数 */}
-          <span className="opacity-70 text-sm hidden 3xl:inline">积分</span>
+          {memberLabel.paid && <span className="text-lg leading-none">👑</span>}
+          <span className="whitespace-nowrap">{memberLabel.text}</span>
         </button>
       ) : (
         <button className="btn-primary shrink-0 text-sm py-1.5" onClick={() => useStore.setState({ showLogin: true })}>

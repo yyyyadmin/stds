@@ -28,6 +28,7 @@
 import { useState } from 'react'
 import { useStore, hasAiReviewDiff, hasAiReviewAction, aiReviewShouldHome, needsManualReview } from '../store'
 import { isTrashLike } from '../../../shared/types'
+import { isVip } from '../../../shared/membership'
 import type { AiReviewScope } from '../../../shared/types'
 
 export default function AiReviewBar(): JSX.Element | null {
@@ -45,7 +46,7 @@ export default function AiReviewBar(): JSX.Element | null {
   if (activeCategory !== 'review' && activeCategory !== 'flaws') return null
   // 非会员不占页面：复审是会员专属，给非会员挂一条复审栏只会“看得到按不了”。
   // 结论弹窗（AiReviewModal）不受此限：会员期间跑出的结论仍需他确认，入口不能断。
-  const isMember = auth.loggedIn && (auth.user?.membership.level || 'free') !== 'free' && !auth.user?.membership.is_expired
+  const isMember = auth.loggedIn && isVip(auth.user)
   if (!isMember) return null
   const scope: AiReviewScope = activeCategory
   const running = !!aiReview?.running && (aiReview?.scope ?? 'review') === scope

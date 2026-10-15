@@ -300,6 +300,10 @@ class AiReview extends EventEmitter {
         body: JSON.stringify({
           model: key.model,
           temperature: 0,
+          // 强制闸门：联网搜索一律关死（用户 10-15 定）。判定只看图本身，联网只会更慢更贵；
+          // DashScope 默认不开，但默认值是平台说了算——换模型/平台改默认后这里兜底。
+          // 千问系不认识这个参数的模型会忽略它、不报错，所以未来换任何 qwen VL 模型都不用动。
+          enable_search: false,
           messages: [
             { role: 'system', content: system },
             {

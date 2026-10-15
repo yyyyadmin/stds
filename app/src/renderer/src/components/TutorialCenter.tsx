@@ -1,14 +1,14 @@
 /**
  * 教程中心（侧栏底部「📖 教程中心」按钮打开）
- * 一个弹窗当文档中心用：左边目录页签、右边正文，六个章节——
- * 快速上手 / 侧栏分类怎么看 / 常用操作 / AI 复审 / 积分与会员 / 系统设置。
+ * 一个弹窗当文档中心用：左边目录页签、右边正文，七个章节——
+ * 快速上手 / 侧栏分类怎么看 / 常用操作 / AI 复审 / 积分与会员 / 兑换权益 / 系统设置。
  * 内容口径全部对齐真实界面（TopBar / SettingsDialog / MemberCenterDialog /
  * JudgmentBar / TagEditor / App 快捷键），写错一句就等于误导用户，改功能记得同步这里。
  * 层级只靠排版：大字标题 + 小字浅色说明 + 键帽符号，不套方框徽标（用户审美红线）。
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { useStore } from '../store'
+import type { SysConfig } from '../../../shared/ipc'
 
 /** 页签定义：顺序即目录顺序，first = 打开时默认停在「快速上手」 */
 const TABS = [
@@ -17,6 +17,7 @@ const TABS = [
   { key: 'ops', icon: '🖱', label: '常用操作' },
   { key: 'areview', icon: '✨', label: 'AI 复审' },
   { key: 'member', icon: '👑', label: '积分与会员' },
+  { key: 'redeem', icon: '🎁', label: '兑换权益' },
   { key: 'settings', icon: '⚙️', label: '系统设置' },
 ] as const
 
@@ -65,14 +66,14 @@ function StartTab(): JSX.Element {
       <H>三步就能出片</H>
       <ol className="ml-4 space-y-2.5 list-decimal text-[13px] text-fg2 leading-relaxed marker:text-fg3">
         <li><b className="text-fg">导入照片</b>：点顶栏「导入照片」，可以选单张、多选，也可以直接选整个文件夹（或把照片拖进窗口）。支持 JPG、CR2、CR3、ARW、NEF 等常见格式。</li>
-        <li><b className="text-fg">开始筛选</b>：点顶栏「开始筛选」，AI 自动逐张分析——有没有闭眼、模糊、曝光异常这些毛病，画面里有几个人，并给出清晰度评分。跑完后左侧栏就能看到分类结果。</li>
+        <li><b className="text-fg">开始筛选</b>：点顶栏「开始筛选」，AI 自动逐张分析——有没有闭眼、模糊、曝光异常这些毛病，画面里有几个人，并给出清晰度评分。跑完会<b className="text-fg">自动打开「待确认」</b>，那一栏就是等你拍板的；它空着的话就直接落在「交付库」。左侧栏随时能切到别的分类。</li>
         <li><b className="text-fg">导出交付</b>：人工确认没问题后点顶栏「导出交付」，选择导出范围和目录结构，把成品图打包到指定位置。默认导出原文件（包括 RAW），不压缩、不转格式。</li>
       </ol>
       <Note>只有「开始筛选」这一步消耗积分（1 张 = 1 积分），导入、浏览、手动分类、导出都免费，详见「积分与会员」。</Note>
 
       <H>先登录 / 注册一个账号</H>
       <Ul>
-        <li>没登录时顶栏右边就是一个<b>「登录 / 注册」</b>按钮（登录后它会变成积分数字，点开的才是会员中心）；点那个按钮或第一次点「开始筛选」都会弹出登录框，没账号就在上面切到「注册」，填完自动登录。</li>
+        <li>没登录时顶栏右边就是一个<b>「登录 / 注册」</b>按钮（登录后它会变成<b>会员身份名</b>，如「普通会员」「年卡会员」，点开的才是会员中心）；点那个按钮或第一次点「开始筛选」都会弹出登录框，没账号就在上面切到「注册」，填完自动登录。</li>
         <li>登录有两种：<b>密码</b>，或者<b>验证码</b>——手机号或邮箱填进同一个框，软件按里面有没有 @ 自己判断发到哪边，忘了密码也能进去。</li>
         <li>注册支持手机号或邮箱，收 6 位验证码、自定一个至少 6 位的密码；新账号送 500 积分。</li>
         <li>第一次提交要勾上<b>《用户注册协议》和《隐私政策》</b>，两个书名号可以直接点开在软件里读全文，不用去浏览器找。</li>
@@ -91,8 +92,9 @@ function StartTab(): JSX.Element {
         <li><b>排序</b> — 默认 / 文件名 / 置信度（优先抽查拿不准的）/ 最新在前</li>
         <li><b>视图</b> — 网格 / 列表 / 瀑布流三种布局，旁边「大图」按钮直接打开放大窗口</li>
         <li><b>导出交付</b> — 把选中的分类导出到指定文件夹</li>
-        <li><b>⚙️</b> — 设置；<b>积分数字</b> — 会员中心（没登录时这个位置是「登录 / 注册」按钮）；<b>☀️ / 🌙</b> — 切换简白 / 暗夜主题</li>
+        <li><b>⚙️</b> — 设置；<b>会员身份名</b>（普通会员灰底，付费身份金字带皇冠，如「年卡会员」）— 点开是会员中心，积分余额在里面看（没登录时这个位置是「登录 / 注册」按钮）；<b>☀️ / 🌙</b> — 切换简白 / 暗夜主题</li>
       </Ul>
+      <Note>窗口较窄时，顶栏会把「↩ 撤回」「清空图库」「大图」收进右边的「⋯ 更多」菜单——功能一项不少，只是换了个位置。</Note>
 
       <H>几个顺手的快捷键</H>
       <div className="space-y-1.5 text-[13px] text-fg2">
@@ -221,7 +223,8 @@ function AiReviewTab(): JSX.Element {
 
       <H>会员权益</H>
       <Ul>
-        <li><b>谁能用</b>：会员专属，月度 / 季度 / 年度 / 终身都含。非会员在顶栏看到的是灰锁「AI 复审 🔒」：已登录点它会打开会员中心，没登录时那里没有套餐可看，所以点了直接弹出客服二维码让你问清怎么开通；「待确认」「瑕疵片」两页顶部那条复审栏对非会员也不显示（免得摆一个按不了的入口）。</li>
+        <li><b>谁能用</b>：会员专属，月度 / 季度 / 年度 / 终身都含。非会员在顶栏看到的是灰锁「AI 复审 🔒」：已登录点了打开会员中心，没登录点了直接弹客服二维码问开通。</li>
+        <li><b>入口不摆假的</b>：「待确认」「瑕疵片」两页顶部那条复审栏只对会员显示，不给非会员摆一个按不了的入口。</li>
         <li><b>谁出钱</b>：云端调用费由平台承担，会员用复审不另外扣积分。</li>
         <li><b>每天能跑多少</b>：每个账号每天有复审张数上限，用完自动停、第二天恢复；顶栏开关上实时显示「今日剩 N 张」。</li>
         <li><b>不重复花额度</b>：采纳过、或点过「确认采纳」的照片已经结案，不会再跑一遍；“再次复审”重判的是本栏还没表过态的那批（含既往判过、但你点了「不采纳」想让它重新看的）。</li>
@@ -267,11 +270,12 @@ function MemberTab(): JSX.Element {
         <li>注册即送 <b>500 积分</b>，1 积分 = 1 张照片的 AI 分析，也就是可以免费体验 500 张。</li>
         <li>只有点「开始筛选」才扣积分，按实际处理的张数计；导入、浏览、手动分类、导出全部免费。</li>
         <li>积分用完了可以单独充值，或者开通会员——会员期间筛选<b>不扣积分</b>，新开通还赠积分。</li>
+        <li>手里有<b>兑换码</b>不用找客服：直接在会员中心兑换，两类码怎么兑见左侧<b>「兑换权益」</b>页签。</li>
       </Ul>
 
       <H>会员怎么开通</H>
       <Ul>
-        <li>点顶栏的积分数字，打开<b>会员中心</b>：上面看积分余额、会员等级、到期时间，下面是套餐价目表。</li>
+        <li>点顶栏右上角的<b>会员身份名</b>，打开<b>会员中心</b>：上面看积分余额、会员身份、到期时间，下面是套餐价目表。</li>
         <li>选一个套餐（月度 / 季度 / 年度）点「开通」，弹出的就是<b>客服微信二维码</b>——本软件不在应用内直接收款，扫码加客服、报这一档的名字付款。</li>
         <li>支付成功后回到会员中心点「刷新状态」，积分 / 会员自动到账。</li>
         <li>还没登录时看不到套餐：那一步可以「联系客服开通」直接扫码问，也可以先注册再看价目表。</li>
@@ -284,6 +288,41 @@ function MemberTab(): JSX.Element {
         把「待确认」「瑕疵片」两栏里本地 AI 拿不准的照片送云端再看一遍，只给建议、你点采纳才生效；云端费用平台承担，每天有张数上限。介绍、权益和具体操作都在左侧<b className="text-fg">「AI 复审」</b>页签里。
       </div>
       <Note>非会员用不了：顶栏「AI 复审」是灰锁按钮，已登录点了会打开会员中心，没登录点了直接弹客服二维码；首次开启还会请你确认「照片压缩后上传阿里云做识别」。</Note>
+    </div>
+  )
+}
+
+/**
+ * 兑换权益单独成章（用户 2026-10-15 定：要左侧目录里看得见的独立菜单，不是塞在「积分与会员」正文里）。
+ * 口径全部对着 MemberCenterDialog 的兑换码卡片与 auth.ts redeemCode（redeem_code.php）写的，后端改规则记得同步这里。
+ */
+function RedeemTab(): JSX.Element {
+  return (
+    <div>
+      <H>兑换码是什么</H>
+      <div className="text-[13px] text-fg2 leading-relaxed">
+        一串 <b className="text-fg">16 位字符</b>，分两类：<b className="text-fg">会员码</b>延长会员有效期（月 / 季 / 年 / 终身都有，终身码兑完永久有效），<b className="text-fg">积分码</b>直接加积分。码是什么类型由发放时定，软件里给什么兑什么。
+      </div>
+      <Ul>
+        <li>不区分大小写，粘贴时带上首尾空格也没关系。</li>
+        <li>每个码只能用一次，兑成功的码不会重复到账。</li>
+        <li>兑换码由官方活动或客服发放；软件内不售卖、不生成兑换码。</li>
+      </Ul>
+
+      <H>怎么兑换</H>
+      <ol className="ml-4 space-y-2.5 list-decimal text-[13px] text-fg2 leading-relaxed marker:text-fg3">
+        <li>先登录，点顶栏右上角的<b className="text-fg">会员身份名</b>打开<b className="text-fg">会员中心</b>。</li>
+        <li>在「兑换码」那张卡里粘贴兑换码，点「兑换」（或在输入框里直接按回车）。</li>
+        <li>看到绿色提示即兑换成功：积分码会写到账多少分、当前余额多少；会员码会写会员有效期到哪天。</li>
+      </ol>
+      <Note>兑换成功后顶栏的身份名和积分立即同步，不用重开软件。</Note>
+
+      <H>兑不了会说什么</H>
+      <Ul>
+        <li>码不存在、已被使用、已过期——服务端的原话会直接显示在输入框下面，不会吞掉原因。</li>
+        <li>登录状态失效时会提示重新登录，登录后再兑。</li>
+      </Ul>
+      <Note>兑完想核对：会员中心「积分记录」里能看到积分码的入账流水。</Note>
     </div>
   )
 }
@@ -330,6 +369,7 @@ const CONTENT: Record<TabKey, () => JSX.Element> = {
   ops: OpsTab,
   areview: AiReviewTab,
   member: MemberTab,
+  redeem: RedeemTab,
   settings: SettingsTab,
 }
 
@@ -337,12 +377,23 @@ const CONTENT: Record<TabKey, () => JSX.Element> = {
 
 export default function TutorialCenter({ onClose }: { onClose: () => void }): JSX.Element {
   const [tab, setTab] = useState<TabKey>('start')
+  // 客服二维码：用户 2026-10-15 定——只在教程中心这一处把码直接摆出来，不再点按钮弹窗；
+  // 全站其他入口（会员中心「开通」/顶栏灰锁/未登录引导）仍走 ContactServiceDialog，码的取值口径与它一致。
+  const [cfg, setCfg] = useState<SysConfig | null>(null)
+  const [qrFailed, setQrFailed] = useState(false)
+  useEffect(() => {
+    void window.api
+      .sysConfig()
+      .then(setCfg)
+      .catch(() => setQrFailed(true))
+  }, [])
   const Body = CONTENT[tab]
+  const qr = cfg?.customer_service_qrcode || cfg?.wechat_qrcode || ''
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="flex w-[min(1180px,94vw)] h-[min(84vh,860px)] overflow-hidden rounded-2xl border border-line bg-panel shadow-2xl">
-        {/* 左目录 */}
-        <nav className="w-52 shrink-0 border-r border-line bg-panel2/40 flex flex-col py-4">
+        {/* 左目录：页签多了兑换权益后矮屏幕上会更挤，码又直接摆在底部，整栏允许滚动兑底 */}
+        <nav className="w-52 shrink-0 border-r border-line bg-panel2/40 flex flex-col py-4 overflow-y-auto">
           <div className="px-5 mb-3 text-[16px] font-bold text-fg tracking-wide">教程中心</div>
           {TABS.map((t) => (
             <button
@@ -358,17 +409,19 @@ export default function TutorialCenter({ onClose }: { onClose: () => void }): JS
             </button>
           ))}
           {/* 客服入口钉在目录底部：mt-auto 把剩下的空间全顶到它上面，不随页签多少往上跑。
-              以前这里直接把二维码图片摆出来，现在换成点一下才弹（用户 2026-10-15 定：软件界面不直接展示码）；
-              弹的是全站那一个 ContactServiceDialog，拿不到码 / 刷新状态都由它自己管，教程里不再拉一遍 config.php。 */}
+              用户 2026-10-15 定：教程中心这里恢复直接摆码（只限这一处），拿不到码时给一句实话，不摆假图。 */}
           <div className="mt-auto px-5 pt-4 pb-1">
-            <button
-              className="w-full cursor-pointer rounded-lg border border-line bg-panel2/60 px-3 py-2 text-left text-[12px] text-fg2 transition-colors hover:border-brand/50 hover:text-brand"
-              onClick={() => useStore.getState().openContactQr()}
-              title="微信扫码加客服：开通、充值、问价都找客服"
-            >
-              💬 联系客服（微信扫码）
-            </button>
-            <div className="mt-2.5 text-[11px] leading-relaxed text-fg3">侧栏每一行悬停都有一句话解释；这里看不到的细节都可以问客服。</div>
+            {qr ? (
+              <>
+                <div className="mb-2 text-[12px] font-semibold text-fg2">微信扫码 · 联系客服</div>
+                <img src={qr} alt="客服微信二维码" className="w-full rounded-lg border border-line bg-white p-2 object-contain" draggable={false} />
+              </>
+            ) : (
+              <div className="text-[11px] leading-relaxed text-fg3">
+                {qrFailed ? '连不上服务器，暂时拿不到客服二维码；稍后重开教程中心再试。' : '正在获取客服二维码…'}
+              </div>
+            )}
+            <div className="mt-2.5 text-[11px] leading-relaxed text-fg3">开通、充值、问价都扫码找客服；侧栏每一行悬停也都有一句话解释。</div>
           </div>
         </nav>
         {/* 右正文 */}

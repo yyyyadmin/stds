@@ -9,10 +9,20 @@ import type { ImportProgress } from '../main/services/importer'
 
 // ---------- 账号 / 会员 / 积分（对接 API 接口文档） ----------
 
-export type MembershipLevel = 'free' | 'monthly' | 'quarterly' | 'yearly'
+/**
+ * 会员等级代号。后端 2026-10-15 明确：后台可自建动态套餐，代号是 custom3d 这类自由值，
+ * 所以这里只列常见值作提示，类型上必须接受任意字符串（客户端绝不拿它做枚举映射）。
+ */
+export type MembershipLevel = 'free' | 'monthly' | 'quarterly' | 'yearly' | 'lifetime' | (string & {})
 
 export interface MembershipInfo {
   level: MembershipLevel
+  /** 身份显示名（后端 user_info.php 下发，如「年卡会员」「3天体验卡」）；后端没给时前端按 level 兜底 */
+  name?: string | null
+  /** 后端权威会员判定：非 free 且未过期即 true（含体验卡）。缺省时前端退回按 level 判 */
+  is_vip?: boolean | null
+  /** 剩余天数（向上取整）；永久会员与非会员均为 null */
+  days_left?: number | null
   start_at?: string | null
   expire_at?: string | null
   is_expired?: boolean
@@ -88,6 +98,19 @@ export interface PointsHistoryResult {
   total_pages: number
 }
 
+/** 兑换码结果（redeem_code.php，后端给什么兑什么：会员时长或积分） */
+export interface RedeemResult {
+  type: 'membership' | 'points'
+  /** 会员码才有：套餐代号 monthly/quarterly/yearly/lifetime */
+  level?: string | null
+  /** 会员码才有：顺延后的新到期时间；lifetime 固定 2099-12-31，UI 显示「永久」 */
+  expire_at?: string | null
+  /** 积分码才有：本次到账积分 */
+  points?: number
+  /** 积分码才有：入账后的总余额 */
+  balance?: number
+}
+
 export const CH = {
   // 渲染 -> 主（invoke）
   appBootstrap: 'app:bootstrap',
@@ -144,6 +167,8 @@ export const CH = {
   authLoginCode: 'auth:login-code',
   authLogout: 'auth:logout',
   authMe: 'auth:me',
+  /** 兑换码兑换（redeem_code.php）：会员时长或积分，码的类型由后端定 */
+  authRedeem: 'auth:redeem',
   plansList: 'member:plans',
   orderCreate: 'member:order',
   sysConfig: 'member:config',
@@ -309,6 +334,8 @@ export interface RendererApi {
   sysConfig(): Promise<SysConfig>
   consumePoints(imageCount: number): Promise<ConsumeResult>
   pointsHistory(params: { type?: string; page?: number; page_size?: number }): Promise<PointsHistoryResult>
+  /** 兑换码：成功返回权益详情，失败 message 原样可弹；401 时主进程已清登录态 */
+  redeemCode(code: string): Promise<{ ok: boolean; message: string; result?: RedeemResult }>
   checkUpdate(): Promise<UpdateInfo | null>
   openExternal(url: string): Promise<void>
   libraryClear(): Promise<{ cleared: number }>

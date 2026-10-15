@@ -597,6 +597,7 @@ export function registerIpc(win: BrowserWindow): void {
     (_e, params: { type?: string; page?: number; page_size?: number }) =>
       authManager.pointsHistory(params?.type ?? '', params?.page ?? 1, params?.page_size ?? 10)
   )
+  ipcMain.handle(CH.authRedeem, (_e, code: string) => authManager.redeemCode(String(code ?? '')))
   ipcMain.handle(CH.checkUpdate, () => authManager.checkUpdate())
   ipcMain.handle(CH.openExternal, (_e, url: string) => {
     // 仅允许 http/https，防止任意协议注入

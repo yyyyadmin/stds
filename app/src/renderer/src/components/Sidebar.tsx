@@ -161,6 +161,17 @@ function Group(props: {
 /** 拖拽命中目标（单一真源）：容器裁判算出当前悬停的分类，Row 只对照自己亮不亮 */
 const DropCtx = createContext<CategoryKey | null>(null)
 
+/**
+ * 欠账行的选中态：整行改用同色淡底 + 同色描边 + 同色字，不再回落品牌蓝。
+ * 用户 2026-10-15 指出：选中「待确认」时字变回黑色，等于把刚建立的强调丢了。
+ */
+const TONE_ACTIVE: Record<string, string> = {
+  'text-warn': 'bg-warn/15 text-warn border-warn/40',
+  // 交付库走绿色（用户 2026-10-15 定：跟待确认同一套机制，只换个色）——
+  // 它本来就是“能交出去的产出”，行首图标有图时也是绿的，选中态跟上同一色才不拧巴
+  'text-good': 'bg-good/15 text-good border-good/40'
+}
+
 function Row(props: {
   label: string
   cat: CategoryKey | null
@@ -179,10 +190,14 @@ function Row(props: {
   emphasis?: 'total' | 'status'
   /** 数字背后的量词（如「组」）：侧栏“重复照片”按组数计，不写单位会被当成张数跟旁边几行相加 */
   unit?: string
-  /** 传了就在标签后紧跟一枚绿色小字「导出」，点击直接开导出面板（不触发选中分类） */
+  /** 传了就在标签后紧跟一枚可点的小字「导出」，点击直接开导出面板（不触发选中分类）。
+   *  颜色走品牌蓝而不是绿：交付库整行已是绿色（内容状态），蓝是“这里可以点”的通用信号，两者不抢 */
   onExport?: () => void
   /** 标签文字后、数字前的一块自定义区域（如「待确认」行后的 AI 复审运行态小字）：靠排版内联，不改变行点击语义 */
   after?: ReactNode
+  /** 欠账着色（用户 2026-10-15 定）：传了就在本行有图时一路生效（选中与否都走这个色）。
+   *  只给真正要人去处理的那一栏用（待确认） */
+  tone?: string
 }): JSX.Element {
   const active = useStore((s) => s.activeCategory === props.cat)
   const openCategory = useStore((s) => s.openCategory)
@@ -191,13 +206,18 @@ function Row(props: {
   // 下一帧 dragover 又点亮，快速划动时整栏频闪“不丝滑”；命中判定全部交给容器裁判（见 Sidebar），
   // 这里只订阅“当前目标是不是我”。
   const isDropTarget = props.cat !== null && useContext(DropCtx) === props.cat
+  // 有欠账才着色（count > 0）；清零后自动回落普通色，不然侧栏永远一片红，强调就成了噪声。
+  // 选中时也不丢（用户 2026-10-15 定）：点进「待确认」正是去处理欠账，这时有色比无色更要紧
+  const tone = (props.count ?? 0) > 0 ? props.tone : undefined
+  const labelCls = 'truncate' + (props.emphasis === 'status' ? ' font-semibold ' + (tone || 'text-fg') : '')
+  const activeCls = tone && TONE_ACTIVE[tone] ? TONE_ACTIVE[tone] : 'bg-brand/15 text-brand border-brand/40'
   return (
     <div
       className={
         'group flex items-center gap-2 px-3 py-2 mx-2 rounded-md cursor-pointer ' +
         (props.emphasis === 'total' ? 'text-[15px] font-bold' : 'text-sm') + ' transition-colors ' +
         (active
-          ? 'bg-brand/15 text-brand border border-brand/40' + (props.emphasis === 'total' ? '' : ' font-semibold')
+          ? 'border ' + activeCls + (props.emphasis === 'total' ? '' : ' font-semibold')
           : (props.emphasis === 'total' ? 'text-fg' : 'text-fg2') + ' hover:bg-panel2 border border-transparent') +
         (isDropTarget ? ' ring-1 ring-brand bg-brand/25' : '') +
         // 空分类整行压暗：它点进去是白屏，不配跟有图的行一样扎眼
@@ -220,9 +240,9 @@ function Row(props: {
       {props.icon && <NavIcon name={props.icon} color={props.color} />}
       {props.onExport ? (
         <span className="flex-1 flex items-center min-w-0">
-          <span className={'truncate' + (props.emphasis === 'status' ? ' font-semibold text-fg' : '')}>{props.label}</span>
+          <span className={labelCls}>{props.label}</span>
           <button
-            className="shrink-0 self-start text-[10px] font-medium text-good hover:underline cursor-pointer translate-y-[3px] -ml-0.5"
+            className="shrink-0 self-start text-[10px] font-medium text-brand hover:underline cursor-pointer translate-y-[3px] -ml-0.5"
             onClick={(e) => {
               e.stopPropagation()
               props.onExport?.()
@@ -234,11 +254,11 @@ function Row(props: {
         </span>
       ) : props.after ? (
         <span className="flex-1 flex items-center min-w-0">
-          <span className={'truncate' + (props.emphasis === 'status' ? ' font-semibold text-fg' : '')}>{props.label}</span>
+          <span className={labelCls}>{props.label}</span>
           {props.after}
         </span>
       ) : (
-        <span className={'flex-1 truncate' + (props.emphasis === 'status' ? ' font-semibold text-fg' : '')}>
+        <span className={'flex-1 ' + labelCls}>
           {props.label}
         </span>
       )}
@@ -253,8 +273,8 @@ function Row(props: {
               : props.emphasis === 'total'
                 ? 'text-[15px] tabular-nums font-bold ' + (active ? 'text-brand' : 'text-fg')
                 : props.emphasis === 'status'
-                  ? 'text-[13px] tabular-nums font-bold ' + (active ? 'text-brand' : 'text-fg2')
-                  : 'text-xs tabular-nums ' + (active ? 'text-brand' : 'text-gray-500')
+                  ? 'text-[13px] tabular-nums font-bold ' + (tone || (active ? 'text-brand' : 'text-fg2'))
+                  : 'text-xs tabular-nums ' + (tone || (active ? 'text-brand' : 'text-gray-500'))
           }
         >
           {props.count}
@@ -292,9 +312,9 @@ export default function Sidebar(): JSX.Element {
   // 所以话术讲"清楚/偏软"这种看得见的差别，不再讲"擦边"；测不到清晰度的图一律兜到中间档，
   // 这句话必须写明，否则用户会以为中间档的图都被测过且真的居中。
   const tierTips: Record<TierKey, string> = {
-    1: '实测最清楚的一档，放大精修放心用',
-    2: '清晰度实测居中，正常出片够用；早年放行时没留下清晰度记录的也先归这里',
-    3: '画面偏软，适合当备选凑数，不建议大尺寸放大'
+    1: '清晰度最高，可放大精修',
+    2: '清晰度居中，正常出片可用',
+    3: '画面偏软，仅作备选，不建议放大'
   }
 
   /*
@@ -364,7 +384,7 @@ export default function Sidebar(): JSX.Element {
           if (ids.length) void moveIds(ids, cat)
         }}
       >
-      <Row emphasis="total" label="全部文件" cat={null} count={counts.all} icon="all" tip="所有照片都在这里，只为了看全貌" />
+      <Row emphasis="total" label="全部文件" cat={null} count={counts.all} icon="all" tip="全部照片总览（含各分类）" />
       {/* 筛选结果区域：只靠淡底色与下方 Group 拉开差异，行缩进与 Group 完全一致 */}
       <section className="mt-1 pt-1 pb-1 rounded-lg bg-panel2/25">
       <div className="flex items-center gap-2 px-4 pb-1 pt-1">
@@ -373,33 +393,33 @@ export default function Sidebar(): JSX.Element {
           <span className="text-[15px] font-bold text-fg tracking-widest whitespace-nowrap">筛选结果</span>
           <HelpTip
             title="筛选结果"
-            text={`这里是 AI 筛片的结论汇总，按交付去向分成互不重复的几栏，一张照片只进其中一栏。
+            text={`AI 筛选结论按交付去向分栏，一张照片只进其中一栏。
 
-· 交付库：没瑕疵的好片，默认全部导出（下面再按清晰程度分优质、良好、一般三档）。
-· 瑕疵片：AI 判出缺陷的照片，默认不导出。
-· 待确认：AI 拿不准的，复核后再定，暂不导出。
-· 重复照片：同一瞬间多拍的，这一栏按组算（数字带个“组”字）。每组里 AI 挑了一张最不坏的：能交就直接进交付库，整组都带瑕疵时那张停在待确认等你拍板。
+· 交付库：无缺陷，默认全量导出；下设优质 / 良好 / 一般三档，仅按清晰度排序。
+· 待确认：判定存疑、需人工拍板，暂不导出。
+· 瑕疵片：判出缺陷，默认不导出。
+· 重复照片：连拍冗余，按组统计。
 
-除“重复照片”按组、不能跟旁边的张数相加之外，其余几栏互不重复，相加约等于全部照片，和下方「类型」「瑕疵」会重复计数的分法不一样。`}
+归属冲突时的优先序：废弃库 → 瑕疵片 → 重复照片 → 待确认 → 交付库。交付库、待确认、瑕疵片三栏互不重叠，重复照片按组计，不能与张数相加。`}
           />
         </span>
         <span className="flex-1 border-t border-fg/20"></span>
       </div>
-            <Row emphasis="status" label="交付库" cat={CAT_LIBRARY} count={counts[CAT_LIBRARY]} icon="library" color={lit(counts[CAT_LIBRARY], '#22c55e')} noDrop onExport={counts[CAT_LIBRARY] ? () => void useStore.setState({ showExport: true }) : undefined} tip="没瑕疵的好片，默认全部参与导出；不能直接拖入这一栏，请拖到它下面优质/良好/一般三个档位之一。下面三档只按画面清不清楚排队，谁被拦在交付库外面跟它无关" />
+            <Row emphasis="status" label="交付库" cat={CAT_LIBRARY} count={counts[CAT_LIBRARY]} icon="library" tone="text-good" color={lit(counts[CAT_LIBRARY], '#22c55e')} noDrop onExport={counts[CAT_LIBRARY] ? () => void useStore.setState({ showExport: true }) : undefined} tip="无缺陷照片，默认全量导出；不可直接拖入，请拖至下方档位" />
       {/* 档位三子行：行首「└──」层级连接符 + 外层 ml-2 缩进，跟父行文字拉开一档；
           点开=只看该档，拖入=改档（不移动归属、不清标签） */}
       {([1, 2, 3] as TierKey[]).map((t) => (
         <div key={t} className="ml-2">
-          <Row connector="└──" label={tierNames[t - 1] || String(t)} cat={`tier:${t}`} count={counts[`tier:${t}`]} tip={`${tierTips[t]}；点看只显示这一档，拖入可改档`} />
+          <Row connector="└──" label={tierNames[t - 1] || String(t)} cat={`tier:${t}`} count={counts[`tier:${t}`]} tip={`${tierTips[t]}；点击仅看该档，拖入可改档`} />
         </div>
       ))}
-      <Row emphasis="status" label="待确认" cat={CAT_REVIEW} count={counts[CAT_REVIEW]} icon="review" color={lit(counts[CAT_REVIEW], '#eab308')} after={<AiReviewTag scope="review" />} tip="本地检测中置信（拿不准）及人工搁置的照片，另加“整组重复照片没一张能交”时那张等你拍板的代表帧；云端复核确认后自动归档。不计入导出" />
-      <Row emphasis="status" label="瑕疵片" cat={CAT_FLAWS} count={counts[CAT_FLAWS]} icon="face_ugly" color={lit(counts[CAT_FLAWS], '#ef4444')} noDrop after={<AiReviewTag scope="flaws" />} tip="本地检测判出缺陷（高置信）的照片，默认不导出；经云端复核或人工确认为误判后，删除对应标签即可放行" />
+      <Row emphasis="status" tone="text-warn" label="待确认" cat={CAT_REVIEW} count={counts[CAT_REVIEW]} icon="review" color={lit(counts[CAT_REVIEW], '#eab308')} after={<AiReviewTag scope="review" />} tip="AI 判定存疑、需人工拍板，暂不导出" />
+      <Row emphasis="status" label="瑕疵片" cat={CAT_FLAWS} count={counts[CAT_FLAWS]} icon="face_ugly" color={lit(counts[CAT_FLAWS], '#ef4444')} noDrop after={<AiReviewTag scope="flaws" />} tip="AI 判出缺陷，默认不导出；确认为误判后删除标签即放行" />
       {/* 重复照片（v2.0.67，客户看到的名字从“重复多余”改成“重复照片”）：本身没拍坏、只因同组已经有一张进了交付库而不导出的那批图。
           以前它们混在“瑕疵片”里，用户看到的就是“好片被当坏片”，10-13 投诉的根源。
           数字改成按组数（用户 2026-10-15：“实际 2 组、左边只显 1”）：点进去看到的几张堆叠卡，就是这儿的数字，
           跟旁边按张数的几行不同义，所以带个“组”字、也不能相加。 */}
-      <Row emphasis="status" label="重复照片" cat="duplicate" count={counts[DUP_GROUP_KEY]} unit="组" icon="duplicate" color={lit(counts[DUP_REDUNDANT_KEY], BAD_DOT_COLORS.duplicate)} noDrop tip="按组算的：这一组同一瞬间多拍的重复照片算 1 组（旁边几行按张算，两个数不能相加）。每组里 AI 已经挑了一张最不坏的：它能交就直接进了交付库，整组都带瑕疵时那张会停在待确认等你拍板。想多留一张，点进去那一组里选即可" />
+      <Row emphasis="status" label="重复照片" cat="duplicate" count={counts[DUP_GROUP_KEY]} unit="组" icon="duplicate" color={lit(counts[DUP_REDUNDANT_KEY], BAD_DOT_COLORS.duplicate)} noDrop tip="按组统计，不与张数相加；每组仅保留一张导出" />
       </section>
 
       {/* 人物在前、瑕疵在后（用户 10-13 指定）：先按人/影调找图是高频动线，
@@ -408,16 +428,16 @@ export default function Sidebar(): JSX.Element {
       <Group
         title="类型"
         status="normal"
-        tip="按画面里几个人、是不是黑白再分一遍，只是客观属性，不代表照片好坏"
-        hint={`这里只按照片的客观内容归类，不代表片子拍得好坏。
+        tip="按人数与影调归类，不代表照片好坏"
+        hint={`按照片的客观内容归类，不代表照片好坏，也不影响是否导出。
 
-· 前四栏按画面里有几个人分，一张照片只归进一个。
-· 「黑白照」是另一个角度：一张黑白照片会同时算进它的人数栏和「黑白照」。
+· 单人照 / 多人合拍照 / 多人混合照 / 无人物场景：按画面人数划分，一张照片只归其中一栏。
+· 黑白照：独立维度，一张黑白照片会同时计入它的人数栏与「黑白照」。
 
-因此这几栏的数字相加，会比照片的实际总张数多。`}
+因此各行数字相加会大于照片总张数。`}
       >
         {NEUTRAL_DIMENSIONS.map((d) => (
-          <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} icon={d} color={lit(counts[d], NEUTRAL_DOT_COLOR)} tip={`${DIMENSION_LABELS[d]} · 只按内容分，不影响好坏判定；想单独交某一类时勾这个分类导出即可`}
+          <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} icon={d} color={lit(counts[d], NEUTRAL_DOT_COLOR)} tip={`${DIMENSION_LABELS[d]}：按内容归类，不影响导出`}
           />
         ))}
       </Group>
@@ -425,15 +445,15 @@ export default function Sidebar(): JSX.Element {
       <Group
         title="瑕疵"
         status="bad"
-        tip="按缺陷类型逐个看：带该缺陷的图都在这里（一张图有两种缺陷会出现在两行，各行的数字各数各的）；删掉标签或复核放行就不会再不导出"
-        hint={`这里按 AI 判出的缺陷类型逐个查看，默认都不参与导出。
+        tip="按缺陷类型查看；一图多缺陷会计入多行"
+        hint={`按缺陷类型分别查看，含该类缺陷的照片均在此列出，默认不参与导出。
 
-· 一张照片可能同时有多种缺陷（例如既闭眼、画面又模糊），就会同时出现在对应的几栏里。
+· 一张照片可能同时有多种缺陷（如既闭眼、画面又模糊），会同时计入对应的几行。
 
-因此各行数字相加，会比上面「瑕疵片」的总数多。确认为误判时，删掉该缺陷标签或复核放行即可正常导出。`}
+因此各行数字相加会大于「瑕疵片」总数。确认为误判时，删除该缺陷标签即可恢复导出。`}
       >
         {BAD_DIMENSIONS.map((d) => (
-          <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} icon={d} color={lit(counts[d], BAD_DOT_COLORS[d] ?? '#ef4444')} tip={`${DIMENSION_LABELS[d]}：被判了这类缺陷的图`} />
+          <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} icon={d} color={lit(counts[d], BAD_DOT_COLORS[d] ?? '#ef4444')} tip={`${DIMENSION_LABELS[d]}：含该缺陷的照片`} />
         ))}
       </Group>
 
@@ -441,19 +461,19 @@ export default function Sidebar(): JSX.Element {
       <Group
         title="废片"
         status="never"
-        tip="你亲手丢掉的图都集中在这一栏，永不导出；点进去可按来源逐栏还原或直接选档加入交付库"
-        hint={`这一栏存放你亲手丢进垃圾桶的照片，永不参与导出。
+        tip="手动丢弃的照片，永不导出；可还原或重新入档"
+        hint={`存放手动丢弃的照片，永不参与导出；磁盘上的原文件不会被删除。
 
 · 点进去可按丢弃来源分栏查看。
-· 若丢错了，可随时还原，或直接选好档位重新加入交付库。`}
+· 可随时还原，或选定档位重新加入交付库。`}
       >
-        <Row emphasis="status" label="废弃库" cat={CAT_TRASH} count={counts[CAT_TRASH]} icon="trash" color={lit(counts[CAT_TRASH], '#e11d48')} tip="你亲手丢掉的图，永不导出；点进去可按来源还原或直接入档" />
+        <Row emphasis="status" label="废弃库" cat={CAT_TRASH} count={counts[CAT_TRASH]} icon="trash" color={lit(counts[CAT_TRASH], '#e11d48')} tip="永不导出；点进去可按来源还原或入档" />
       </Group>
 
       <Group
         title="自定义分类"
         status="normal"
-        tip="自己建的相册（如「主桌」「伴娘」），照常导出；删除相册时里面的图回归交付库"
+        tip="自建相册，照常导出；删除相册后照片回归交付库"
         action={
           <button
             className="w-6 h-6 shrink-0 rounded-full bg-brand text-white text-lg leading-none font-bold flex items-center justify-center hover:bg-blue-500 active:scale-90 shadow-[0_1px_5px_rgba(59,130,246,0.55)] transition"
