@@ -26,6 +26,9 @@ import { dimTagColor } from './Sidebar'
  */
 const GRID_MIN = 100
 const GRID_MAX = 610
+/** 网格间距，对应容器 className 的 gap-3（Tailwind 0.75rem = 12px）。改样式必须同步这里：
+ *  GridView 靠它反推「一格真实宽度」，算错就会选错缩略图档，小屏笔记本上格子会发糊。 */
+const GRID_GAP = 12
 
 /**
  * hex 与白/黑混合：p>0 往白靠、p<0 往黑靠，返回 #rrggbb。
@@ -290,12 +293,14 @@ function StatusRibbon({ img }: { img: ImageRecord }): JSX.Element | null {
   if (img.status === 'skip') return <span className="chip bg-gray-700/90 text-gray-300 absolute right-1 top-1">无法解码</span>
   if (img.category === CAT_TRASH || img.category === CAT_DUP_TRASH) return <span className="chip bg-black/70 text-white absolute right-1 top-1">🗑</span>
   // D2：交付状态由"主分类 + 瑕疵等级"派生的三档互斥角标（与侧栏上段、导出口径同一真源）：
-  // 高置信瑕疵 → 瑕疵片；中置信瑕疵 ∪ 手动停泊 → 待确认；无瑕疵 → 交付
+  // 主分类停在待确认 ∪ 中置信瑕疵 → 待确认；高置信瑕疵 → 瑕疵片；无瑕疵 → 交付
   const fl = flawLevel(img.tags)
-  if (fl === 'high')
-    return <span className="chip bg-bad/90 text-white absolute right-1 top-1" title="判出缺陷的图：不进交付库、默认不导出">瑕疵</span>
+  // 停在待确认的先报“待确认”：重复组“整组没一张能交”的代表帧带着高置信瑕疵也被停在这里拍板，
+  // 按旧顺序它会先被 fl==='high' 兜成“瑕疵”，与它在侧栏/视图里的实际归属不一致
   if (img.category === CAT_REVIEW || fl === 'mid')
     return <span className="chip bg-warn text-white absolute right-1 top-1">待确认</span>
+  if (fl === 'high')
+    return <span className="chip bg-bad/90 text-white absolute right-1 top-1" title="判出缺陷的图：不进交付库、默认不导出">瑕疵</span>
   // 重复照片（v2.0.67，旧名“重复多余”）：本身没拍坏，只是同组已经挑了一张更好的进库。它不是瑕疵，必须单独一枚角标，
   // 否则这张图在网格上看起来与交付库里的图一模一样（用户分不清哪张会被导出去）。
   if (isDupRedundant(img.tags))
@@ -391,9 +396,10 @@ function makeStackDragImage(ids: number[]): HTMLElement {
   return wrap
 }
 
-function ThumbBase({ img, size, index, onClick, onDoubleClick, dragIds }: {
+function ThumbBase({ img, cellPx, index, onClick, onDoubleClick, dragIds }: {
   img: ImageRecord
-  size: number
+  /** 一格的实际 CSS 宽（不是滑块值，见 GridView 里对 cellPx 的解释），只用来决定取哪档缩略图 */
+  cellPx: number
   index: number
   onClick: (index: number, e: React.MouseEvent) => void
   onDoubleClick: (img: ImageRecord) => void
@@ -436,7 +442,7 @@ function ThumbBase({ img, size, index, onClick, onDoubleClick, dragIds }: {
       // 判定理由与置信度依旧完整存在库里的 tags JSON 里（三个标签入口也都不再渲染它），只是不往悬停提示上铺。
       title={img.filename}
     >
-      <ThumbImg img={img} cellPx={size} className="w-full h-full object-cover pointer-events-none" />
+      <ThumbImg img={img} cellPx={cellPx} className="w-full h-full object-cover pointer-events-none" />
       <ManualFlag img={img} />
       {/* 左上角已被「人工复审」红底占住时，选中圆点/检测中往下让一格，不叠在一起（两者都是左对齐）*/}
       {selected && (
@@ -487,6 +493,30 @@ function GridView(props: {
   const additive = useRef(false)
   const raf = useRef<number | null>(null)
   const cur = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
+
+  /**
+   * 一格的实际宽度：容器宽 − 间距，再除以当行列数（与 CSS auto-fill 同一套算法）。
+   * 为什么不能直接把滑块的 size 交给 ThumbImg 判档：minmax(size,1fr) 会把每行剩下的
+   * 零头摊给当行各列，实际格子比 size 大 0~22%。拿 size 判就低估了需求，格子物理边长
+   * 超过小档短边时图片被放大显示——小屏笔记本 + 150%/200% 系统缩放下网格发糊的成因之一
+   * （另一半成因是小档按长边定尺寸，见 shared/types.ts 双档注释）。
+   * 用公式算而不量 DOM：读写交替会触发重排，而这里每次窗口变化都要算。
+   */
+  const [cellPx, setCellPx] = useState(props.size)
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const measure = (): void => {
+      const w = el.clientWidth
+      if (w <= 0) return // 隐藏状态下量到 0，算出的列数是负数，不如保持上一次的值
+      const cols = Math.max(1, Math.floor((w + GRID_GAP) / (props.size + GRID_GAP)))
+      setCellPx((w - GRID_GAP * (cols - 1)) / cols)
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [props.size])
 
   const computeSelection = (x0: number, y0: number, x1: number, y1: number): void => {
     const minX = Math.min(x0, x1)
@@ -579,7 +609,7 @@ function GridView(props: {
           key={img.id}
           img={img}
           index={i}
-          size={props.size}
+          cellPx={cellPx}
           onClick={props.click}
           onDoubleClick={props.dbl}
           dragIds={props.dragIds}

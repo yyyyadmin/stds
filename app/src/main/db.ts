@@ -35,6 +35,7 @@ import {
   tierOfCat,
   isDupRedundant,
   DUP_REDUNDANT_KEY,
+  DUP_GROUP_KEY,
   DEFAULT_SETTINGS
 } from '../shared/types'
 import { scoreTier, computeCategory } from './classify'
@@ -291,8 +292,9 @@ function isDimCat(cat: CategoryKey): boolean {
  * 一张图是否属于 cat 视图的单一真源：listByCategory（全量）和 listByCategoryIds（差量）共用，
  * 避免两处口径漂移。D2 三档状态视图互斥可求和，内容维度视图为标签并集：
  * - 交付库：非 trash/review/坏维度 且无任何中/高瑕疵（干净人数图；干净的自定义相册图也归在这里，保证上段可求和）
- * - 瑕疵片：非 trash 且有高置信瑕疵（flaw high）
- * - 待确认：非 trash 且非 flaw high，且（手动停泊 review ∪ 有中置信瑕疵 mid）
+ * - 瑕疵片：非 trash 且有高置信瑕疵（flaw high），但停在待确认拍板位的不算（它只在待确认出现一次）
+ * - 待确认：非 trash 且非冗余帧，且（主分类停在 review ∪ 有中置信瑕疵 mid）——主分类停在 review 的
+ *   一律算待确认，哪怕身上挂着高瑕疵：那是重复组代表帧“全组没一张能交”时被 AI 故意送到这里等拍板的
  * - 内容维度（坏/中性）：主分类===dim ∪ 该 dim 非 low 标签（并集，允许重叠）
  */
 function matchesView(r: ImageRecord, cat: CategoryKey): boolean {
@@ -306,9 +308,11 @@ function matchesView(r: ImageRecord, cat: CategoryKey): boolean {
   // 档位子视图（D4）：交付库 ∩ 档位相等（档位在 isDeliverable 内部，不另判 trash/review）
   const tierN = tierOfCat(cat)
   if (tierN) return isDeliverable(r.category, r.tags) && r.tier === tierN
-  if (cat === CAT_FLAWS) return !isTrashLike(r.category) && fl === 'high'
+  // 停在待确认拍板位的（重复组代表帧）不再同时出现在瑕疵片：一题只让用户答一次
+  if (cat === CAT_FLAWS) return !isTrashLike(r.category) && r.category !== CAT_REVIEW && fl === 'high'
   if (cat === CAT_REVIEW) {
-    if (isTrashLike(r.category) || fl === 'high') return false
+    // 冗余帧不占待确认：它不需要“复核 AI 拿不准的判定”，要的是去分组里选留哪张（与侧栏计数同口径）
+    if (isTrashLike(r.category) || isDupRedundant(r.tags)) return false
     return r.category === CAT_REVIEW || fl === 'mid'
   }
   if (isDimCat(cat)) {
@@ -683,15 +687,20 @@ export function backfillTiers(): number {
 // ---------- 分类计数（侧栏徽章） ----------
 
 export function categoryCounts(): Record<string, number> {
-  const rows = db.prepare('SELECT id, category, tags, tier, status FROM images').all() as Array<{ id: number; category: string; tags: string | null; tier: number | null; status: string }>
+  const rows = db.prepare('SELECT id, category, tags, tier, status, dup_group FROM images').all() as Array<{ id: number; category: string; tags: string | null; tier: number | null; status: string; dup_group: string | null }>
   const map: Record<string, number> = {}
   // 上段四档互斥可求和（= 全部）：交付库(好片) / 瑕疵片 / 重复多余 / 待确认 / 废片。
-  // 优先级：废弃库 > 瑕疵片(flaw high) > 重复多余(带可见 duplicate 标签) > 待确认(review 停泊 ∪ flaw mid) > 交付库(其余无瑕疵图，含干净自定义相册)
+  // 优先级：废弃库 > 瑕疵片(flaw high 且没停在拍板位) > 重复多余(带可见 duplicate 标签) > 待确认(review 停泊 ∪ flaw mid) > 交付库(其余无瑕疵图，含干净自定义相册)
   // 重复多余排在待确认前：组内冗余帧不需要用户“复核 AI 拿不准的判定”，它要的是去分组里选留哪张。
+  // flaw high 排在 review 前、但排除 category=review：“全组没一张能交”的代表帧被 AI 停在待确认拍板，
+  // 它属于待确认而不是瑕疵片（与上面 matchesView 逐条对齐，保证视图/计数/导出三数一致）。
   let lib = 0
   let flaws = 0
   let review = 0
   let dupRedundant = 0
+  // 重复组数（侧栏“重复照片”行按组计）：跟分组视图一样“至少一张还在本分类的组才算”，
+  // 全组都处理完的历史组不会再出现在视图里，也不该占侧栏一个数字。
+  const dupGroups = new Set<string>()
   // 交付库内档位（D4）：优质/良好/一般互斥，三数和 ≤ lib（差的是尚未 backfill 的 NULL 行）
   const tierCount: Record<TierKey, number> = { 1: 0, 2: 0, 3: 0 }
   // 下段内容维度（人数 / 瑕疵 / 黑白 / 自定义相册）：标签并集（主分类===dim ∪ 非 low 标签），Set 去重、允许重叠
@@ -706,7 +715,8 @@ export function categoryCounts(): Record<string, number> {
     const tags = parseRowTags(r)
     const fl = flawLevel(tags)
     if (!isTrashLike(r.category)) {
-      if (fl === 'high') flaws += 1
+      if (isDupRedundant(tags) || r.category === 'duplicate') dupGroups.add(r.dup_group || `single:${r.id}`)
+      if (fl === 'high' && r.category !== CAT_REVIEW) flaws += 1
       else if (isDupRedundant(tags)) dupRedundant += 1
       else if (r.category === CAT_REVIEW || fl === 'mid') review += 1
       else if (isDeliverable(r.category, tags)) {
@@ -725,13 +735,18 @@ export function categoryCounts(): Record<string, number> {
   map[CAT_FLAWS] = flaws
   map[CAT_REVIEW] = review
   // 侧栏“重复多余”行：只数“单因冗余被拦下、本身没拍坏”的那批（与上档互斥求和同口径）；
-  // 点开后进的是整组视图，那里的张数按标签并集算（map['duplicate']），两个数不同义，不并列显示。
+  // 它现在只用在 tooltip，行上显的是下面那个组数。
   map[DUP_REDUNDANT_KEY] = dupRedundant
+  // 侧栏“重复照片”行：按组数（用户 2026-10-15：“实际 2 组、左边只显 1”）。带“组”字后缀。
+  map[DUP_GROUP_KEY] = dupGroups.size
   map['tier:1'] = tierCount[1]
   map['tier:2'] = tierCount[2]
   map['tier:3'] = tierCount[3]
   // 失败图计数（status='error'）：顶栏徒章与失败定位弹窗的数据源
   map.error = rows.reduce((n, r) => n + (r.status === 'error' ? 1 : 0), 0)
+  // 还没跑过 AI 的张数（status='pending'）：顶栏拿它把“本次筛选完成”改口成“新导入 N 张还没筛选”。
+  // 不算已丢进废弃库的（筛它们没意义），也不算 error（那边有专门的红色徒章），否则两处数字重复报同一批图。
+  map.pending = rows.reduce((n, r) => n + (r.status === 'pending' && r.category !== 'trash' && r.category !== 'dup_trash' ? 1 : 0), 0)
   return map
 }
 
@@ -871,8 +886,10 @@ export function getAiReview(id: number): AiReviewSuggestion | null {
 }
 
 /**
- * 把某张图已有的建议标记为"用户已不采纳"：不改任何判定，仅从分歧列表剔除、不被全部采纳；
- * 再次复审会把该图重新判一遍并整体覆盖 JSON（rejected 标记随之作废）。无建议/解析失败静默跳过。
+ * 把某张图已有的建议标记为"用户已不采纳"：不改任何判定，仅从分歧列表剔除、不被全部采纳。
+ * 不采纳不算结案（用户 10-15 实测后拍定，回到 10-14 的规矩）：这张仍会进下一轮复审，重判后新建议
+ * 整体覆盖旧 JSON，rejected 标记随之作废——用户否的是这一份意见，不是"这张永远别再看"。
+ * 无建议/解析失败静默跳过。
  */
 export function rejectAiReview(id: number): void {
   const s = getAiReview(id)
@@ -882,13 +899,15 @@ export function rejectAiReview(id: number): void {
 }
 
 /**
- * 这张是否已转人工定画质：AI 复审过且已结案（confirmed），但标签里仍挂着云端不看的模糊/曝光。
+ * 这张是否还等人工定画质：AI 复审过且已结案（confirmed）、标签里仍挂着云端不看的模糊/曝光，且人还没在判定面板里裁过。
  * 为什么不存一个标记而要现算：存了就会烂——用户后来在判定面板里把模糊标签删了，
  * 那个死标记还会留着，角标一直挂在本不该再复审的图上排最前。现算的话画质一清就自动恢复常态。
+ * qcDecided 是唯一的例外（用户 10-15 拍到）：人在面板里提交过一次，画质标签原样留着也是“我已经判过了”，
+ * 红标不能再挂着他——挂着的语义是“等你裁”，不是“这张图很模糊”（那是瑕疵片本身的事）。
  */
 function isManualQc(r: ImageRecord): boolean {
   const s = r.ai_review
-  if (!s || !s.confirmed) return false
+  if (!s || !s.confirmed || s.qcDecided) return false
   return QC_MANUAL_DIMENSIONS.some((d) => !!r.tags?.[d] && r.tags[d]!.level !== 'low')
 }
 
@@ -905,7 +924,7 @@ function isCleanParked(r: ImageRecord): boolean {
 
 /**
  * 把某张图的建议标为"用户已确认结案"：不改任何判定，只留一个痕。
- * 两个入口共用：① AI 与本地一致时点「确认保留」（标签原样不动）；② 按 AI 改完标签后的「采纳」。
+ * 两个入口共用：① AI 与本地一致时点「确认采纳」（标签原样不动）；② 按 AI 改完标签后的「采纳」。
  * 为什么要留痕而不是清空：清空后这张图看起来像"从没判过"，仍留在本栏的话会被下轮默认复审重跑、白烧额度。
  * 图上若还带着模糊/曝光，这个 confirmed 就同时意味着“转人工复审”（见 isManualQc）。
  */
@@ -913,6 +932,19 @@ export function confirmAiReview(id: number): void {
   const s = getAiReview(id)
   if (!s) return
   s.confirmed = true
+  db.prepare('UPDATE images SET ai_review = ? WHERE id = ?').run(JSON.stringify(s), id)
+}
+
+/**
+ * 人工在判定面板里提交过一次画质裁定（不管结论是“该有”还是“不该有”）：给建议打上 qcDecided。
+ * 只改这一个字段，不动 tags/category/confirmed；没建议的图直接跳过（它本来就没挂红标，没什么要清的）。
+ * 为什么单独一个接口而不放进 confirmAiReview：采纳 AI 建议不等于裁过画质，云端从不看这两项，
+ * 只有人在面板里逐项勾过才算（用户 10-15：提交后左上角那个“画质需人工复审”就该消失）。
+ */
+export function markQcDecided(id: number): void {
+  const s = getAiReview(id)
+  if (!s || s.qcDecided) return
+  s.qcDecided = true
   db.prepare('UPDATE images SET ai_review = ? WHERE id = ?').run(JSON.stringify(s), id)
 }
 
@@ -926,22 +958,24 @@ export function listReviewIds(): number[] {
 
 /**
  * 某栏里「待复审」的图 id。适用 CAT_REVIEW / CAT_FLAWS。
- *  默认（只补没判过的）：尚无建议的（ai_review 为空）+ 建议被用户"不采纳"过的
- *  （按用户决定：不采纳的图支持再次 AI 复审，重判后新建议整体覆盖旧 JSON，rejected 标记自然作废）。
- *  force=true（重判全部）：本栏除了已转人工定画质的每一张都重跑。
- * 两种跑法都跳过 needManual（已转人工）的图（用户 10-14）：那张卡在模糊/曝光上，
- * 而云端根本不看这两项，重跑一遍得到的还是“没意见”，白烧额度；它只等人自己在判定面板定。
- * 同样跳过“已结案且身上没任何瑕疵、只等归位”的干净停泊图（isCleanParked）：它缺的是一个搬移动作，不是再审。
- * （顶部条的“将重判 N 张”与这里同一口径，否则报的数与实际烧的额度不一致。）
- * 已结案（confirmed）的图也不算待复审：那张已有结论且用户表过态，不重烧额度。
- * 为什么要 force：用户实测抓到死胡同——一张图已判过且 AI 没提不同意见（无分歧）时，它既不会出现在
- * 采纳列表里，也不在默认复审队列里，点"再次AI复审"只会得到"没有可复审的照片"，那张图彻底没法再动。
+ * 唯一算“已结案、不必再审”的是 confirmed（采纳过或点过「确认采纳」）：那张用户已经认了结果，重跑就是同一张烧两次额度。
+ * 以下几种都还要跑：
+ *  · 从没判过的（ai_review 为空）——默认跑法和 force 都跑；
+ *  · 不采纳过的（rejected 且未 confirmed）——用户 10-15 实测拍板：否掉的是这一份意见，图本身还等 AI 再给一次，
+ *    两种跑法都算进队列（重判后新建议覆盖旧 JSON，rejected 自然作废）；
+ *  · 判过但还没表意的——只有 force（橙色「再次AI复审」）会补它，默认跑法不碰：它还挂在结论面板队列里等人点，
+ *    默认队列里塞进去等于跟弹窗抢同一张。force 存在的意义正是修那个死胡同：这类图既不在采纳列表、
+ *    又不在默认队列，没有 force 就永远没人再提交它。
+ * 两种跑法都跳过还等人工裁画质的图（isManualQc，用户 10-14）：云端根本不看模糊/曝光，重跑得到的还是“没意见”，
+ * 白烧额度；也跳过“已结案且身上没任何瑕疵、只等归位”的干净停泊图（isCleanParked）：它缺的是一个搬移动作，不是再审。
+ * （顶部条的“将重判 N 张”与这里同一口径，否则报的数跟实际烧的额度对不上。）
+ * 注：人在重判面板提交过一次画质裁定后红标会消失（qcDecided），但拦复审靠的是 confirmed 那道痕，不受影响；
+ * 压根没 AI 建议的图被面板提交也不会被锁（markQcDecided 对无建议的图直接跳过），人工重判过后照样能复审。
  */
 export function listPendingAiReviewIds(cat: CategoryKey, force = false): number[] {
-  const rows = listByCategory(cat)
-  if (force) return rows.filter((r) => !isManualQc(r) && !isCleanParked(r)).map((r) => r.id)
-  return rows
-    .filter((r) => !isManualQc(r) && !isCleanParked(r) && (!r.ai_review || r.ai_review.rejected) && !r.ai_review?.confirmed)
+  return listByCategory(cat)
+    .filter((r) => !isManualQc(r) && !isCleanParked(r) && !r.ai_review?.confirmed)
+    .filter((r) => force || !r.ai_review || r.ai_review.rejected)
     .map((r) => r.id)
 }
 

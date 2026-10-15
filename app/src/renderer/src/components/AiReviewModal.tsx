@@ -2,11 +2,11 @@
  * AI 复审在本轮作用域页内的四态呈现（只在待确认页或瑕疵片页渲染）：
  *  running → 进度窗（absolute 只盖内容区，切走本页自动卸载、后台照跑）
  *  settling → 跑完读回建议的收尾遮罩（不可关）
- *  小结     → 居中面板：共复审 N 张（X 张有分歧 / Y 张一致）+ [逐张复核][全部处理][以后再说]
- *  compare  → 逐张：大图 + 差异行（或“与本地一致”）+ 画质盲区提醒 + [上一张][下一张][不采纳][确认保留/采纳这张]
+ *  小结     → 居中面板：共复审 N 张（X 张有分歧 / Y 张一致）+ [逐张复核][全部采纳][以后再说]
+ *  compare  → 逐张：大图 + 差异行（或“与本地一致”）+ 画质盲区提醒 + [上一张][下一张][不采纳][确认采纳/采纳这张]
  *
  * 三个口径（用户 10-14 拍板）：
- *  · 一致的图也进队列：复审就是把待确认清干净，一致也得点「确认保留」才算结案；
+ *  · 一致的图也进队列：复审就是把待确认清干净，一致也得点「确认采纳」才算结案；
  *  · 采纳 = 一次性把标签和归属都办完（该去哪栏自动落位）；已结案但身上再没瑕疵、却还停在待确认的
  *    （以前手动停泊的干净图），进队列给一个「归位搬出待确认」按钮——不然它就是“哪儿都不在”的死角；
  *  · 云端不判模糊/曝光（见 aiReviewPrompt.ts），所以这两项不能拿“AI 没意见”当放行依据：
@@ -179,7 +179,7 @@ export default function AiReviewModal(): JSX.Element | null {
     )
   }
 
-  // —— 3) 逐张处理（存在分歧→采纳这张；结论一致→确认保留；两者均需确认后才结案）——
+  // —— 3) 逐张处理（存在分歧→采纳这张；结论一致→确认采纳；两者均需确认后才结案）——
   if (compareOpen && cur && cur.ai_review) {
     const rows = aiReviewDiffRows(cur)
     // 左栏四项全列的比对行（含两边一致的项）与其中的分歧项数
@@ -316,13 +316,13 @@ export default function AiReviewModal(): JSX.Element | null {
           <div className="px-5 py-4 border-t border-line flex items-center justify-end gap-3 shrink-0">
             <button className="btn text-sm px-4 py-2" onClick={() => goto(-1)} title="看上一张" disabled={pending.length <= 1}>← 上一张</button>
             <button className="btn text-sm px-4 py-2" onClick={() => goto(1)} title="看下一张">下一张 →</button>
-            <button className="btn text-sm px-4 py-2" onClick={() => void onReject()} title="不予采纳：保持本地判定不变，本张不计入本轮处理；重新复核时将再次提交">不采纳</button>
+            <button className="btn text-sm px-4 py-2" onClick={() => void onReject()} title="不予采纳：保持本地判定不变，本张不计入本轮处理；下一轮复审（含“再次AI复审”）会将它再次提交">不采纳</button>
             {rows.length > 0 ? (
               <button className="btn-primary text-sm px-4 py-2" onClick={() => void onAdopt()} title="按云端结论更新本张标签（与手动改判等效，可逐条撤销），随后结案">采纳这张</button>
             ) : shouldHome ? (
               <button className="btn-primary text-sm px-4 py-2" onClick={() => void onHome()} title="按人数归属归档并移出待确认（写入移动历史，可撤销）">按人数归位</button>
             ) : (
-              <button className="btn-primary text-sm px-4 py-2" onClick={() => void onConfirm()} title="标签与归属均不变动，仅将本张标记为已复核结案">确认保留</button>
+              <button className="btn-primary text-sm px-4 py-2" onClick={() => void onConfirm()} title="云端与本地结论一致：采纳这个结果。标签与归属均不变动，仅将本张标记为已复核结案">确认采纳</button>
             )}
           </div>
         </div>
@@ -372,12 +372,12 @@ export default function AiReviewModal(): JSX.Element | null {
               {homeCount > 0 && <span><span className="text-fg3 mr-3">·</span>待归档 <span className="text-xl font-bold text-brand">{homeCount}</span></span>}
               {!!aiReview?.failCount && <span><span className="text-fg3 mr-3">·</span>判定失败 <span className="text-xl font-bold text-fg2">{aiReview.failCount}</span></span>}
             </div>
-            <div className="mt-3 text-sm leading-relaxed text-fg3">全部处理：分歧项按云端结论改判，一致项确认结案，已复核通过者按人数归档；仍含画面模糊/曝光异常者转人工复审并置于本栏首位。所有操作均可逐条撤销。</div>
+            <div className="mt-3 text-sm leading-relaxed text-fg3">全部采纳：分歧项按云端结论改判，一致项确认结案，已复核通过者按人数归档；仍含画面模糊/曝光异常者转人工复审并置于本栏首位。所有操作均可逐条撤销。</div>
           </div>
           <div className="px-6 py-4 flex flex-wrap items-center justify-end gap-3 border-t border-line">
             <button className="btn text-sm px-4 py-2" onClick={dismissSummary} title="暂不处理，可经由页顶复核条重新打开">稍后处理</button>
             <button className="btn text-sm px-4 py-2" onClick={() => { setCompareOpen(true); setCurrentId(pending[0].id) }} title="逐项比对本地检测与云端结论后再决定">逐张复核</button>
-            <button className="btn-primary text-sm px-4 py-2" onClick={() => void adoptAll()} title={`批量应用 ${pending.length} 张：${diffCount} 张按云端结论改判，其余确认结案或归档（操作可逐条撤销）`}>全部处理 {pending.length} 张</button>
+            <button className="btn-primary text-sm px-4 py-2" onClick={() => void adoptAll()} title={`批量应用 ${pending.length} 张：${diffCount} 张按云端结论改判，其余确认结案或归档（操作可逐条撤销）`}>全部采纳 {pending.length} 张</button>
           </div>
         </div>
       </div>

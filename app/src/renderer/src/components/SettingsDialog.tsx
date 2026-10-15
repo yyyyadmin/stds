@@ -220,7 +220,7 @@ export default function SettingsDialog(): JSX.Element {
             <h3 className="text-sm font-semibold mb-2 text-fg">数据管理</h3>
             <div className="rounded-md bg-panel2 border border-line p-3 text-xs">
               <div className="flex items-center justify-between gap-3">
-                <div className="text-fg3 min-w-0">清除缓存：重建全部缩略图，并重试之前提示“无法解码”的照片（如 CR3/ARW），已有的检测分类结果保留。清空图库已移至顶栏「导入文件夹」旁。</div>
+                <div className="text-fg3 min-w-0">清除缓存：一次清掉缩略图、大图预览、AI 中间图、运行日志和程序缓存（都会自动重建），并重试之前提示“无法解码”的照片（如 CR3/ARW）。图库、检测分类结果与登录状态保留。安装/升级新版本后软件会自动清一次，不必手动点。清空图库已移至顶栏「导入文件夹」旁。</div>
                 <button className="btn text-xs whitespace-nowrap" onClick={() => void useStore.getState().clearCacheAll()}>
                   清除缓存
                 </button>

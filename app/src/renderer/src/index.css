@@ -175,6 +175,22 @@ body {
     indeterminate 1.15s ease-in-out infinite;
 }
 
+/* 「还有新图没筛」时给「开始筛选」一圈轻呼吸的蓝光（用户 2026-10-15）：
+   只动 box-shadow，不动文字和底色——整颗按钮一起闪（animate-pulse）太抢，
+   而且低配机/系统“减少动态效果”下会自动静止。 */
+@keyframes nudgeRing {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.3);
+  }
+}
+.btn-nudge {
+  animation: nudgeRing 2s ease-in-out infinite;
+}
+
 /* ===== AI 引擎状态徽章动效 ===== */
 /* 工作中：青→品牌蓝→紫三色流动渐变（背景 220% 宽横向平移） */
 @keyframes engineFlow {
@@ -248,13 +264,14 @@ body {
   animation: sheen 2.2s ease-in-out infinite;
   pointer-events: none;
 }
-/* 尊重系统“减少动态效果”偏好：关闭引擎徽章动画 */
+/* 尊重系统“减少动态效果”偏好：关闭引擎徽章动画与“开始筛选”呼吸光 */
 @media (prefers-reduced-motion: reduce) {
   .engine-live,
   .engine-glow,
   .engine-ready-glow,
   .engine-busy-glow,
   .engine-eq > i,
+  .btn-nudge,
   .engine-sheen::after {
     animation: none !important;
   }
@@ -275,5 +292,9 @@ html.perf-lean [class*='backdrop-blur'] {
   -webkit-backdrop-filter: none !important;
 }
 html.perf-lean [class*='animate-pulse'] {
+  animation: none !important;
+}
+/* 低配机同样关掉“开始筛选”那圈呼吸光（不传递信息，只抢帧） */
+html.perf-lean .btn-nudge {
   animation: none !important;
 }

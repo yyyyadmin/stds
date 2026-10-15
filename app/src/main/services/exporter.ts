@@ -21,6 +21,7 @@ import {
   CAT_DUP_TRASH,
   isTrashLike,
   isDeliverable,
+  isDupRedundant,
   flawLevel,
   tierOfCat,
   DEFAULT_TIER_NAMES,
@@ -124,9 +125,11 @@ class Exporter extends EventEmitter {
     const tierN = tierOfCat(cat)
     if (tierN) return isDeliverable(r.category, tags) && r.tier === tierN
     if (cat === CAT_LIBRARY) return isDeliverable(r.category, tags)
-    if (cat === CAT_FLAWS) return flawLevel(tags) === 'high'
-    // 与 db.matchesView 同口径：有高置信瑕疵的图属瑕疵片视图，不再计入待确认（否则 include 模式导出数与侧栏徽章对不上）
-    if (cat === CAT_REVIEW) return flawLevel(tags) !== 'high' && (r.category === CAT_REVIEW || flawLevel(tags) === 'mid')
+    // 与 db.matchesView 逐条同口径（否则 include 模式导出数与侧栏徽章对不上）：
+    // 停在待确认拍板位的（重复组“整组没一张能交”的代表帧）算待确认、不再同时算瑕疵片；
+    // 冗余帧也不占待确认（它属于重复照片那一栏，由用户在组里决定去留）。
+    if (cat === CAT_FLAWS) return r.category !== CAT_REVIEW && flawLevel(tags) === 'high'
+    if (cat === CAT_REVIEW) return !isDupRedundant(tags) && (r.category === CAT_REVIEW || flawLevel(tags) === 'mid')
     // 结构维度（重复/连拍 v2.0.67）也是可导出的分类：与 db.matchesView 同口径走标签并集（勾它导出的是组里被判定多余的那几张）
     if ((BAD_DIMENSIONS as string[]).includes(cat) || (NEUTRAL_DIMENSIONS as string[]).includes(cat) || (STRUCTURAL_DIMENSIONS as string[]).includes(cat)) {
       const t = tags[cat]

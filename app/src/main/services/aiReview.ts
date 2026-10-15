@@ -49,8 +49,10 @@ class AiReview extends EventEmitter {
   private key: KeyCache | null = null
   /** 本会话累计成功出建议、但尚未上报的张数 */
   private pendingDelta = 0
-  /** 上报批次序号（接口 B 幂等去重用） */
+  /** 上报批次序号（接口 B 幂等去重用）：同一 session 内必须严格递增，见 seqSession */
   private seq = 0
+  /** seq 当前归属的会话：换会话才归零。同一会话内重复的 (session,seq) 会被服务端当幂等重发丢掉 */
+  private seqSession: string | null = null
   private advancing: Promise<boolean> | null = null
   /** 领 key 失败的真实阻塞原因，供 start() 如实回传渲染层（不再折叠成 not_member） */
   private lastBlockReason: string | null = null
@@ -102,6 +104,13 @@ class AiReview extends EventEmitter {
       }
       this.progress.dailyLimit = r.data.daily_limit
       this.progress.usedToday = r.data.used_today
+      // 批次号只在“换了会话”时归零：ttl 未到时 ensureKey 会直接复用旧 key，上一版的 start() 无条件
+      // seq=0，第 2 轮上报的 (session,1) 与第 1 轮同键 → 服务端按幂等去重丢掉，复审了 11 张只记上 2 张
+      //（用户 10-15 实测：跑完顶栏与个人中心都不扣次数，后端实查 used_today 远小于本地已判张数）。
+      if (this.seqSession !== this.key.sessionId) {
+        this.seqSession = this.key.sessionId
+        this.seq = 0
+      }
       return true
     })()
     return this.advancing
@@ -135,8 +144,10 @@ class AiReview extends EventEmitter {
   /**
    * 启动后台复审。非会员/未授权/该栏无待判图均不真跑。立即返回，任务在后台进行。
    * scope='review' 复审待确认栏，'flaws' 复审瑕疵片栏。
-   * 默认只跑「尚无建议 + 被不采纳」的图（省额度）；opts.force 时重跑本栏每一张
-   * （供页内橙色「再次AI复审」用，避开"已判过但无分歧"的图永远跑不到的死胡同）。
+   * 默认只跑「尚无建议 + 被不采纳」的图（不采纳不算结案，用户 10-15 实测拍板）；opts.force（页内橙色
+   * 「再次AI复审」）在此基础上多跑“已判过但用户还没表态”的那批，避开它们永远无人再提交的死胡同。
+   * 两种跑法都不重跑已结案（confirmed：采纳过或确认采纳）的图——同一张烧两次额度。
+   * 集合口径完全在 db.listPendingAiReviewIds，这里不再叠一层判断。
    * 返回 started 与原因，供渲染层决定跳会员中心 / toast。
    */
   async start(scope: AiReviewScope = 'review', opts?: { force?: boolean }): Promise<{ started: boolean; reason?: string; usedToday?: number; dailyLimit?: number }> {
@@ -168,7 +179,7 @@ class AiReview extends EventEmitter {
     this.cursor = 0
     this.stopRequested = false
     this.pendingDelta = 0
-    this.seq = 0
+    // seq 不在这里归零（它跟会话走，见 ensureKey）：归零会让复用同一 session 的第二轮上报被服务端幂等丢弃
     this.running = true
     this.progress = {
       running: true,
@@ -343,6 +354,7 @@ class AiReview extends EventEmitter {
     if (r.reason === 'bad_session') {
       // 会话失效/不属本用户：丢弃本次上报、清 key 触发下次重领（新会话）；本批 delta 回滚待重报
       this.key = null
+      this.seqSession = null // 新会话的批次号从 1 重起，否则接着旧会话的号往上报，旧会话里那些号服务端没见过→白丢
       this.pendingDelta += delta
     } else if (r.reason === 'quota_exceeded') {
       // 后端日/会话累计超限：额度尽，停止复审（本批已计入后端，不回滚）

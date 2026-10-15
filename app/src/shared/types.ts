@@ -37,6 +37,8 @@ export const BAD_DIMENSIONS: DimensionKey[] = [
  * 所以一张图只要已结案（confirmed）却还挂着这两项里任何一个（非 low），就算“等人工定画质”：
  * 卡片左上角挂红底角标、在本栏排最前、AI 再次复审（含强制重判）跳过它，卡上把这两枚标签顶到最前
  * 并保持原色，AI 定过的那几项改暗（用户 10-14 拍板）。这个结论现算而不存标记：画质一删就自动恢复常态。
+ * 但“跳过 AI 复审”拦的不是这枚角标，而是 confirmed（用户已表过态）：人在面板里提交一次会把红标清掉
+ * （qcDecided），confirmed 却原样留着——所以角标没了这张也永不被 AI 重判（用户 10-15 追加：人工审过的 AI 不能再审）。
  */
 export const QC_MANUAL_DIMENSIONS: DimensionKey[] = ['blur', 'exposure']
 
@@ -177,6 +179,13 @@ export const CAT_FLAWS = 'flaws'
  * 点开这一行进的是重复/连拍整组视图（cat 仍用 'duplicate'）。
  */
 export const DUP_REDUNDANT_KEY = 'dup_redundant'
+/**
+ * 侧栏“重复照片”行的组数计数 key（用户 2026-10-15 指定：这一行按组数、数字后带“组”字）。
+ * 以前这里数的是“只因冗余被拦下的张数”，而点开看到的是整组卡片，两个数不同义：
+ * 实际 2 组、冗余帧又带着高置信瑕疵时会被“瑕疵片”先抢走计数，那边就只剩 1。
+ * 现在改成数“分组视图里能开出几张堆叠卡”，与界面一一对应。
+ */
+export const DUP_GROUP_KEY = 'dup_groups'
 
 /**
  * 交付库档位（D4，第三条轴）：只在交付库内部再分层，瑕疵片/待确认/废片无档位。
@@ -450,7 +459,11 @@ export interface AiReviewSuggestion {
   reason: string
   /** 该建议属于哪一栏的复审；旧数据无此字段按 'review' 处理 */
   scope?: AiReviewScope
-  /** 用户在逐张复核里明确"不采纳"过这条建议：不再计入分歧列表/不被全部采纳；再次复审会重新判并整体覆盖（标记随之作废） */
+  /**
+   * 用户在逐张复核里明确"不采纳"过这条建议：不再计入分歧列表/不被全部采纳，但不算结案。
+   * 不采纳的是这一份意见，不是"这张永远别再看"（用户 10-15 实测后拍板，回到 10-14 那条"不采纳可再审"）：
+   * 下一轮复审会把它重新提交，新建议整体覆盖旧 JSON，这个标记随之作废。
+   */
   rejected?: boolean
   /**
    * 已结案（用户确认过这张）：与“不采纳”相反——用户认可这个结果（一致时原样保留、不一致时已按建议改完）。
@@ -458,6 +471,13 @@ export interface AiReviewSuggestion {
    * 而“AI 与本地一致”的图根本没有差异可采，不结案就永远挂在库里没人管（用户反馈：复审的目的就是把待确认清空）。
    */
   confirmed?: boolean
+  /**
+   * 画质两项（画面模糊/曝光异常）已由人工在判定面板里裁完：与 confirmed 分开记，因为 confirmed 说的是
+   * “AI 那部分结案的”，而画质是云端压根不看、只能人定的——人没提交前它一直欠着一个裁定（左上角红标）。
+   * 用户在面板里点过一次提交，这个欠账就清了：不管他判“该有”还是“不该有”，都不再是“等人工”。
+   * 角标/排最前/复审跳过都读它；重扫或重跑出新高建议会随整条 JSON 一起作废重置。
+   */
+  qcDecided?: boolean
 }
 
 /** 数据库中的一张图片记录 */
@@ -575,6 +595,12 @@ export interface AppSettings {
    * 重算 level/category/tier（不重跑引擎）。基线表或平移算法升级时把 REGRADE_VERSION +1。
    */
   regradeVersion?: number
+  /**
+   * 重复组代表帧“停泊规则”一次性补跑版本门控：取消“每组必须有一张直接进交付库”以后，
+   * 旧库里那些全组都带瑕疵却被硬留在交付库的代表帧，需要靠启动时补跑一次重聚类才会自己挪到待确认
+   * （只用库里现存 phash 重新成组改挂，不重跑引擎）。停泊/挑选规则升级时 +1。
+   */
+  dupParkMigration?: number
   /** 档位目录名（3 项，侧栏与导出子目录共用）；不设时用 DEFAULT_TIER_NAMES */
   tierNames?: string[]
   /** 修正记录积累后的自动阈值微调 */
@@ -592,6 +618,12 @@ export interface AppSettings {
   skipUpdateVersion?: string | null
   /** 缩略图方向修正版本：旧版缩略图未应用 EXIF 方向（竖拍显示为横），升级后需一次性重建。不设默认值，未迁移时为 undefined */
   thumbOrientVersion?: number
+  /**
+   * 缓存清理版本戳：安装 / 覆盖升级后首次启动自动做一次全量清理（缩略图、大图预览、
+   * 引擎中间图、日志、Electron 缓存、引擎模型副本），记的就是"已经为哪个版本清过了"。
+   * 不等于当前版本号 → 清；相等 → 跳过（同版本反复启动不会重建缩略图）。仅存偏好，不含判定。
+   */
+  cacheSweepVersion?: string
   /**
    * AI 复审（会员专属）：是否开启「筛选完成后自动后台复审待确认」。
    * 仅存用户偏好开关，不含任何判定含义；非会员恒不生效（后端 403 才是真闸门）。
@@ -619,19 +651,24 @@ export const DEFAULT_SETTINGS: AppSettings = {
 
 /**
  * 缩略图双档（低配机性能路径）：
- * - 大档 960：放大弹窗、瀑布流、格子×DPR 超过 320 物理像素时用（历史 256 → 640 → 960 的当前档）；
- * - 小档 320：常规网格格子 / 列表行用。解码内存与像素面积成正比，小档单张约为大档 1/9，
- *   几千张滚动时是低配机不掉帧的关键。
+ * - 大档 960：按**长边** 960 出图。放大弹窗、瀑布流、格子×DPR 超过 320 物理像素时用（历史 256 → 640 → 960）；
+ * - 小档 320：按**短边** 320 出图（sharp fit:'outside'，仍等比例不裁切）。常规网格格子 / 列表行用。
+ *   为什么这一档必须按短边定：网格格子是正方形 + object-cover，铺满正方形靠的是图的短边。
+ *   按长边 320 出档时 2:3 竖片只有 213x320，而默认 160 CSS px 格子在 200% 系统缩放下要 323
+ *   物理 px，短边不够就被放大 1.5 倍——“一行五六个图发糊、放到一行三个反而清楚”就是这里。
+ *   改完竖片出 320x480，解码内存约为大档 1/4（旧口径 1/9），仍是低配机滚动不掉帧的路径。
  * 大档路径存 DB thumb 列；小档不入库，由大档路径换后缀派生（因此 pruneUnreferencedThumbs
  * 必须把派生出的小档名一并放行，否则会被当垃圾收掉）。大档后缀同时是版本号：
- * 改 THUMB_MAX 后旧档自动判“待重建”，后台无感重刷。
+ * 改 THUMB_MAX 后旧档自动判“待重建”，后台无感重刷。小档不入库，它的版本号只能写在
+ * 文件名里：后缀中的 sq = 短边档，以后改小档几何必须连这个后缀一起换，否则老库
+ * backfillSmallThumbs 见文件已存在就跳过，会一半旧几何一半新几何静默混着用。
  */
 export const THUMB_MAX = 960
 export const THUMB_QUALITY = 82
 export const THUMB_SMALL_MAX = 320
 export const THUMB_SMALL_QUALITY = 80
 export const THUMB_SUFFIX = `@${THUMB_MAX}.jpg`
-export const THUMB_SMALL_SUFFIX = `@${THUMB_SMALL_MAX}.jpg`
+export const THUMB_SMALL_SUFFIX = `@${THUMB_SMALL_MAX}sq.jpg`
 
 /** 大档路径 → 小档路径；后缀不是当前大档（如老库待重建的 @640）时返回空串，调用方回退大档 */
 export function smallThumbPath(bigPath: string): string {

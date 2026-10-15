@@ -111,6 +111,20 @@ if (!gotLock) {
       console.error('threshold regrade on startup failed', e)
     }
 
+    // 重复组停泊规则一次性补跑（版本门控，不重跑引擎）：2026-10-15 取消“每组必须有一张进交付库”，
+    // 但存量库里的旧代表帧不会自己改位置，不补跑的话用户看到的还是老结果（只能整库重筛）。
+    // reclusterStored 幂等：只动“组号变了 / 标签该有却没有 / 代表帧还挂着冗余”的行。
+    try {
+      const st = getSettings()
+      if ((st.dupParkMigration ?? 0) < 1) {
+        const r = await reclusterStored()
+        saveSettings({ dupParkMigration: 1 })
+        console.log(`[dup-park] 按新停泊规则重聚类完成（${r.groups} 组 / 改动 ${r.changed} 张，未重跑引擎）`)
+      }
+    } catch (e) {
+      console.error('dup park migration on startup failed', e)
+    }
+
     const iconCandidates = [
       join(process.resourcesPath || '', 'build', 'icon.ico'),
       join(app.getAppPath(), '..', 'build', 'icon.ico'),

@@ -17,7 +17,12 @@ import { orientedSharp } from './rawPreview'
  * 放到一行三张时 100% 系统缩放就有 1.43 倍拉伸，能看出发软。960 档短边 640px：
  * 610 格子在 100% 缩放回到约 1:1，125% 缩放也只差 1.2 倍；默认 160 格子更是大幅过足。
  * 但“过足”在普通格子上就是浪费：解码开销随像素面积走，3000 张全用 960 解码是低配机
- * 滚动卡顿大头，所以另生一层 320 小档给网格/列表用，渲染层按 格子×DPR 自动选档。
+ * 滚动卡顿大头，所以另生一层小档给网格/列表用，渲染层按 格子×DPR 自动选档。
+ * 小档那 320 定的是**短边**（sharp fit:'outside'），不是长边：方形格子 + object-cover 铺满
+ * 正方形靠的就是短边。按长边 320 出档时 2:3 竖片只有 213x320，而默认 160 CSS px 格子在
+ * 200% 系统缩放下要 323 物理 px，短边不够就被放大 1.5 倍——小屏笔记本上网格发糊正是这里。
+ * 小档不入库，所以改几何只能靠换文件名后缀（THUMB_SMALL_SUFFIX 里的 sq 就是这次的版本号）：
+ * 不换名的话 backfillSmallThumbs 见文件已存在就跳过，老库会一半短边 213 一半短边 320 混着用。
  * 文件名里的大档后缀（THUMB_SUFFIX）就是版本号：改常量后旧档自动判“待重建”，
  * 后台无感重刷，刷完 pruneUnreferencedThumbs 自动回收老档（小档按大档名派生，一并放行）；
  * 设置里的「清除缓存」是推倒重来（连已重建的新档也删掉全量重建），一般用不着。
@@ -123,7 +128,9 @@ async function makeThumb(id: number, path: string): Promise<void> {
     // 渲染层 onError 自动回退大档，不影响正确性，所以不纳入 skip 判定。
     try {
       const sp = smallThumbPath(thumbPath)
-      if (sp) await sharp(thumbPath).resize({ width: THUMB_SMALL_MAX, height: THUMB_SMALL_MAX, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: THUMB_SMALL_QUALITY }).toFile(sp)
+      // fit:'outside' = 缩到能把 320x320 这个框整个盖住（仍是等比例，不裁画面）；
+      // 小档是从大档缩的，长边不会超过大档，所以这一档永远不比大档大（3:1 宽幅全景图就停在 960x320）。
+      if (sp) await sharp(thumbPath).resize({ width: THUMB_SMALL_MAX, height: THUMB_SMALL_MAX, fit: 'outside', withoutEnlargement: true }).jpeg({ quality: THUMB_SMALL_QUALITY }).toFile(sp)
     } catch {
       /* 小档缺失由 backfillSmallThumbs 下次启动补 */
     }
@@ -182,6 +189,7 @@ let smallBackfilling = false
 export async function backfillSmallThumbs(): Promise<void> {
   if (smallBackfilling) return
   smallBackfilling = true
+  let rebuilt = 0
   try {
     const rows = getDb().prepare(`SELECT thumb FROM images WHERE thumb != '' AND thumb LIKE ?`).all(`%${THUMB_SUFFIX}`) as Array<{ thumb: string }>
     for (let i = 0; i < rows.length; i += 16) {
@@ -191,7 +199,9 @@ export async function backfillSmallThumbs(): Promise<void> {
           const sp = smallThumbPath(r.thumb)
           if (!sp || existsSync(sp)) return
           try {
-            await sharp(r.thumb).resize({ width: THUMB_SMALL_MAX, height: THUMB_SMALL_MAX, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: THUMB_SMALL_QUALITY }).toFile(sp)
+            // 与 makeThumb 里那行保持一致（同一套几何与质量），否则老库补出来的小档跟新导入的不是一个档
+            await sharp(r.thumb).resize({ width: THUMB_SMALL_MAX, height: THUMB_SMALL_MAX, fit: 'outside', withoutEnlargement: true }).jpeg({ quality: THUMB_SMALL_QUALITY }).toFile(sp)
+            rebuilt++
           } catch {
             /* 单张损坏跳过，下次启动再试 */
           }
@@ -199,6 +209,14 @@ export async function backfillSmallThumbs(): Promise<void> {
       )
       await new Promise((res) => setImmediate(res))
     }
+    /*
+     * 收旧小档：换过小档后缀（几何改版）后，老 @320.jpg 在 keep 集合里已不再被引用，
+     * 而大档没待重建时 backfillThumbnails 里的 prune 分支（done>0）不会跑，这批孤儿文件
+     * 会一直占盘（一万张约 150MB）。只在确实重缩过东西时才收一次，且必须确认大档已全部
+     * 跟上：两个回填是同时启动的，大档还在迁移时 DB 行可能仍指向旧后缀的大档，
+     * 那时广撒网地 prune 会把还有人在用的大档删掉，卡片会白到重刷完成。
+     */
+    if (rebuilt > 0 && countPendingThumbs(THUMB_SUFFIX) === 0) pruneUnreferencedThumbs()
   } finally {
     smallBackfilling = false
   }

@@ -183,6 +183,37 @@ class AuthManager {
     return this.state()
   }
 
+  /**
+   * 验证码登录（手机号或邮箱 + 验证码，不要密码）。
+   * 契约见 docs/superpowers/specs/2026-10-15-login-captcha-api.md：同一个 login.php，
+   * 只带 code 不带 password 时走验证码分支，成功返回与密码登录同结构的 { token, user }。
+   * 2026-10-15 后端已上验证码分支（他那边 curl 实测表逐条过了），客户端这边只把旧版
+   * 那句会让人误会的原文挡一下，其余错误一律原样回显。
+   */
+  async loginWithCode(req: { phone?: string; email?: string; code: string }): Promise<{ ok: boolean; message: string; state: AuthState }> {
+    const body: Record<string, unknown> = { code: req.code }
+    if (req.email) body.email = req.email
+    else body.phone = req.phone
+    const r = await request<{ token?: string; user?: Record<string, unknown> }>('login.php', body)
+    if (r.code === 200 && r.data.token) {
+      this.token = r.data.token
+      this.user = r.data.user ? toUser(r.data.user) : null
+      this.persist()
+      // 与密码登录拿同样的完整信息（积分余额、会员到期、复审额度），不等后台补拉就上屏
+      await this.me()
+      return { ok: true, message: '登录成功', state: this.state() }
+    }
+    // 只挡住旧版那一句原文：用户明明填了验证码，
+    // 把“账号和密码不能为空”原样甩回去只会让他以为自己填错。新版缺参文案是“请填写密码或验证码”，
+    // 那条我们走不到（必带 code），所以不做模糊匹配，免得把真错误盖成假说明。
+    const msg = r.message === '账号和密码不能为空'
+      ? '验证码登录暂未开放：服务端只接受密码，请先用密码登录'
+      : r.code === 200
+        ? '登录失败：服务端没返回登录凭证'
+        : r.message || '登录失败'
+    return { ok: false, message: msg, state: this.state() }
+  }
+
   async me(): Promise<AuthState> {
     if (!this.token) return this.state()
     const r = await request<Record<string, unknown>>('user_info.php', null, this.token)

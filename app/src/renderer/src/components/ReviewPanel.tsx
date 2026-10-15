@@ -31,6 +31,7 @@ import { dimTagColor } from './Sidebar'
 import { toSrc } from './imageSrc'
 import {
   BAD_DIMENSIONS,
+  CAT_FLAWS,
   DIMENSION_LABELS,
   PERSON_DIMS,
   isTrashLike,
@@ -53,8 +54,16 @@ type FlawChoice = 'same' | 'add' | 'remove'
 export default function ReviewPanel(): JSX.Element | null {
   const reviewPanelIds = useStore((s) => s.reviewPanelIds)
   const images = useStore((s) => s.images)
+  const activeCategory = useStore((s) => s.activeCategory)
   const closeReviewPanel = useStore((s) => s.closeReviewPanel)
   const moveIds = useStore((s) => s.moveIds)
+  /**
+   * 从瑕疵片页进的面板（用户 10-15：“我瑕疵页哪儿来的离开待确认，按钮不能乱写”）：
+   * 那张图本来就在瑕疵片栏（带高置信瑕疵），提交后它该留在瑕疵片——只是画质由人定完了，
+   * 不存在“离开待确认”这回事。文案按页给，不再拿待确认那套话去说瑕疵页。
+   * 不能用 img.category 判：瑕疵片是虚桶（由 tags 派生），图上的 category 存的不是 'flaws'。
+   */
+  const inFlaws = activeCategory === CAT_FLAWS
 
   const ids = useMemo(() => reviewPanelIds ?? [], [reviewPanelIds])
   const key = ids.join(',')
@@ -205,6 +214,10 @@ export default function ReviewPanel(): JSX.Element | null {
         personIds = imgs.filter((i) => visiblePerson(i) !== person).map((i) => i.id)
         if (personIds.length) await moveIds(personIds, person)
       }
+      // 4) 画质两项已过人：左上角那枚「画质需人工复审」红标该落下（用户 10-15）。
+      //    放在刷新前，让重拉回来的记录本身就带着 qcDecided，不用二次 set。
+      //    主进程对没建议的图自己跳过，这里不用先筛。
+      for (const id of idList) await window.api.aiReviewQcDecided(id)
       // 兑底：没选人数的图也已被 2) 的结案重算 category（主进程侧 computeCategory），这里统一刷新即可
       await useStore.getState().refreshImagesFor(idList)
       await useStore.getState().refreshCounts()
@@ -265,7 +278,11 @@ export default function ReviewPanel(): JSX.Element | null {
             <div className="text-base font-bold text-fg truncate" title={imgs[0].path}>
               {multi ? `重判 ${imgs.length} 张图` : imgs[0].filename}
             </div>
-            <div className="text-sm text-fg2 mt-0.5">逐项改正 AI 判定，提交后这些图离开待确认{multi ? '；勾加 / 叉删 / 没动保留，不会把每张图压平成同一组标签' : ''}</div>
+            <div className="text-sm text-fg2 mt-0.5">
+              {/* 待确认页提交后图会按人数归位离开本栏；瑕疵页那张本来就在瑕疵栏，提交只是把画质这项过人（用户 10-15）*/}
+              {inFlaws ? '逐项改正 AI 判定，提交后这些图的画质由你定案，仍留在瑕疵片' : '逐项改正 AI 判定，提交后这些图离开待确认'}
+              {multi ? '；勾加 / 叉删 / 没动保留，不会把每张图压平成同一组标签' : ''}
+            </div>
           </div>
           <button
             className="shrink-0 grid place-items-center w-9 h-9 rounded-lg border border-line bg-panel2 text-fg2 hover:bg-bad hover:border-bad hover:text-white transition-colors cursor-pointer"
@@ -368,7 +385,7 @@ export default function ReviewPanel(): JSX.Element | null {
         {/* 底部动作 */}
         <div className="px-5 py-4 border-t border-line flex items-center gap-3">
           <button className="btn flex-1 text-base px-4 py-2.5 bg-emerald-700 hover:bg-emerald-600 text-white border-transparent font-medium" disabled={busy} onClick={() => void submit()}>
-            {busy ? '保存中…' : '提交重判（离开待确认）'}
+            {busy ? '保存中…' : inFlaws ? '确认复审' : '提交重判（离开待确认）'}
           </button>
           <button className="btn text-base px-5 py-2.5" disabled={busy} onClick={() => closeReviewPanel()}>
             取消

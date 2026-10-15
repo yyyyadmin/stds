@@ -126,8 +126,9 @@ export const CH = {
   aiReviewStart: 'aireview:start',
   aiReviewStop: 'aireview:stop',
   aiReviewClear: 'aireview:clear', // 采纳/跳过某张后清掉它的建议
-  aiReviewReject: 'aireview:reject', // 用户"不采纳"某张的建议（不改判定，仅从分歧列表剔除；再次复审会重判）
+  aiReviewReject: 'aireview:reject', // 用户"不采纳"某张的建议（不改判定，仅从分歧列表剔除；不算结案，下轮复审会重判）
   aiReviewConfirm: 'aireview:confirm', // 用户确认某张已结案（一致时原样保留、采纳后留痕；不会被默认复审重跑）
+  aiReviewQcDecided: 'aireview:qcdecided', // 人工在判定面板里提交过画质裁定：清掉左上角「画质需人工复审」红标
   exportPreview: 'export:preview',
   exportRun: 'export:run',
   exportCancel: 'export:cancel',
@@ -139,6 +140,8 @@ export const CH = {
   authSendCaptcha: 'auth:send-captcha',
   authRegister: 'auth:register',
   authLogin: 'auth:login',
+  /** 验证码登录（手机号/邮箱 + 验证码）：与 authLogin 同一个后端接口，只是不带 password */
+  authLoginCode: 'auth:login-code',
   authLogout: 'auth:logout',
   authMe: 'auth:me',
   plansList: 'member:plans',
@@ -280,10 +283,12 @@ export interface RendererApi {
   aiReviewStop(): Promise<void>
   /** AI 复审：采纳/跳过后清掉某张图的只读建议 */
   aiReviewClear(id: number): Promise<void>
-  /** AI 复审：把某张的建议标记为"用户已不采纳"（从分歧列表剔除；再次复审会重新判） */
+  /** AI 复审：把某张的建议标记为"用户已不采纳"（从分歧列表剔除；不算结案，下轮复审会重新判这张） */
   aiReviewReject(id: number): Promise<void>
   /** AI 复审：把某张的建议标为"已确认结案"（标签不动，只留痕；不再计入待处理、不被默认复审重跑） */
   aiReviewConfirm(id: number): Promise<void>
+  /** AI 复审：记下「这张的画质两项人已亲自在判定面板里裁过」，红标随即消失（不改任何标签与归属） */
+  aiReviewQcDecided(id: number): Promise<void>
   exportPreview(opts: ExportOptions): Promise<{ will: number; total: number; byTier: Record<1 | 2 | 3, number>; sizeMB: number | null }>
   exportRun(opts: ExportOptions): Promise<ExportProgress['finished']>
   exportCancel(): Promise<void>
@@ -295,6 +300,8 @@ export interface RendererApi {
   authSendCaptcha(req: { phone?: string; email?: string; type: 'register' | 'login' | 'reset_password' }): Promise<{ ok: boolean; message: string }>
   authRegister(req: { phone?: string; email?: string; password: string; code: string }): Promise<{ ok: boolean; message: string }>
   authLogin(account: string, password: string): Promise<AuthState>
+  /** 验证码登录。后端此刻还不认 code（2026-10-15 实测），失败原因已在主进程换成可显示的中文，界面原样回显即可 */
+  authLoginCode(req: { phone?: string; email?: string; code: string }): Promise<{ ok: boolean; message: string; state: AuthState }>
   authLogout(): Promise<AuthState>
   authMe(): Promise<AuthState>
   plansList(): Promise<PlanInfo[]>
@@ -305,7 +312,7 @@ export interface RendererApi {
   checkUpdate(): Promise<UpdateInfo | null>
   openExternal(url: string): Promise<void>
   libraryClear(): Promise<{ cleared: number }>
-  cacheClear(): Promise<{ retried: number; files: number }>
+  cacheClear(): Promise<{ retried: number; files: number; freedMB: number; logs: number; big: number; engineInput: number }>
   /** RAW/HEIC 等浏览器不可渲染格式的原图高清预览（主进程生成，返回磁盘路径；普通格式不需要调用） */
   bigPreview(id: number): Promise<string | null>
   /** 读原图 EXIF 拍摄参数（有序键值；读不到返回 null），供大图右栏展示 */

@@ -5,8 +5,8 @@
  */
 import { create } from 'zustand'
 import type { AppSettings, CategoryKey, ImageRecord, DimensionKey, PerfHint, TierKey, AiReviewSuggestion, AiReviewScope } from '../../shared/types'
-import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, CAT_FLAWS, QC_MANUAL_DIMENSIONS, DIMENSION_LABELS, isBadDim, isStructuralDim, isTrashLike, NEUTRAL_DIMENSIONS, PERSON_DIMS, guessMidDim, flawLevel, SUPPORTED_EXTS, tierOfCat, DEFAULT_TIER_NAMES } from '../../shared/types'
-import type { AiReviewProgress, AuthState, BootstrapInfo, ConsumeResult, MoveRequest, UpdateInfo } from '../../shared/ipc'
+import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, CAT_FLAWS, QC_MANUAL_DIMENSIONS, DIMENSION_LABELS, isBadDim, isStructuralDim, isTrashLike, NEUTRAL_DIMENSIONS, PERSON_DIMS, guessMidDim, flawLevel, isDupRedundant, SUPPORTED_EXTS, tierOfCat, DEFAULT_TIER_NAMES } from '../../shared/types'
+import type { AiReviewProgress, AuthState, BootstrapInfo, ConsumeResult, MoveRequest, PlanInfo, UpdateInfo } from '../../shared/ipc'
 import type { ScanProgress } from '../../main/services/scanner'
 import type { ExportProgress } from '../../main/services/exporter'
 
@@ -170,7 +170,7 @@ export function aiReviewCompareRows(img: ImageRecord): AiReviewCompareRow[] {
 
 /**
  * 该图是否还挂着「等用户表态」的 AI 建议（逐张复核队列的入选口径）。
- * 与 hasAiReviewDiff 的区别很关键：AI 与本地一致的图没差异可采，但它同样需要用户点一下「确认保留」才算结案
+ * 与 hasAiReviewDiff 的区别很关键：AI 与本地一致的图没差异可采，但它同样需要用户点一下「确认采纳」才算结案
  * （用户：复审的目的就是把待确认清空，不能因为两边意见相同就不让我采纳）。
  */
 export function hasAiReviewPending(img: ImageRecord): boolean {
@@ -188,21 +188,23 @@ export function aiReviewBlindSpots(img: ImageRecord): DimensionKey[] {
 }
 
 /**
- * 这张是否已转人工定画质：AI 复审过且已结案（点过采纳/确认保留），但还挂着云端不看的模糊/曝光。
+ * 这张是否还等人工定画质：AI 复审过且已结案（点过「采纳这张」或「确认采纳」）、还挂着云端不看的模糊/曝光，且人没在判定面板里裁过。
  * 现算而不读存起来的标记：画质标签一删（重判面板里删掉或重扫改了结论）它就该立刻变回普通图，
  * 存标记会烂成“角标一直挂着但画质已经没了”。与主进程 db.ts 的 isManualQc 同口径。
+ * qcDecided（用户 10-15 拍板）：人在面板里提交过一次，就不再说“等你裁”——
+ * 不管他最后判“该有”还是“不该有”，画质这项已经过人了，红标再挂着就是催一件已经办完的事。
  * 驱动三件事：卡片左上角的红底角标、标签变暗规则、本栏默认排序把它顶最前（用户 10-14 拍板）。
  */
 export function needsManualReview(img: ImageRecord): boolean {
   const s = img.ai_review
-  if (!s || !s.confirmed) return false
+  if (!s || !s.confirmed || s.qcDecided) return false
   return aiReviewBlindSpots(img).length > 0
 }
 
 /**
  * 待确认 / 瑕疵片默认顺序的分层（用户 10-14：人工复审的排最前，其次不采纳的）：
  *  0 = 等人工定画质（AI 说不上话，只能你定）
- *  1 = 你不采纳过、等下一轮 AI 重判
+ *  1 = 你不采纳过：不采纳不算结案，等下一轮 AI 重判（图同时留在本栏等你手动定也行）
  *  2 = 有建议还没表态（逐张复核队列里的那些）
  *  3 = 其余（没判过的、已干净的）
  */
@@ -229,7 +231,7 @@ export function aiReviewShouldHome(img: ImageRecord): boolean {
 
 /**
  * 这张还等你做点什么：有建议还没表意的（含与本地一致的）或已结案但该归位的。
- * 顶部条、逐张队列、全部处理三处共用这一个口径，避免再出现“哪儿都不在”的图。
+  * 顶部条、逐张队列、全部采纳三处共用这一个口径，避免再出现“哪儿都不在”的图。
  */
 export function hasAiReviewAction(img: ImageRecord): boolean {
   return hasAiReviewPending(img) || aiReviewShouldHome(img)
@@ -331,6 +333,10 @@ interface StoreState {
   showSettings: boolean
   showLogin: boolean
   showMember: boolean
+  /** 「联系客服开通」二维码弹窗（用户 2026-10-15 定：软件内不收款，只有点「开通」才弹码） */
+  showContactQr: boolean
+  /** 是从哪一档套餐弹出来的；未登录或从别的入口进来为 null，弹窗改说「任一套餐」 */
+  contactQrPlan: PlanInfo | null
   /** 启动自动检查到新版时的更新弹窗 */
   showUpdate: boolean
   updateInfo: UpdateInfo | null
@@ -365,6 +371,9 @@ interface StoreState {
   closeLogin(): void
   openMember(): void
   closeMember(): void
+  /** 弹「联系客服开通」：传套餐则写明这一档价目，不传就是通用引导 */
+  openContactQr(plan?: PlanInfo | null): void
+  closeContactQr(): void
   /** 首次开启 AI 复审的应用内授权弹窗（禁 window.confirm）：null=false 不显示 */
   showAiReviewConsent: boolean
   /** 开关 AI 复审：开启时若尚未授权先弹授权弹窗（同意才真开），已授权则存偏好并后台跑一次 */
@@ -374,6 +383,8 @@ interface StoreState {
   /** 关闭授权弹窗（不同意）：不改任何偏好 */
   dismissAiReviewConsent(): void
   doLogin(account: string, password: string): Promise<{ ok: boolean; message: string }>
+  /** 验证码登录（手机号或邮箱 + 验证码）。后端此刻还不认 code，失败原因由主进程换成中文，界面直接显示 */
+  doLoginCode(req: { phone?: string; email?: string; code: string }): Promise<{ ok: boolean; message: string }>
   doRegister(req: { phone?: string; email?: string; password: string; code: string }): Promise<{ ok: boolean; message: string }>
   sendCaptcha(req: { phone?: string; email?: string; type: 'register' | 'login' | 'reset_password' }): Promise<{ ok: boolean; message: string }>
   doLogout(): Promise<void>
@@ -446,7 +457,7 @@ interface StoreState {
   stopAiReview(): Promise<void>
   /** 采纳单张 AI 建议：完全复用手动重判通道（add/removeDimTag + correctImage + moveIds），采纳后清该图建议 */
   adoptAiReview(id: number): Promise<boolean>
-  /** 不采纳单张 AI 建议：什么都不改，只把该建议从分歧列表剔除；再次复审会重新判这张 */
+  /** 不采纳单张 AI 建议：什么都不改，只把该建议从分歧列表剔除；不采纳不算结案，下轮复审会重新判这张 */
   rejectAiReview(id: number): Promise<void>
   /** 确认单张已结案（AI 与本地一致时标签原样不动）：留痕 + 收尾归位，返回是否把它搬出了待确认 */
   confirmAiReview(id: number): Promise<boolean>
@@ -644,8 +655,10 @@ export const useStore = create<StoreState>((set, get) => ({
   activeCategory: null,
   images: [],
   viewMode: 'grid',
-  // 默认按导入时间倒序：每次新导入/全量筛选后，新增图片排在每个分类最前面，方便优先复查新一批
-  sortKey: 'time',
+  // 默认「默认顺序」（用户 10-15 拍板）：顶栏那个下拉框没人动过就永远停在默认序，重启也回到它。
+  // 上一版默认 'time'（最新在前）是替用户做了主——他每次打开看到的是按导入时间重排过的列表，
+  // 下拉框却写着「默认顺序」，两者对不上就像排序坏了。人工在下拉里改的选择不落盘，关掉软件即作废。
+  sortKey: 'default',
   query: '',
   displayIds: [],
   selection: new Set<number>(),
@@ -671,6 +684,8 @@ export const useStore = create<StoreState>((set, get) => ({
   showSettings: false,
   showLogin: false,
   showMember: false,
+  showContactQr: false,
+  contactQrPlan: null,
   showAiReviewConsent: false,
   auth: { loggedIn: false, token: null, user: null },
   toast: null,
@@ -716,8 +731,13 @@ export const useStore = create<StoreState>((set, get) => ({
       .catch(() => {
         /* 探测失败保持全特效：宁可不降级，不能误伤好机器 */
       })
-    // 恢复登录态（不阻塞首屏）
-    void window.api.authBootstrap().then((a) => set({ auth: a }))
+    // 恢复登录态（不阻塞首屏）：先用本地缓存把界面填上，再静默重拉一次 /me。
+    // 不重拉就会拿着上次落盘的快照：额度是后端按日记的账，在另一台电脑上复审过、或隔夜重置了，
+    // 本机顶栏那个“今日额度剩 N 张”还是旧的（用户 10-15：“个人中心与顶部没扣除张数”）。
+    void window.api.authBootstrap().then(async (a) => {
+      set({ auth: a })
+      if (a.loggedIn) await get().refreshAuth()
+    })
     await get().openCategory(null)
     get().bindEvents()
     // 拉一次旧引擎过期信息并起轮询（等引擎握手报出签名后横幅才能数得准）：开发版+正式版都需要
@@ -760,6 +780,12 @@ export const useStore = create<StoreState>((set, get) => ({
   closeMember() {
     set({ showMember: false })
   },
+  openContactQr(plan) {
+    set({ showContactQr: true, contactQrPlan: plan ?? null })
+  },
+  closeContactQr() {
+    set({ showContactQr: false })
+  },
 
   toggleAiReview() {
     const { settings } = get()
@@ -789,6 +815,13 @@ export const useStore = create<StoreState>((set, get) => ({
       return { ok: true, message: '登录成功' }
     }
     return { ok: false, message: '账号或密码错误' }
+  },
+  async doLoginCode(req) {
+    const r = await window.api.authLoginCode(req)
+    // 成功时 state 里已带补齐过的积分/会员；失败时 state 就是当前登录态，赋回去不会有副作用
+    set({ auth: r.state })
+    if (r.ok) set({ showLogin: false })
+    return { ok: r.ok, message: r.message }
   },
   async doRegister(req) {
     const r = await window.api.authRegister(req)
@@ -899,6 +932,10 @@ export const useStore = create<StoreState>((set, get) => ({
       if (prev?.running && !p.running) {
         if (p.phase === 'error' && p.message) set({ toast: { msg: p.message, kind: 'error' } })
         else if (p.phase === 'stopped' && p.quotaExceeded) set({ toast: { msg: '今日云端复核额度已用完，本轮已自动中止', kind: 'info' } })
+        // 额度是后端记的账：本轮到底烧了多少张，只有重拉 /me 返回的 ai_review.remaining 才准。
+        // 不刷就会出现“复审跑完了，会员中心今日剩余还是老数字”，看着就像没扣次数（用户 10-15 拍到）。
+        // 只在终态分支发这一次请求，不在每张进度里刷。
+        void get().refreshAuth()
         // 关键：AI 建议是主进程写进库的，内存 images 还带着旧的"无 ai_review"→不刷新则 diffs 恒空、采纳面板不弹。
         // 收尾期间亮"整理结果"遮罩（不可关），刷完 images 再收起→面板随即弹出。
         if (p.phase === 'done' || p.phase === 'stopped') {
@@ -1403,7 +1440,7 @@ export const useStore = create<StoreState>((set, get) => ({
     else if (r.reason === 'quota_exceeded')
       feedback(`今日云端复核额度已用完（${r.usedToday ?? 0}/${r.dailyLimit ?? '?'}），额度按日重置`)
     else if (r.reason === 'empty')
-      feedback(`${label}无待复核照片：本栏为空，或余下照片均已转人工裁定画质`)
+      feedback(`${label}无待复核照片：本栏为空，或余下照片都已结案（采纳过 / 确认采纳过），或已转人工裁定画质`)
     else if (r.reason === 'no_consent') set({ toast: { msg: '请先在授权窗口中确认开启 AI 复审', kind: 'info' } })
   },
   async stopAiReview() {
@@ -1425,16 +1462,17 @@ export const useStore = create<StoreState>((set, get) => ({
     const img = await window.api.getImage(id)
     const sug = img?.ai_review
     if (!img || !sug) return false
-    // 二次校验仍在它被复审时那一栏（与 matchesView 同一口径），否则早已结案/移走，跳过：
-    //  - review：非废弃 ∩ 非 high ∩（category=review ∪ 带中置信瑕疵）
-    //  - flaws：非废弃 ∩ 高置信瑕疵（fl==='high'，采纳掉标后即自动离开瑕疵片）
+    // 二次校验仍在它被复审时那一栏（与 db.matchesView 同一口径），否则早已结案/移走，跳过：
+    //  - review：非废弃 ∩ 非冗余帧 ∩（category=review ∪ 带中置信瑕疵）——category 停在待确认的
+    //    算待确认，哪怕身上挂着高置信瑕疵（重复组“整组没一张能交”的代表帧就被停在这里拍板）
+    //  - flaws：非废弃 ∩ 高置信瑕疵且没停在拍板位（采纳掉标后即自动离开瑕疵片）
     const fl = flawLevel(img.tags || {})
     const scope = sug.scope ?? 'review'
     const stillValid = isTrashLike(img.category)
       ? false
       : scope === 'flaws'
-        ? fl === 'high'
-        : fl !== 'high' && (img.category === CAT_REVIEW || fl === 'mid')
+        ? fl === 'high' && img.category !== CAT_REVIEW
+        : !isDupRedundant(img.tags || {}) && (img.category === CAT_REVIEW || fl === 'mid')
     if (!stillValid) return false
     for (const key of Object.keys(sug.flaws) as (keyof typeof sug.flaws)[]) {
       const dim = AI_FLAW_TO_DIM[key]
@@ -1460,7 +1498,8 @@ export const useStore = create<StoreState>((set, get) => ({
 
   /**
    * 不采纳单张 AI 建议：不改任何判定/标签/分类，只在建议上打"已否"标记（主进程 rejectAiReview），
-   * 该张立即从分歧列表剔除；再次复审会把它重新判一遍（新建议覆盖旧 JSON，标记自然作废）。
+   * 该张立即从分歧列表剔除。不采纳不算结案（用户 10-15 实测后拍板）：这张仍会进下一轮复审，
+   * 重判后新建议覆盖旧 JSON，标记自然作废。
    */
   async rejectAiReview(id) {
     await window.api.aiReviewReject(id)
@@ -1495,9 +1534,10 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   /**
-   * 批量处理：以主进程权威栏列表为准（不依赖当前视图），逐张走 adoptAiReview。
-   * 一致的图在里面等于“原样确认结案”（无标签可改、改不动任何东西），有分歧的按 AI 改完再结案，
-   * 所以按钮不叫“全部采纳”而叫“全部处理”（用户：不能因为意见相同就不让采纳）。
+   * 批量采纳：以主进程权威栏目列表为准（不依赖当前视图），逐张走 adoptAiReview。
+   * 一致的图在里面等于“原样确认结案”（无标签可改、改不动任何东西），有分歧的按 AI 改完再结案。
+   * 按钮叫“全部采纳”（用户 10-15 定）：批量做完的事就是逐张“采纳这张”的同一个动作，
+   * 名字不一致会让人怀疑“点下去是不是等于没采纳”。
    */
   async adoptAllReviewSuggestions() {
     const scope = get().aiReview?.scope ?? 'review'
@@ -1612,7 +1652,9 @@ export const useStore = create<StoreState>((set, get) => ({
 
   async clearCacheAll() {
     const r = await window.api.cacheClear()
-    set({ toast: { msg: `缓存已清除：${r.retried} 张解码失败项自动重试，缩略图后台重建中`, kind: 'info' } })
+    // 大白话回报：清了什么、腾出多少空间。图库和登录态不在此次删除范围内，不必让用户担心。
+    const freed = r.freedMB > 0 ? `，释放 ${r.freedMB} MB` : ''
+    set({ toast: { msg: `已清理缩略图、预览图、日志和运行缓存${freed}。${r.retried} 张解码失败项自动重试，缩略图后台重建中`, kind: 'info' } })
     setTimeout(() => void get().refreshImages(), 1500)
   },
 

@@ -22,7 +22,7 @@ import { dumpCalibration } from './calib'
 import { harmonizePersonCount } from './personHarmony'
 import { ensureNormalizedJpeg } from './rawPreview'
 import type { DetectResult, DimensionKey, ImageRecord } from '../../shared/types'
-import { isTrashLike, isDupRedundant, flawLevel, CAT_REVIEW, BAD_DIMENSIONS, NEUTRAL_DIMENSIONS, STRUCTURAL_DIMENSIONS, levelOf, dupKeepWeight } from '../../shared/types'
+import { isTrashLike, isDupRedundant, isDeliverable, CAT_REVIEW, BAD_DIMENSIONS, NEUTRAL_DIMENSIONS, STRUCTURAL_DIMENSIONS, levelOf, dupKeepWeight } from '../../shared/types'
 
 export interface ScanProgress {
   running: boolean
@@ -361,23 +361,23 @@ export async function reclusterDuplicates(deps: ReclusterDeps = {}): Promise<{ g
     if (!keepable.length) continue
     // 人工优先：用户手动放过位置的帧先构成候选池（他那次决定比 AI 权重大）
     const human = keepable.filter((r) => r.categoryBy === 'user')
-    // 候选池分两层（用户原话：“不管多少张重复的，必须得有一张是直接入交付库里”）：
-    // 第一层 = 本身干净、又没被人工搁在待确认的图 → 选它当代表，摘掉冗余标签后它就是真的能导出的那张；
-    // 整组都找不到这种图时（全组不是闭眼就是半截头）才退到第二层，按权重选“不那么坏”的一张——
-    // 它仍会被瑕疵闸门拦在库外，但这只是事实：这组确实没一张能交。
-    // （不分层的后果：人工停在待确认、或本身带着闭眼标签的那张会凭“人工优先”抢走代表帧，
-    // 结果整组仍然一张都进不了库，用户“每组必须有一张直接入库”的要求就落空）
-    const cleanPool = keepable.filter((r) => flawLevel(r.tags) === 'none' && r.category !== CAT_REVIEW)
-    const poolClean = cleanPool.filter((r) => r.categoryBy === 'user')
-    const pool = poolClean.length ? poolClean : cleanPool.length ? cleanPool : human.length ? human : keepable
+    // 代表帧挑选（用户 2026-10-15 改了规则）：旧版在这里执着于“不管多少张重复的，必须得有
+    // 一张直接入交付库里”，所以下面先筛“本身干净又没停在待确认”的池子、逐层回落。
+    // 现取消这条硬限制：只按权重挑一张“最不坏”的当代表，它能不能直接进库由它自己满不
+    // 满足交付条件决定（见下面的 parkReview）——全组都带瑕疵时不再假装有一张能交。
+    const pool = human.length ? human : keepable
     const keep = pool.reduce((a, b) => (dupKeepWeight(a.tags, a.tier) <= dupKeepWeight(b.tags, b.tier) ? a : b))
+    // 代表帧不满足交付条件（身上还有中高瑕疵）→ 停到待确认等人拍板：放行进交付库、丢弃进
+    // 垃圾桶，一组最后 0 张在库里是合法结果。人工放过位置的（categoryBy='user'）一律不插手，
+    // 已经在待确认的也不用再写一次。
+    const parkReview = keep.categoryBy !== 'user' && !isTrashLike(keep.category) && keep.category !== CAT_REVIEW && !isDeliverable(keep.category, keep.tags)
     // ---------- 代表帧：挂上组号，并把自己身上的冗余标签摘掉 ----------
     const keepTag = keep.tags.duplicate
     const keepDirty = keep.dupGroup !== gid || (!!keepTag && keepTag.method !== 'user')
-    if (keepDirty) {
+    if (keepDirty || parkReview) {
       const cleanTags = { ...keep.tags }
       if (keepTag && keepTag.method !== 'user') delete cleanTags.duplicate
-      updateDetectResult(keep.id, cleanTags, { ...(keep.details || {}), dupGroup: gid }, gid, keep.category, keep.categoryBy, keep.status)
+      updateDetectResult(keep.id, cleanTags, { ...(keep.details || {}), dupGroup: gid }, gid, parkReview ? CAT_REVIEW : keep.category, parkReview ? 'ai' : keep.categoryBy, keep.status)
       changed++
       deps.onImage && deps.onImage(keep.id)
     }

@@ -25,6 +25,7 @@ import {
   NEUTRAL_DIMENSIONS,
   DEFAULT_TIER_NAMES,
   DUP_REDUNDANT_KEY,
+  DUP_GROUP_KEY,
   isBadDim,
   isStructuralDim,
   type TierKey
@@ -176,6 +177,8 @@ function Row(props: {
   onDelete?: () => void
   /** 数字与标签层级强调：total=全部文件（15px 粗 fg），status=组内主行（13px 粗 fg2） */
   emphasis?: 'total' | 'status'
+  /** 数字背后的量词（如「组」）：侧栏“重复照片”按组数计，不写单位会被当成张数跟旁边几行相加 */
+  unit?: string
   /** 传了就在标签后紧跟一枚绿色小字「导出」，点击直接开导出面板（不触发选中分类） */
   onExport?: () => void
   /** 标签文字后、数字前的一块自定义区域（如「待确认」行后的 AI 复审运行态小字）：靠排版内联，不改变行点击语义 */
@@ -255,6 +258,7 @@ function Row(props: {
           }
         >
           {props.count}
+          {props.unit}
         </span>
       )}
       {props.onDelete && (
@@ -374,9 +378,9 @@ export default function Sidebar(): JSX.Element {
 · 交付库：没瑕疵的好片，默认全部导出（下面再按清晰程度分优质、良好、一般三档）。
 · 瑕疵片：AI 判出缺陷的照片，默认不导出。
 · 待确认：AI 拿不准的，复核后再定，暂不导出。
-· 重复照片：连拍同组已挑了一张好的入库，这些是剩下的。
+· 重复照片：同一瞬间多拍的，这一栏按组算（数字带个“组”字）。每组里 AI 挑了一张最不坏的：能交就直接进交付库，整组都带瑕疵时那张停在待确认等你拍板。
 
-因此这几栏相加约等于全部照片，和下方「类型」「瑕疵」会重复计数的分法不一样。`}
+除“重复照片”按组、不能跟旁边的张数相加之外，其余几栏互不重复，相加约等于全部照片，和下方「类型」「瑕疵」会重复计数的分法不一样。`}
           />
         </span>
         <span className="flex-1 border-t border-fg/20"></span>
@@ -389,12 +393,13 @@ export default function Sidebar(): JSX.Element {
           <Row connector="└──" label={tierNames[t - 1] || String(t)} cat={`tier:${t}`} count={counts[`tier:${t}`]} tip={`${tierTips[t]}；点看只显示这一档，拖入可改档`} />
         </div>
       ))}
-      <Row emphasis="status" label="待确认" cat={CAT_REVIEW} count={counts[CAT_REVIEW]} icon="review" color={lit(counts[CAT_REVIEW], '#eab308')} after={<AiReviewTag scope="review" />} tip="本地检测中置信（拿不准）及人工搁置的照片；云端复核确认后自动归档。不计入导出" />
+      <Row emphasis="status" label="待确认" cat={CAT_REVIEW} count={counts[CAT_REVIEW]} icon="review" color={lit(counts[CAT_REVIEW], '#eab308')} after={<AiReviewTag scope="review" />} tip="本地检测中置信（拿不准）及人工搁置的照片，另加“整组重复照片没一张能交”时那张等你拍板的代表帧；云端复核确认后自动归档。不计入导出" />
       <Row emphasis="status" label="瑕疵片" cat={CAT_FLAWS} count={counts[CAT_FLAWS]} icon="face_ugly" color={lit(counts[CAT_FLAWS], '#ef4444')} noDrop after={<AiReviewTag scope="flaws" />} tip="本地检测判出缺陷（高置信）的照片，默认不导出；经云端复核或人工确认为误判后，删除对应标签即可放行" />
       {/* 重复照片（v2.0.67，客户看到的名字从“重复多余”改成“重复照片”）：本身没拍坏、只因同组已经有一张进了交付库而不导出的那批图。
           以前它们混在“瑕疵片”里，用户看到的就是“好片被当坏片”，10-13 投诉的根源。
-          数字只数“单因冗余被拦下”的张数；点进去是整组视图（每组到底有几张、含已入库的代表帧），两个数不同义。 */}
-      <Row emphasis="status" label="重复照片" cat="duplicate" count={counts[DUP_REDUNDANT_KEY]} icon="duplicate" color={lit(counts[DUP_REDUNDANT_KEY], BAD_DOT_COLORS.duplicate)} noDrop tip="同一瞬间拍了很多张、每组已经挑了一张好的进交付库，这些是剩下的。想多留一张，点进去那一组里选即可" />
+          数字改成按组数（用户 2026-10-15：“实际 2 组、左边只显 1”）：点进去看到的几张堆叠卡，就是这儿的数字，
+          跟旁边按张数的几行不同义，所以带个“组”字、也不能相加。 */}
+      <Row emphasis="status" label="重复照片" cat="duplicate" count={counts[DUP_GROUP_KEY]} unit="组" icon="duplicate" color={lit(counts[DUP_REDUNDANT_KEY], BAD_DOT_COLORS.duplicate)} noDrop tip="按组算的：这一组同一瞬间多拍的重复照片算 1 组（旁边几行按张算，两个数不能相加）。每组里 AI 已经挑了一张最不坏的：它能交就直接进了交付库，整组都带瑕疵时那张会停在待确认等你拍板。想多留一张，点进去那一组里选即可" />
       </section>
 
       {/* 人物在前、瑕疵在后（用户 10-13 指定）：先按人/影调找图是高频动线，

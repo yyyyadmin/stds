@@ -1,7 +1,7 @@
 /**
  * IPC 注册：串联渲染层与主进程服务
  */
-import { ipcMain, dialog, shell, app } from 'electron'
+import { ipcMain, dialog, shell, app, session } from 'electron'
 import type { BrowserWindow } from 'electron'
 import os from 'os'
 import { renameSync, existsSync, mkdirSync } from 'fs'
@@ -32,6 +32,7 @@ import {
   setAiReview,
   rejectAiReview,
   confirmAiReview,
+  markQcDecided,
   processChunked
 } from './db'
 import { scanner, reclassifyAll, type ScanProgress } from './services/scanner'
@@ -41,9 +42,10 @@ import { importPaths, backfillThumbnails, backfillSmallThumbs, clearThumbCache }
 import { ensureBigPreview, clearBigCache } from './services/big'
 import { readImageMeta } from './services/exifMeta'
 import { clearEngineInputCache } from './services/rawPreview'
+import { sweepCaches } from './services/cleanup'
 import { authManager } from './services/auth'
 import { engineManager } from './engine'
-import { CAT_LIBRARY, CAT_TRASH, CAT_FLAWS, CAT_REVIEW, isBadDim, isStructuralDim, isTrashLike, BAD_DIMENSIONS, SUPPORTED_EXTS, PERSON_DIMS, guessMidDim, tierOfCat, isDeliverable, type CategoryKey, type DimensionKey, type ImageRecord } from '../shared/types'
+import { CAT_LIBRARY, CAT_TRASH, CAT_FLAWS, CAT_REVIEW, isBadDim, isStructuralDim, isTrashLike, BAD_DIMENSIONS, SUPPORTED_EXTS, PERSON_DIMS, guessMidDim, tierOfCat, isDeliverable, isDupRedundant, flawLevel, type CategoryKey, type DimensionKey, type ImageRecord } from '../shared/types'
 import { computeCategory } from './classify'
 
 /**
@@ -425,6 +427,20 @@ export function registerIpc(win: BrowserWindow): void {
         delete nextTags[dim]
         newCat = computeCategory(nextTags as ImageRecord['tags'], getSettings(), { ...rec, categoryBy: null } as ImageRecord)
         setCategory(id, newCat, 'user')
+      } else if (rec.category === CAT_REVIEW && rec.categoryBy !== 'user' && (isBadDim(dim) || isStructuralDim(dim))) {
+        // 重复组代表帧“全组没一张能交”时被 AI 停到待确认拍板（原因就是身上那条中高瑕疵）。
+        // 用户删掉这条瑕疵 = 认定它没拍坏，图得自己回落相册——不补这一步它会赖在待确认出不去
+        // （新规则把这条路走宽了，必须配套）。只动 AI 停泊的（人工搁置在待确认的一律尊重），
+        // 且删完确实没中高瑕疵、也不是组里冗余帧时才重算。
+        const nextTags = { ...rec.tags }
+        delete nextTags[dim]
+        if (flawLevel(nextTags) === 'none' && !isDupRedundant(nextTags)) {
+          const nc = computeCategory(nextTags as ImageRecord['tags'], getSettings(), { ...rec, categoryBy: null } as ImageRecord)
+          if (nc !== CAT_REVIEW) {
+            setCategory(id, nc, 'ai')
+            newCat = nc
+          }
+        }
       }
       addCorrection({
         imageId: id,
@@ -527,10 +543,12 @@ export function registerIpc(win: BrowserWindow): void {
   })
   // 采纳/跳过后清掉某张图的只读建议（走 Task2 的 setAiReview，不碰 tags/category）
   ipcMain.handle(CH.aiReviewClear, (_e, id: number) => setAiReview(id, null))
-  // 用户"不采纳"某张的建议：只在建议 JSON 上打标记，不改任何判定；再次复审会重判该张
+  // 用户"不采纳"某张的建议：只在建议 JSON 上打标记，不改任何判定；这张仍会被下一轮复审重判
   ipcMain.handle(CH.aiReviewReject, (_e, id: number) => rejectAiReview(id))
   // 用户确认某张已结案（一致时保留现状、采纳后留痕）：只打标记，不改 tags/category
   ipcMain.handle(CH.aiReviewConfirm, (_e, id: number) => confirmAiReview(id))
+  // 人在判定面板里提交过画质裁定：只清红标（qcDecided 留痕），不碰标签、归属和结案状态
+  ipcMain.handle(CH.aiReviewQcDecided, (_e, id: number) => markQcDecided(id))
 
   ipcMain.handle(CH.exportPreview, (_e, opts: ExportOptions) => exporter.previewCount(opts))
   ipcMain.handle(CH.exportRun, (_e, opts: ExportOptions) => exporter.run(opts))
@@ -549,6 +567,12 @@ export function registerIpc(win: BrowserWindow): void {
     const state = await authManager.login(account, password)
     send(CH.E_authChanged, state)
     return state
+  })
+  // 验证码登录：成功才广播登录态（失败时登录态没变，发一次只会让渲染层白白重算）
+  ipcMain.handle(CH.authLoginCode, async (_e, req: { phone?: string; email?: string; code: string }) => {
+    const r = await authManager.loginWithCode(req)
+    if (r.ok) send(CH.E_authChanged, r.state)
+    return r
   })
   ipcMain.handle(CH.authLogout, () => {
     const state = authManager.logout()
@@ -586,12 +610,19 @@ export function registerIpc(win: BrowserWindow): void {
     clearThumbCache()
     return { cleared }
   })
-  ipcMain.handle(CH.cacheClear, () => {
+  ipcMain.handle(CH.cacheClear, async () => {
     const retried = resetSkipped() // “无法解码”项重置为待处理，重试新版 RAW 内嵌预览提取
-    const files = clearThumbCache()
+    // 全量清理：缩略图 / 大图预览 / 引擎中间图 / 日志 / Electron 缓存 / 引擎模型副本
+    const sweep = sweepCaches()
+    // 主 Cache 目录此时正被 Chromium 持有句柄，删不动；走官方接口清内存+磁盘缓存
+    try {
+      await session.defaultSession.clearCache()
+    } catch (e) {
+      console.error('session.clearCache failed', e)
+    }
     getDb().prepare(`UPDATE images SET thumb = ''`).run() // 缓存文件已删，清空指向以触发全量重建
     runBackfill(send)
-    return { retried, files }
+    return { retried, files: sweep.thumbs, freedMB: sweep.freedMB, logs: sweep.logs, big: sweep.big, engineInput: sweep.engineInput }
   })
 
   // RAW/HEIC 大图原图高清预览（普通格式直接用原文件，不走这里）
@@ -609,6 +640,22 @@ export function registerIpc(win: BrowserWindow): void {
     clearEngineInputCache() // 旧版归一化 JPEG 也是侧躺的，一并清掉，避免引擎复用侧躺输入
     getDb().prepare(`UPDATE images SET thumb = ''`).run()
     saveSettings({ thumbOrientVersion: THUMB_ORIENT_VERSION })
+  }
+
+  // 安装 / 覆盖升级后首次启动：自动做一次全量清理（缩略图、大图、中间图、日志、
+  // Electron 缓存、引擎模型副本）。门控按版本号——同一个版本只清一次，之后每次启动
+  // 都走缓存命中，不会反复重建缩略图。
+  // 为什么必须有：旧版缓存 / 模型副本是按旧逻辑生成的，覆盖安装后会直接被新版复用，
+  // 用户看到的就是“更新了却没新功能、界面还是老样子”；图库（screener.db）与登录态
+  // （auth.json）不在此列，一个字节都不动。
+  const cacheSweepVersion = app.getVersion()
+  if (getSettings().cacheSweepVersion !== cacheSweepVersion) {
+    const sweep = sweepCaches()
+    getDb().prepare(`UPDATE images SET thumb = ''`).run() // 缩略图指向重置，紧随的 runBackfill 全量重建
+    saveSettings({ cacheSweepVersion })
+    console.log(
+      `[cleanup] 升级/首启自动清理完成：缩略图 ${sweep.thumbs}、大图 ${sweep.big}、中间图 ${sweep.engineInput}、日志 ${sweep.logs}、Electron缓存 ${sweep.electronCache}、模型副本 ${sweep.modelCopies}，释放 ${sweep.freedMB}MB`
+    )
   }
 
   // 启动时补齐上次遗留的缩略图（幂等；无遗留则不产生 UI 进度）

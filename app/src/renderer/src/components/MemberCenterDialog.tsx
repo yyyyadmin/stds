@@ -1,8 +1,12 @@
 /**
  * 会员中心对话框（③）
  * - 展示积分余额 / 会员等级 / 到期时间
- * - 套餐列表（plans.php）+ 购买下单（create_order.php）+ 客服二维码（config.php）引导支付
+ * - 套餐列表（plans.php）；点「开通」弹「联系客服开通」二维码弹窗（ContactServiceDialog）
  * - 退出登录
+ *
+ * 2026-10-15 改了收款路径：不再调 create_order.php 下单，也不再把二维码摊在本页滚动区最底下
+ * （那个位置用户点完常以为“没反应”，而终身卡后端根本不支持下单）。现在只在这里放价目表，
+ * 真要付钱一律交给那个弹窗。未登录不给看套餐（用户明确要求），只给登录引导 + 联系客服入口。
  */
 import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store'
@@ -21,6 +25,7 @@ export default function MemberCenterDialog(): JSX.Element | null {
   const close = useStore((s) => s.closeMember)
   const auth = useStore((s) => s.auth)
   const openLogin = useStore((s) => s.openLogin)
+  const openContactQr = useStore((s) => s.openContactQr)
   const doLogout = useStore((s) => s.doLogout)
   const refreshAuth = useStore((s) => s.refreshAuth)
   // 非会员卡片上要用“他自己图库里的张数”做钩子：钩子必须在早退之前取（hooks 不能放在条件返回后面）
@@ -31,10 +36,6 @@ export default function MemberCenterDialog(): JSX.Element | null {
   const [plans, setPlans] = useState<PlanInfo[]>([])
   const [cfg, setCfg] = useState<SysConfig | null>(null)
   const [loading, setLoading] = useState(false)
-  const [selected, setSelected] = useState<PlanInfo | null>(null)
-  const [orderNo, setOrderNo] = useState('')
-  const [qr, setQr] = useState('')
-  const [err, setErr] = useState('')
 
   // 积分记录（积分变动历史）弹窗：每页 10 条，扣费/充值/兑换等全部混排，点「累计消耗」数字或「消费记录」链接都打开
   const [histOpen, setHistOpen] = useState(false)
@@ -73,10 +74,6 @@ export default function MemberCenterDialog(): JSX.Element | null {
 
   useEffect(() => {
     if (!showMember) return
-    setErr('')
-    setOrderNo('')
-    setQr('')
-    setSelected(null)
     void (async () => {
       setLoading(true)
       const [p, c] = await Promise.all([window.api.plansList(), window.api.sysConfig()])
@@ -100,20 +97,9 @@ export default function MemberCenterDialog(): JSX.Element | null {
   // 两边都没值就说“每天有上限”，绝不给他编一个数
   const dailyLimit = user?.ai_review?.daily_limit || cfg?.ai_review_daily_limit || 0
 
-  const buy = async (plan: PlanInfo): Promise<void> => {
-    setErr('')
-    if (!auth.loggedIn) {
-      openLogin()
-      return
-    }
-    // 下单接口的 product_type = 套餐 code 本身（monthly/quarterly/yearly）；product_id 同传 code（后端会员单以 type 为准）
-    const r = await window.api.orderCreate(plan.code, plan.code)
-    // 无论下单是否成功都进入扫码联系客服流程：
-    //  - 成功：用下单返回的 service_qrcode + 订单号
-    //  - 失败（如终身卡后端不支持下单）：回退用 config 的客服二维码，同样引导扫码开通
-    setSelected(plan)
-    setOrderNo(r.ok ? r.order_no || '' : '')
-    setQr(r.service_qrcode || '')
+  const buy = (plan: PlanInfo): void => {
+    // 不在这里下单：软件内不收钱，扫码加客服、报套餐名付款（见 ContactServiceDialog）
+    openContactQr(plan)
   }
 
   return (
@@ -158,18 +144,16 @@ export default function MemberCenterDialog(): JSX.Element | null {
               ) : (
                 <button
                   className="shrink-0 cursor-pointer rounded-md border border-warn/50 bg-warn/15 px-2 py-0.5 text-[11px] font-semibold text-warn transition-colors hover:bg-warn/25"
-                  // 未登录时下方根本没有套餐区（被登录引导顶替），plansRef 是 null，点了必须改走登录
-                  title={auth.loggedIn ? '跳到下方会员套餐' : '登录后即可查看套餐并开通'}
+                  // 已登录：本页下面就摆着套餐表，滚过去让他自己挑档；
+                  // 未登录：不给看套餐（用户 2026-10-15 定），这一步也没法“先登录再开通”，直接给客服码。
+                  // 按钮名字跟着动作改：叫“登录后开通”却弹二维码，就是挂羊头卖狗肉。
+                  title={auth.loggedIn ? '跳到下方会员套餐' : '扫码加客服，问清档位后开通'}
                   onClick={() => {
-                    if (!auth.loggedIn) {
-                      close()
-                      openLogin()
-                    } else {
-                      plansRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                    }
+                    if (auth.loggedIn) plansRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                    else openContactQr()
                   }}
                 >
-                  {auth.loggedIn ? '🔓 立即开通' : '🔓 登录后开通'}
+                  {auth.loggedIn ? '🔓 立即开通' : '🔓 联系客服开通'}
                 </button>
               )}
             </div>
@@ -247,12 +231,16 @@ export default function MemberCenterDialog(): JSX.Element | null {
           1 张照片消耗 <b className="text-fg">1 积分</b>；开通会员后筛选<b className="text-fg">不扣积分</b>，且新会员赠送积分。
         </div>
 
-        {/* 未登录：引导登录 */}
+        {/* 未登录：不给看套餐（用户 2026-10-15 定），但得给两条路：注册拿免费积分，或直接扫码问客服 */}
         {!auth.loggedIn ? (
           <div className="p-8 text-center">
             <div className="text-4xl mb-3">🔒</div>
-            <div className="text-sm text-fg mb-4">登录后查看积分余额并开通会员</div>
-            <button className="btn-primary" onClick={() => { close(); openLogin() }}>去登录 / 注册</button>
+            <div className="text-sm text-fg mb-1.5">登录后即可查看积分余额与会员状态</div>
+            <div className="text-xs text-fg2 mb-5">新注册送 500 积分，相当于免费体验 500 张筛选</div>
+            <div className="flex items-center justify-center gap-2">
+              <button className="btn-primary" onClick={() => { close(); openLogin() }}>去登录 / 注册</button>
+              <button className="btn" onClick={() => openContactQr()} title="不注册也可以先扫码咨询：开通、充值、问价都找客服">联系客服开通</button>
+            </div>
           </div>
         ) : (
           <>
@@ -299,52 +287,23 @@ export default function MemberCenterDialog(): JSX.Element | null {
                         <li key={i}>· {f}</li>
                       ))}
                     </ul>
-                    <button className="btn-primary w-full mt-2 text-xs py-1" onClick={() => void buy(plan)}>
+                    <button className="btn-primary w-full mt-2 text-xs py-1" onClick={() => buy(plan)} title="扫码加客服，报这一档名字付款（本软件不在应用内直接收款）">
                       开通
                     </button>
                   </div>
                 ))}
               </div>
-              {err && <div className="text-xs text-bad mt-3">{err}</div>}
             </div>
 
-            {/* 下单后：客服/微信二维码引导支付 */}
-            {selected && (
-              <div className="px-5 pb-5">
-                <div className="rounded-xl border border-line bg-panel2/40 p-4">
-                  <div className="text-sm font-semibold text-fg">
-                    {orderNo ? `已创建订单：${selected.name}` : `${selected.name} · 扫码联系客服开通`}
-                  </div>
-                  {orderNo && <div className="text-xs text-fg2 mt-1">订单号 {orderNo}</div>}
-                  <div className="text-xs text-fg2 mt-2">
-                    请添加客服微信完成支付，支付成功后积分/会员将自动到账（点击下方「刷新状态」同步）。
-                  </div>
-                  <div className="flex items-center gap-4 mt-3">
-                    {(() => {
-                      const img = qr || cfg?.customer_service_qrcode || cfg?.wechat_qrcode || ''
-                      return img ? (
-                        <img
-                          src={img}
-                          alt="客服二维码"
-                          className="w-40 h-40 rounded-lg border border-line object-contain bg-white p-1"
-                        />
-                      ) : (
-                        <div className="text-xs text-fg3">暂未获取到客服二维码，请稍后重试或联系管理员</div>
-                      )
-                    })()}
-                    <div className="flex flex-col gap-2">
-                      <button className="btn text-xs" onClick={() => void refreshAuth()}>刷新状态</button>
-                      <button className="btn-ghost text-xs text-fg3" onClick={() => setSelected(null)}>收起</button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* 积分充值说明（用户要求：不再显示后台配置的站点名，只留「联系客服微信」） */}
-            <div className="px-5 pb-5 text-[11px] text-fg3">
-              如需单独充值积分或有其他问题，请联系客服微信。
+            {/* 充值积分也得能拿到码：以前二维码藏在“下单后”那块里，现在整页不再摆码，
+                不把这个入口做成可点的，想单独充值的人就真的无处找码了（仍遵守“只有点下去才弹码”）。 */}
+            <div className="px-5 pb-5 text-[11px] leading-relaxed text-fg3">
+              本软件不在应用内直接收款。如需单独充值积分或有其他问题，
+              <button className="text-brand hover:underline cursor-pointer" onClick={() => openContactQr()}>点这里看客服微信二维码</button>
+              。
             </div>
+
+            {/* 下单后那块（订单号 + 内嵌二维码）已整块搬进 ContactServiceDialog，不再在滚动区底部重复一份。 */}
           </>
         )}
       </div>

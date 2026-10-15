@@ -16,6 +16,7 @@ import SettingsDialog from './components/SettingsDialog'
 import DropZone from './components/DropZone'
 import LoginDialog from './components/LoginDialog'
 import MemberCenterDialog from './components/MemberCenterDialog'
+import ContactServiceDialog from './components/ContactServiceDialog'
 import UpdateDialog from './components/UpdateDialog'
 import FailedImagesDialog from './components/FailedImagesDialog'
 import AiReviewConsent from './components/AiReviewConsent'
@@ -30,6 +31,7 @@ export default function App(): JSX.Element {
   const showSettings = useStore((s) => s.showSettings)
   const showLogin = useStore((s) => s.showLogin)
   const showMember = useStore((s) => s.showMember)
+  const showContactQr = useStore((s) => s.showContactQr)
   const showUpdate = useStore((s) => s.showUpdate)
   const showFailedImages = useStore((s) => s.showFailedImages)
   const tagManagerIds = useStore((s) => s.tagManagerIds)
@@ -60,7 +62,7 @@ export default function App(): JSX.Element {
         }
         return
       }
-      const dialogOpen = showExport || showSettings || showLogin || showMember || showUpdate || showFailedImages
+      const dialogOpen = showExport || showSettings || showLogin || showMember || showContactQr || showUpdate || showFailedImages
       if (!previewId && !dialogOpen) {
         if (e.key === '1') void setViewMode('grid')
         if (e.key === '2') void setViewMode('list')
@@ -97,7 +99,7 @@ export default function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [previewId, showExport, showSettings, showLogin, showMember, showUpdate, showFailedImages, tagManagerIds, closeTagManager, setViewMode, stepPreview, closePreview])
+  }, [previewId, showExport, showSettings, showLogin, showMember, showContactQr, showUpdate, showFailedImages, tagManagerIds, closeTagManager, setViewMode, stepPreview, closePreview])
 
   // toast 自动消失：移动类即时反馈 1 秒自收（调用方传 duration），其余默认 6 秒供读完错误信息
   useEffect(() => {
@@ -107,16 +109,31 @@ export default function App(): JSX.Element {
     }
   }, [toast, dismissToast])
 
-  // 全局拖拽导入
+  // 全局拖拽导入：拖到窗口上显示提示层，松手导入。
+  // 收尾必须“怎么都能关”（用户 2026-10-15 实测：误碰拖入后整屏被半透明层压住，再也关不掉）。
+  // 旧代码只在 dragleave 的目标恰好是根容器时才清，而拖拽掠过的都是子元素，那个条件几乎永不成立；
+  // 拖到窗口外松手、按 ESC 取消、拖拽被系统接管这些路径全部没人接手。现在四路兜底：
+  // 拖出窗口（dragleave 时两个信号都说人不在了）、拖拽结束（dragend）、按 ESC、以及页面里任意一下鼠标松开；
+  // 真正在拖时浏览器不会发 mouseup（它发 dragover/drop），所以这两条不会把正常拖图时的提示误弄没。
   useEffect(() => {
     const prevent = (e: DragEvent): void => {
       e.preventDefault()
     }
+    const clear = (): void => setDragOver(false)
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setDragOver(false)
+    }
     window.addEventListener('dragover', prevent)
     window.addEventListener('drop', prevent)
+    window.addEventListener('dragend', clear)
+    window.addEventListener('mouseup', clear)
+    window.addEventListener('keydown', onKey)
     return () => {
       window.removeEventListener('dragover', prevent)
       window.removeEventListener('drop', prevent)
+      window.removeEventListener('dragend', clear)
+      window.removeEventListener('mouseup', clear)
+      window.removeEventListener('keydown', onKey)
     }
   }, [])
 
@@ -127,7 +144,14 @@ export default function App(): JSX.Element {
         setDragOver(true)
       }
     }} onDragLeave={(e) => {
-      if (e.currentTarget === e.target) setDragOver(false)
+      // 只有一种情况该收：拖拽彻底离开窗口（拖到外面松手）。在子元素之间穿行不收，
+      // 收了下一帧又点亮就是频闪（侧栏当年踩过）。两个信号都不在窗口内才判“走了”：
+      // relatedTarget（要去的那个元素）在个别引擎上不可靠，拿光标坐标兜底。
+      const next = e.relatedTarget as Node | null
+      const goingIn = next !== null && e.currentTarget.contains(next)
+      const at = document.elementFromPoint(e.clientX, e.clientY)
+      const stillIn = at !== null && e.currentTarget.contains(at)
+      if (!goingIn && !stillIn) setDragOver(false)
     }} onDrop={(e) => {
       e.preventDefault()
       setDragOver(false)
@@ -139,10 +163,18 @@ export default function App(): JSX.Element {
       if (paths.length) void useStore.getState().importPaths(paths)
     }}>
       {dragOver && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center pointer-events-none">
+        <div className="fixed inset-0 z-50 bg-black/60 flex flex-col items-center justify-center gap-4 pointer-events-none">
           <div className="text-2xl text-brand border-2 border-dashed border-brand rounded-2xl px-16 py-12 bg-panel/80">
             松开鼠标导入照片 / 文件夹
           </div>
+          {/* 误碰拖入时给自己一条看得见的退路（整层仍是 pointer-events-none，不拦住侧栏拖放命中，只这颗按钮可点） */}
+          <button
+            className="pointer-events-auto text-xs text-fg3 hover:text-fg2 underline decoration-dotted underline-offset-4 cursor-pointer"
+            onClick={() => setDragOver(false)}
+            title="没打算导入？点这里关掉提示（按 ESC 或点屏幕任意位置也一样）"
+          >
+            不想导入？关掉提示（或按 ESC）
+          </button>
         </div>
       )}
       {!ready ? (
@@ -170,6 +202,8 @@ export default function App(): JSX.Element {
           {showSettings && <SettingsDialog />}
           {showLogin && <LoginDialog />}
           {showMember && <MemberCenterDialog />}
+          {/* 联系客服开通（二维码）：组件自管开关，叠在会员中心之上，所以不写 showMember 那样的条件 */}
+          <ContactServiceDialog />
           {showUpdate && <UpdateDialog />}
           {showFailedImages && <FailedImagesDialog />}
           {/* AI 复审首次授权弹窗（组件自管开关，未开启时返回 null） */}

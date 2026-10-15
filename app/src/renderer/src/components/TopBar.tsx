@@ -72,6 +72,9 @@ export default function TopBar(): JSX.Element {
   const pct = p && p.total > 0 ? Math.round((p.done / p.total) * 100) : 0
   const isInit = p?.phase === 'init'
   const isIndeterminate = isInit || p?.phase === 'dup-cluster'
+  // 还没跑过 AI 的张数（主进程 categoryCounts 算好的 pending，已剔除废弃库与失败图）：
+  // 它们不为 0 就不许报“本次筛选完成”（用户 2026-10-15 指出：筛完又导了新图，那句绿字就成了假话）
+  const pendingN = s.counts.pending ?? 0
   // 每秒重渲染一次，驱动倒计时刷新（仅运行中计时，停止即停）
   const [now, setNow] = useState(() => Date.now())
   // 清空图库的确认弹窗开关：风险操作必须用户在应用内弹窗上点「确认清空」才执行。
@@ -224,10 +227,16 @@ export default function TopBar(): JSX.Element {
       )}
       {!running ? (
         <button
-          className="btn-primary shrink-0"
+          className={'btn-primary shrink-0' + (pendingN > 0 && !s.engineBusy && !s.importProgress && !s.thumbsProgress ? ' btn-nudge' : '')}
           onClick={() => void s.startScan()}
           disabled={s.engineBusy || !!s.importProgress || !!s.thumbsProgress}
-          title={s.importProgress || s.thumbsProgress ? '图库导入/缩略图生成中，完成后可开始筛选' : undefined}
+          title={
+            s.importProgress || s.thumbsProgress
+              ? '图库导入/缩略图生成中，完成后可开始筛选'
+              : pendingN > 0
+                ? `有 ${pendingN} 张还没筛（含刚拖进来的），点这里只补跑这批：已筛过的不重跑、也不重复扣次数`
+                : undefined
+          }
         >
           {s.importProgress
             ? `导入中 ${s.importProgress.done}/${s.importProgress.total}…`
@@ -265,7 +274,25 @@ export default function TopBar(): JSX.Element {
           )}
         </div>
       )}
-      {(running || (p && p.total > 0)) && (
+      {/* 收尾状态（用户 2026-10-15）：进度条走完了就不该继续杵在顶栏占位置，换成一句绿色的「本次筛选完成」。
+          但只要库里还有没筛的图，这句就得改口成蓝色的“新导入 N 张还没筛选”（蓝=要你动手，跟开始筛选同色）；
+          中途停止/出错例外：那里留着进度条，因为当时真正要说的是“停在半截，下次会自动续跑”；
+          total 为 0 是“还没筛过”的初始态（刚开软件时主进程回传的就是它），不能报完成。 */}
+      {!running && pendingN > 0 && p?.phase !== 'stopped' && p?.phase !== 'error' ? (
+        <span
+          className="shrink-0 text-xs font-medium text-brand whitespace-nowrap tabular-nums"
+          title={`还有 ${pendingN} 张没跑过 AI（刚拖进来的也算）。点左边「开始筛选」只补跑这批，已筛过的不重跑、也不重复扣次数`}
+        >
+          新导入 {pendingN} 张还没筛选，点「开始筛选」
+        </span>
+      ) : !running && p?.phase === 'done' && p.total > 0 ? (
+        <span
+          className="shrink-0 text-xs font-medium text-good whitespace-nowrap"
+          title={`本轮 ${p.done}/${p.total} 张已筛完${p.current ? `，最后一张：${p.current}` : ''}（新导入照片后这句会改成提醒你去筛）`}
+        >
+          ✓ 本次筛选完成
+        </span>
+      ) : (running || (p && p.total > 0)) ? (
         <div className="flex items-center gap-2 min-w-0 flex-1 max-w-md" title={p?.message || ''}>
           {isIndeterminate ? (
             <>
@@ -296,7 +323,7 @@ export default function TopBar(): JSX.Element {
             </>
           )}
         </div>
-      )}
+      ) : null}
       {!running && p?.message && !p.total && <span className="text-xs text-gray-500 truncate flex-1">{p.message}</span>}
       {/* 弹性占位：把右侧那组（复审/搜索/视图/导出/账号）顶到窗口右边。
           以前只在 xl 以上开，窄屏会出现「整排靠左、右边空一大块」的失衡，改成一直开：
@@ -306,8 +333,11 @@ export default function TopBar(): JSX.Element {
       {/* AI 复审开关（会员专属）：放在筛选目录前。非会员灰锁按钮→会员中心；会员真开关（首次开启弹授权） */}
       {(() => {
         const enabled = !!s.settings.aiReviewEnabled
-        // 今日剩余复审张数：跑动中优先用进度里的权威日额度实时算，否则用登录态里 user_info.php 回传的 ai_review.remaining
-        const live = s.aiReview && s.aiReview.dailyLimit > 0 ? Math.max(0, s.aiReview.dailyLimit - s.aiReview.usedToday) : null
+        // 今日剩余复审张数：只在“正在跑”时用进度里的实时值（它逐批刷新，比再发一次 /me 及时）；
+        // 跑完就改回登录态里 user_info 的 ai_review.remaining——那是后端记账的权威值，收尾时已重拉过。
+        // 上一版不分在跑/已停：进度对象跑完并不清空，于是一整轮后顶栏永远拿着进度里那个数，
+        // 后端实际扣了多少再也上不了屏（用户 10-15：“复审完顶部今日额度没扣除”）。
+        const live = s.aiReview?.running && s.aiReview.dailyLimit > 0 ? Math.max(0, s.aiReview.dailyLimit - s.aiReview.usedToday) : null
         const remaining = live ?? user?.ai_review?.remaining ?? null
         const cls =
           'inline-flex items-center gap-1 shrink-0 rounded-md border px-2 py-1 text-xs font-medium whitespace-nowrap transition-colors cursor-pointer ' +
@@ -321,12 +351,20 @@ export default function TopBar(): JSX.Element {
             className={cls}
             title={
               !isMember
-                ? 'AI 复审为会员专属功能，点击了解会员'
+                ? s.auth.loggedIn
+                  ? 'AI 复审为会员专属功能，点击了解会员'
+                  : 'AI 复审为会员专属功能：未登录看不到套餐列表，点这里直接扫码问客服怎么开通'
                 : enabled
                   ? `AI 复审已开启：分类完成后自动将「待确认」照片提交云端复核，仅生成结论，经确认后方写回判定${remaining != null ? `；今日额度剩 ${remaining} 张` : ''}`
                   : `开启 AI 复审：分类完成后自动将「待确认」照片提交云端模型二次核验，仅生成结论，经确认后方写回判定${remaining != null ? `；今日额度剩 ${remaining} 张` : ''}`
             }
-            onClick={() => (isMember ? s.toggleAiReview() : useStore.setState({ showMember: true }))}
+            onClick={() => {
+              if (isMember) s.toggleAiReview()
+              // 未登录：会员中心里根本没摆套餐（用户 2026-10-15 定），把他丢过去只能看到一句“去登录”，
+              // 想当场问清怎么开通没有出路；已登录：还是进会员中心看价目表，点「开通」才弹码。
+              else if (!s.auth.loggedIn) s.openContactQr()
+              else useStore.setState({ showMember: true })
+            }}
           >
             {isMember && (
               <span className={'inline-block w-7 h-3.5 rounded-full transition-colors ' + (enabled ? 'bg-good' : 'bg-line')}>

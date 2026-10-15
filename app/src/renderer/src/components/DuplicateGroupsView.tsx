@@ -2,7 +2,8 @@
  * 重复照片 分组视图（专用定制界面）
  * - 把同一 dupGroup 的重复照片叠成一张"3D 堆叠卡"：后层向左上、前层向右下错开，
  *   每张都露出右下角，一眼看出这一组有几张。
- * - 整组成员 = 本分类的多余帧 + 其它分类里的同伴（聚类时每组按用户权重挑出的代表帧留在交付库）。
+ * - 整组成员 = 本分类的多余帧 + 其它分类里的同伴（聚类时每组按用户权重挑出的代表帧：
+ *   本身干净就留在交付库，全组没一张能交时它被停在待确认等你拍板）。
  *   后者由主进程 listImagesByGroups 按 dup_group 补全，在弹窗里以锁定卡展示（虚线框 + “已在交付库”角标）：
  *   这样每组永远看得到完整上下文，2 张的组不会再退化成一张“未成组”孤帧（已彻底取消该分区）。
  * - 点击堆叠卡 → 弹窗平铺该组全部照片，这一页已简化成一条主线（用户 10-13 拍板“要简单易懂好操作”）：
@@ -33,6 +34,8 @@ import {
   DIMENSION_LABELS,
   estimateTier,
   isBadDim,
+  isDeliverable,
+  isDupRedundant,
   isStructuralDim,
   isTrashLike,
   type DimensionKey,
@@ -62,43 +65,43 @@ interface Group {
 }
 
 /**
- * 锁定帧角标：只回答客户真正关心的问题——“这张会不会被导出”。
- * 交付库在这里是虚分类：人数（单人照/多人合拍照/多人混合照/无人物场景）、黑白照、自定义分类都算交付库
- * （与主进程 exporter.isLibrary 同一口径，导出时一起走），所以主分类是「多人合拍照」的兜底帧
- * 也照样正常导出——角标写「交付库」而不是「多人合拍照」，否则会和顶部说明自相矛盾。
- */
-function catShort(cat: string): string {
-  if (isTrashLike(cat)) return '废弃库'
-  if (cat === CAT_REVIEW) return '待确认'
-  // v2.0.67：重复照片从瑕疵表摘出去了，不单独判一下会被下面的“交付库”兜住（旧数据里 category=duplicate 的行）
-  if (isStructuralDim(cat)) return '重复照片'
-  if (isBadDim(cat)) return DIMENSION_LABELS[cat] || '问题图区'
-  return '交付库'
-}
-
-/** 这张落在哪个相册（与短名一致时不重复显示） */
+ * 这张落在哪个相册（与位置短名一致时不重复显示） */
 function catAlbum(cat: string): string {
   if (cat === CAT_LIBRARY) return ''
   if (cat.startsWith('custom:')) return '自定义分类'
   return DIMENSION_LABELS[cat as keyof typeof DIMENSION_LABELS] || ''
 }
 
-/** 悬浮说明用的完整说法：如「交付库（多人合拍照）」 */
-function catFull(cat: string): string {
-  const album = catAlbum(cat)
-  return album ? `${catShort(cat)}（${album}）` : catShort(cat)
-}
-
 /**
- * 这张是不是“已经在交付库里、会被导出去”的那类。
- * 不能用 category==='library' 判：交付库是虚分类，人数图/黑白图/自定义相册里的干净图都算（与主进程
- * exporter.isLibrary 同一口径）。分组详情页靠它把已入库的那几张挑出来排到最前。
+ * 这张是不是“已经在交付库里、会被导出去”。
+ * 口径单一真源：直接用主进程导出闸门同一个 isDeliverable（用户 2026-10-15：“在就是在，不在就是不在，
+ * 不能乱标”）。旧版只看 category 与冗余标签、完全不查身上的瑕疵标签，于是带着闭眼的代表帧
+ * 被角标谎报“已在交付库（会被导出）”，而导出清单里根本没这张。
+ * 分组详情页靠它把真正会出口的那几张挑出来排到最前。
  */
 function inLibrary(img: ImageRecord): boolean {
-  if (isTrashLike(img.category) || img.category === CAT_REVIEW) return false
-  if (isBadDim(img.category) || isStructuralDim(img.category)) return false
-  // 它身上的冗余标签就是“同组已有代表帧、我这张不导出”——那它确实不在库里
-  return !img.tags.duplicate || img.tags.duplicate.level === 'low'
+  return isDeliverable(img.category, img.tags)
+}
+
+/** 角标用的位置短名：只说它真正停在哪，不再把“人数相册”兜底成“交付库” */
+function placeShort(img: ImageRecord): string {
+  if (isTrashLike(img.category)) return '废弃库'
+  if (img.category === CAT_REVIEW) return '待确认'
+  if (inLibrary(img)) return '交付库'
+  if (isStructuralDim(img.category) || isDupRedundant(img.tags)) return '重复照片'
+  if (isBadDim(img.category)) return DIMENSION_LABELS[img.category as DimensionKey] || '问题图区'
+  // 主分类是人数/黑白/自定义相册却带中高瑕疵：人在那个相册里，但导出闸门拦着
+  return `${catAlbum(img.category) || '相册'}·带瑕疵`
+}
+
+/** 弹窗状态行的完整说法：位置 + 会不会被导出，两者必须同时真话 */
+function exportStateText(img: ImageRecord): string {
+  if (inLibrary(img)) return '已在交付库（会被导出）'
+  if (isTrashLike(img.category)) return '已在废弃库（不导出）'
+  if (img.category === CAT_REVIEW) return '停在待确认等你拍板（不导出）'
+  if (isStructuralDim(img.category) || isDupRedundant(img.tags)) return '还在重复照片里等你决定（不导出）'
+  if (isBadDim(img.category)) return `停在${DIMENSION_LABELS[img.category as DimensionKey] || '问题图区'}（不导出）`
+  return `带着瑕疵停在${catAlbum(img.category) || '相册'}（不导出）`
 }
 
 /** 右上角档位角标（优质/绿、良好/蓝、一般/灰）：与网格图右上角标同一命名与配色 */
@@ -195,7 +198,7 @@ function StackCard({ group, onOpen }: { group: Group; onOpen: () => void }): JSX
         {libCount > 0 ? (
           <span className="text-good font-bold">已入交付库 {libCount} 张</span>
         ) : (
-          <span className="text-fg3">{lockedFirst ? `库里一张都没（有张停在${catShort(lockedFirst.category)}）· ` : '库里一张都没 · '}</span>
+          <span className="text-fg3">{lockedFirst ? `库里一张都没（有张停在${placeShort(lockedFirst)}）· ` : '库里一张都没 · '}</span>
         )}
         待你决定 {todo}
       </span>
@@ -296,7 +299,7 @@ function ZoomViewer({
   // keep 主线：未入库且非废弃库的那张才能“加进库/丢弃”（含待确认/瑕疵分类，都就地可收）；已入库=移出；废弃库/废弃桶=恢复
   const canKeep = mode === 'keep' && !inLib && !isTrash
   const statusText = isLocked && !inLib
-    ? `当前：已在${catFull(img.category)}${mode === 'keep' ? '（可就地处理）' : '（不参与本组）'}`
+    ? `当前：${exportStateText(img)}${mode === 'keep' ? '（可就地处理）' : '（不参与本组）'}`
     : inLib
       ? '当前：已在交付库（会被导出）'
       : mode !== 'keep'
@@ -364,7 +367,7 @@ function ZoomViewer({
           ) : isTrash ? (
             <button className="px-5 py-2 rounded-md text-lg font-bold text-white bg-amber-500 hover:bg-amber-600 transition-colors" onClick={() => onRestore(img.id)}>恢复回本组</button>
           ) : (
-            <span className="px-5 py-2 rounded-md text-lg text-white/45 border border-white/15">🔒 已在{catShort(img.category)}</span>
+            <span className="px-5 py-2 rounded-md text-lg text-white/45 border border-white/15">🔒 已在{placeShort(img)}</span>
           )
         ) : (
           <button className={selectCls} onClick={() => onToggle(img.id)} disabled={isLocked}>{on ? '取消选中' : '选中恢复'}</button>
@@ -521,7 +524,7 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
                       ? 'border-brand'
                       : 'border-line hover:border-gray-500')
             }
-            title={inLib ? `${img.filename} · 已在交付库（会被导出），点「移出交付库」可退回本组` : mode === 'keep' && isTrash ? `${img.filename} · 已在${catFull(img.category)}，点「恢复」可捣回本组` : mode === 'keep' && group.locked.has(img.id) ? `${img.filename} · 已在${catFull(img.category)}，可就地收进库或丢弃` : img.filename}
+            title={inLib ? `${img.filename} · 已在交付库（会被导出），点「移出交付库」可退回本组` : mode === 'keep' && isTrash ? `${img.filename} · 已在${placeShort(img)}，点「恢复」可挪回本组` : mode === 'keep' && group.locked.has(img.id) ? `${img.filename} · ${exportStateText(img)}，可就地收进库或丢弃` : img.filename}
           >
             {/* 图片本体：keep 模式点它放大对比；trash 模式点它切换勾选 */}
             <button
@@ -539,7 +542,7 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
               </span>
             )}
             {!inLib && group.locked.has(img.id) && (
-              <span className={'absolute left-1.5 top-1.5 z-20 px-1.5 py-0.5 rounded text-[11px] font-bold text-white shadow ' + (mode === 'keep' ? (isTrash ? 'bg-amber-600/90' : 'bg-gray-600/90') : 'bg-gray-600/90')}>{mode === 'keep' ? '在' + catShort(img.category) : '🔒 已在' + catShort(img.category)}</span>
+              <span className={'absolute left-1.5 top-1.5 z-20 px-1.5 py-0.5 rounded text-[11px] font-bold text-white shadow ' + (mode === 'keep' ? (isTrash ? 'bg-amber-600/90' : 'bg-gray-600/90') : 'bg-gray-600/90')}>{mode === 'keep' ? '在' + placeShort(img) : '🔒 已在' + placeShort(img)}</span>
             )}
             {mode !== 'keep' && on && !inLib && (
               <span className="absolute left-1.5 top-1.5 z-20 px-1.5 py-0.5 rounded text-[11px] font-bold text-white shadow bg-brand">✓ 恢复</span>
@@ -552,7 +555,7 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
                 {inLib ? (
                   <button className="flex-1 rounded-md bg-panel/95 ring-1 ring-brand/70 px-2 py-2 text-[11px] font-bold text-brand shadow hover:bg-brand hover:text-white transition-colors whitespace-nowrap" onClick={() => requestRemove(img)} title="这张不交了：从交付库移回本组（不会自动顶别人上来）；若是本组最后一张会先问你一下">移出交付库</button>
                 ) : isTrash ? (
-                  <button className="flex-1 rounded-md bg-amber-500/95 ring-1 ring-white/70 px-2 py-2 text-[11px] font-bold text-white shadow hover:bg-amber-600 transition-colors whitespace-nowrap" onClick={() => requestRestore(img)} title={`这张现在在${catShort(img.category)}：恢复后回到本组，重新由你决定要不要进交付库`}>恢复回本组</button>
+                  <button className="flex-1 rounded-md bg-amber-500/95 ring-1 ring-white/70 px-2 py-2 text-[11px] font-bold text-white shadow hover:bg-amber-600 transition-colors whitespace-nowrap" onClick={() => requestRestore(img)} title={`这张现在在${placeShort(img)}：恢复后回到本组，重新由你决定要不要进交付库`}>恢复回本组</button>
                 ) : (
                   <>
                     <button className="flex-[7] rounded-md bg-good/95 ring-1 ring-white/70 px-2 py-2 text-[11px] font-bold text-white shadow hover:bg-[#15803d] transition-colors whitespace-nowrap" onClick={() => setPickerId(img.id)} title="就要这张：先选放优质/良好/一般哪一档再确认——是往交付库里多加一张，不会顶掉上面那张">要这张→</button>
@@ -687,7 +690,7 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
               <div className="text-base font-bold text-fg mb-2">{isRestore ? '把这张从废弃库恢复回本组？' : '这是本组在交付库里的最后一张'}</div>
               <div className="text-sm text-fg2 leading-relaxed mb-5">
                 {isRestore ? (
-                  <>《{img.filename}》现在在<span className="font-bold">{catFull(img.category)}</span>。恢复后它会回到【重复照片】本组，重新由你决定要不要进交付库。</>
+                  <>《{img.filename}》现在在<span className="font-bold">{placeShort(img)}</span>。恢复后它会回到【重复照片】本组，重新由你决定要不要进交付库。</>
                 ) : (
                   <>移除后，这一组在交付库里就<span className="text-bad font-bold"> 0 张</span>了（整组不会被导出）。确定要把《{img.filename}》移出交付库、退回本组吗？</>
                 )}
@@ -825,7 +828,8 @@ export default function DuplicateGroupsView({ images, mode }: { images: ImageRec
           {bannerOpen && (
             <ul className="space-y-1 mt-1.5 leading-relaxed">
               <li>
-                · 每一组重复照片，AI 已经先把<b className="text-fg2">最干净的那张自动放进【交付库】兜底</b>——你一张都不整理，这组也至少有一张会被导出，<b className="text-fg2">不会整组丢</b>。
+                · 每一组重复照片，AI 已经先挑出<b className="text-fg2">最像能交的那张</b>：它本身干净就直接进【交付库】兜底——你一张都不整理，这组也有一张会被导出；
+                <b className="text-fg2">整组都带着瑕疵时不再硬交</b>，那张会被送到【待确认】等你拍板，这种组现在 0 张在库里是正常的。
               </li>
               <li>
                 · 所以点开分组会看到<span className="text-good font-medium">横线上面</span>是已入库的那几张（绿框 + <b className="text-good">✓ 已在交付库</b>），横线下面才是还没入库、由你挑的。
