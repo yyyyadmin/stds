@@ -234,6 +234,38 @@ function ManualFlag({ img }: { img: ImageRecord }): JSX.Element | null {
 }
 
 /**
+ * 这张是否为“重复组代表帧停在待确认”：主分类在待确认 + 它属于某个重复组（dupGroup 有值）+ 它不是
+ * 组里的冗余帧（没带可见 duplicate 标签，即它是那张代表帧）。成因：整组没一张能直接交，程序把最不坏的
+ * 这张停到待确认等用户拍板“这几张重复的留哪张”（与 scanner.ts parkReview、db.matchesView 同口径）。
+ */
+function isDupRepParked(img: ImageRecord): boolean {
+  return img.category === CAT_REVIEW && !!img.dupGroup && !isDupRedundant(img.tags)
+}
+
+/** 左上角是否已被一枚贴角红标占住（人工复审 或 重复组代表帧）：选中点/检测中需往下让一格，不叠在一起 */
+function hasCornerFlag(img: ImageRecord): boolean {
+  return needsManualReview(img) || isDupRepParked(img)
+}
+
+/**
+ * 重复组代表帧停在待确认的左上角贴角红标（用户 10-16）：这张不是画质没过，而是“整组没一张能直接交、
+ * 留它等你拍板重复照片里留哪张”。复用「人工复审」同款样式，但文字叫「重复照片待定」（用户 10-16 拍板）：
+ * 它等的是“留哪张”不是“裁画质”，跟「人工复审」同名会让人以为复审了没清掉。纯显示、不可点。
+ * 若这张同时要人工复审（画质没过），让位给 ManualFlag，不叠两枚（UI 铁律：同一位置只留一处）。
+ */
+function DupParkFlag({ img }: { img: ImageRecord }): JSX.Element | null {
+  if (needsManualReview(img) || !isDupRepParked(img)) return null
+  return (
+    <span
+      className="absolute left-0 top-0 z-20 flex items-center justify-center rounded-br-[12px] bg-bad px-3.5 py-1.5 text-xs font-bold leading-none text-white shadow-[0_1px_4px_rgba(0,0,0,0.7)]"
+      title="这张停在待确认，是因为它所在的重复组里没有一张能直接交付，留它等你拍板‘这几张重复的留哪张’——不是画质没过关。"
+    >
+      重复照片待定
+    </span>
+  )
+}
+
+/**
  * 卡片左下角的维度标签条：按置信度取前 3 枚，剩下的折成「+N」。
  * 悬停 +N 只弹被折叠的剩余标签（用户拍板：不重复显示卡片上已有的前 3 枚）。
  * 弹层走 portal + fixed：卡片根节点是 overflow-hidden，弹在卡片内部会被剪掉；
@@ -444,12 +476,13 @@ function ThumbBase({ img, cellPx, index, onClick, onDoubleClick, dragIds }: {
     >
       <ThumbImg img={img} cellPx={cellPx} className="w-full h-full object-cover pointer-events-none" />
       <ManualFlag img={img} />
+      <DupParkFlag img={img} />
       {/* 左上角已被「人工复审」红底占住时，选中圆点/检测中往下让一格，不叠在一起（两者都是左对齐）*/}
       {selected && (
-        <span className={'absolute left-1 z-20 w-4 h-4 rounded-full bg-brand text-white text-[10px] flex items-center justify-center ' + (needsManualReview(img) ? 'top-[26px]' : 'top-1')}>✓</span>
+        <span className={'absolute left-1 z-20 w-4 h-4 rounded-full bg-brand text-white text-[10px] flex items-center justify-center ' + (hasCornerFlag(img) ? 'top-[26px]' : 'top-1')}>✓</span>
       )}
       {isScanning && (
-        <span className={'absolute left-1 z-10 px-1.5 py-0.5 rounded bg-red-500 text-white text-[10px] font-bold animate-pulse shadow ' + (needsManualReview(img) ? 'top-[26px]' : 'top-1')}>检测中</span>
+        <span className={'absolute left-1 z-10 px-1.5 py-0.5 rounded bg-red-500 text-white text-[10px] font-bold animate-pulse shadow ' + (hasCornerFlag(img) ? 'top-[26px]' : 'top-1')}>检测中</span>
       )}
       <StatusRibbon img={img} />
       <TagChips img={img} />
@@ -1127,8 +1160,9 @@ function MasonryThumb(props: { img: ImageRecord; index: number; onClick: (i: num
     >
       <img src={img.thumb ? toSrc(img.thumb) : toSrc(img.path)} loading="lazy" className="w-full object-cover" style={{ aspectRatio: String(ratio) }} alt={img.filename} draggable={false} />
       <ManualFlag img={img} />
+      <DupParkFlag img={img} />
       {isScanning && (
-        <span className={'absolute left-1 z-10 px-1.5 py-0.5 rounded bg-red-500 text-white text-[10px] font-bold animate-pulse shadow ' + (needsManualReview(img) ? 'top-[26px]' : 'top-1')}>检测中</span>
+        <span className={'absolute left-1 z-10 px-1.5 py-0.5 rounded bg-red-500 text-white text-[10px] font-bold animate-pulse shadow ' + (hasCornerFlag(img) ? 'top-[26px]' : 'top-1')}>检测中</span>
       )}
       <StatusRibbon img={img} />
       <TagChips img={img} />

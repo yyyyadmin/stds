@@ -36,7 +36,7 @@
   "data": {
     "api_key": "sk-================",        // 千问 DashScope API-KEY（客户端仅内存持有）
     "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1", // OpenAI 兼容端点
-    "model": "qwen-vl-max",                  // 可由后端调整，客户端不硬编码
+    "model": "qwen3.7-flash",               // 可由后端调整，客户端不硬编码。2026-10-16 定稿：后端下发值请改为 qwen3.7-flash（配合客户端 v9 提示词实测：数人任务比 qwen3-vl-plus 更准，同输入跑两遍 98.8% 一致，单价约为 plus 的 1/5）；前提是请求体带 enable_thinking:false（客户端已无条件发）
     "ttl": 600,                              // 建议客户端缓存秒数（非 key 真实有效期）
     "session_id": "srv-2026xxxx-abcdef",     // ★服务端签发的本次会话令牌，接口 B 必须回传
     "daily_limit": 500,                      // 该会员今日复审张数上限（服务端权威）

@@ -1736,7 +1736,7 @@ export const useStore = create<StoreState>((set, get) => ({
     set({
       importProgress: null,
       toast: {
-        msg: `导入完成：新增 ${r.added} 张${r.existed ? `，已存在 ${r.existed} 张` : ''}${r.filtered ? `，已跳过 ${r.filtered} 个不支持的格式` : ''}${r.skipped ? `，无法解码 ${r.skipped} 张` : ''}`,
+        msg: `导入完成：新增 ${r.added} 张${r.dupSkipped ? `，过滤同名重复 ${r.dupSkipped} 张` : ''}${r.nameKept ? `，另有 ${r.nameKept} 张同名但内容不同（相机重号），已按不同照片导入` : ''}${r.existed ? `，已存在 ${r.existed} 张` : ''}${r.filtered ? `，已跳过 ${r.filtered} 个不支持的格式` : ''}${r.skipped ? `，无法解码 ${r.skipped} 张` : ''}`,
         kind: 'info'
       }
     })

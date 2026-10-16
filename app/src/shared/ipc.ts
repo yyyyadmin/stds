@@ -265,7 +265,7 @@ export interface RendererApi {
   bootstrap(): Promise<BootstrapInfo>
   pickFolder(): Promise<string | null>
   pickImages(): Promise<string[] | null>
-  importPaths(paths: string[]): Promise<{ added: number; skipped: number; existed: number; filtered: number }>
+  importPaths(paths: string[]): Promise<{ added: number; skipped: number; existed: number; filtered: number; dupSkipped: number; nameKept: number }>
   importCancel(): Promise<void>
   listImages(filter: { category?: CategoryKey; status?: string }): Promise<ImageRecord[]>
   /** 按 dup_group 批量取整组全部成员（含不在当前分类的保留帧），供重复/连拍分组视图补全整组 */

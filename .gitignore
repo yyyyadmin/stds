@@ -31,6 +31,8 @@ app/scripts/_*.txt
 # 体检/试点脚本的一次性输出（只读诊断产物，不进版本库）
 scripts/_*.txt
 app/scripts/_*.json
+# 提示词 A/B 跑分台的全部输出（原始判定 jsonl、眼睛真值表、联络表大图），体积大且纯诊断，禁止入库
+app/scripts/out/
 
 # 系统/编辑器杂项
 .DS_Store

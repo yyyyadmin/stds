@@ -445,7 +445,7 @@ class AuthManager {
         data: {
           api_key: String(d.api_key),
           endpoint: String(d.endpoint || ''),
-          model: String(d.model || 'qwen3-vl-plus'),
+          model: String(d.model || 'qwen3.7-flash'),
           ttl: Number(d.ttl) || 600,
           session_id: String(d.session_id),
           daily_limit: Number(d.daily_limit) || 0,

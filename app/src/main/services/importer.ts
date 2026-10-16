@@ -1,6 +1,8 @@
 /**
  * 导入模块（第九章 9.1）：文件夹 / 拖入图片，支持 JPG/PNG/TIFF/BMP/WebP/HEIC 及主流 RAW
  * - 递归遍历目录，去重（同路径不重复导入）
+ * - 同名过滤（用户 10-16）：文件名+后缀完全一样且文件大小相同 → 判定为同一张照片从多个文件夹重复导入，跳过并计数；
+ *   同名但大小不同 → 相机重号（两场婚礼可能都有 7G1A0001.JPG），是不同的照片，照常导入并在提示里单独报数，绝不误吞
  * - sharp 读取尺寸 + 生成缩略图缓存；无法解码的文件标记 skip
  */
 import { readdirSync, statSync, unlinkSync, existsSync } from 'fs'
@@ -60,7 +62,7 @@ export async function importPaths(
   paths: string[],
   onProgress: (p: ImportProgress) => void,
   shouldStop: () => boolean
-): Promise<{ added: number; skipped: number; existed: number; filtered: number }> {
+): Promise<{ added: number; skipped: number; existed: number; filtered: number; dupSkipped: number; nameKept: number }> {
   const files: string[] = []
   const stats = { filtered: 0 }
   for (const p of paths) {
@@ -75,8 +77,18 @@ export async function importPaths(
       /* ignore */
     }
   }
+  // 库里已有的“文件名(忽略大小写) → 一组文件大小”：同名同大小判重复，同名不同大小判重号（不丢片）
+  const nameSizes = new Map<string, Set<number>>()
+  for (const r of getDb().prepare('SELECT filename, file_size FROM images').all() as Array<{ filename: string; file_size: number }>) {
+    const k = r.filename.toLowerCase()
+    let s = nameSizes.get(k)
+    if (!s) nameSizes.set(k, (s = new Set()))
+    s.add(r.file_size)
+  }
   let added = 0
   let existed = 0
+  let dupSkipped = 0
+  let nameKept = 0
   let done = 0
   // 快速入库：只 stat + 插入，不解码、不生成缩略图（缩略图交后台回填），本地目录可秒级完成
   for (const f of files) {
@@ -92,6 +104,15 @@ export async function importPaths(
     } catch {
       /* ignore */
     }
+    const key = basename(f).toLowerCase()
+    const known = nameSizes.get(key)
+    if (known && known.has(size)) {
+      dupSkipped++ // 同名同大小：同一张照片已经从另一个文件夹导过了，不再重复入库
+      continue
+    }
+    if (known) nameKept++ // 同名不同大小：相机重号，是不同的照片，照常导入但计入提示
+    if (known) known.add(size)
+    else nameSizes.set(key, new Set([size]))
     insertImage({
       path: f,
       filename: basename(f),
@@ -112,7 +133,7 @@ export async function importPaths(
     }
   }
   onProgress({ done: files.length, total: files.length, current: '' })
-  return { added, skipped: 0, existed, filtered: stats.filtered }
+  return { added, skipped: 0, existed, filtered: stats.filtered, dupSkipped, nameKept }
 }
 
 /** 单张图片：读尺寸 + 生成缩略图双档（大档见 THUMB_MAX，小档由大档换后缀派生）；RAW 解码失败时自动提取内嵌 JPEG 预览兜底；仍失败才标记 skip */

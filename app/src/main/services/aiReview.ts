@@ -17,7 +17,9 @@ import type { AiReviewSuggestion, AiReviewScope, CategoryKey } from '../../share
 import { CAT_FLAWS, CAT_REVIEW } from '../../shared/types'
 import type { AiReviewProgress } from '../../shared/ipc'
 
-const IMG_MAX_SIDE = 1024
+// 2026-10-16 定稿：送图最长边 1536（原 1024 会把"笑到闭眼/脸太小"的细节压糊，flash 实测漏判）；
+// 质量 82 不变。cost 只增 input token（约 +46%，全量约 ¥0.9，可忽略），耗时略增但在 15s 超时内。
+const IMG_MAX_SIDE = 1536
 const IMG_QUALITY = 82
 const FETCH_TIMEOUT_MS = 15000
 const REPORT_EVERY = 5 // 每成功 5 张回写一次用量
@@ -237,7 +239,7 @@ class AiReview extends EventEmitter {
     this.emitProgress({ current: basename(rec.path || rec.filename) })
     const modelText = STUB ? null : await this.callDashScope(id)
     let verdict: AiReviewVerdict | null
-    let model = STUB ? 'stub' : this.key?.model || 'qwen3-vl-plus'
+    let model = STUB ? 'stub' : this.key?.model || 'qwen3.7-flash'
     if (STUB) {
       verdict = STUB_VERDICTS[id % STUB_VERDICTS.length]
     } else {
@@ -304,6 +306,13 @@ class AiReview extends EventEmitter {
           // DashScope 默认不开，但默认值是平台说了算——换模型/平台改默认后这里兜底。
           // 千问系不认识这个参数的模型会忽略它、不报错，所以未来换任何 qwen VL 模型都不用动。
           enable_search: false,
+          // 强制闸门：思考模式一律关死（2026-10-16 四模型对拍实测后加）。
+          // 千问从 qwen3.5 起把视觉并入主线，那几个主线型号默认开着「先想一长段再答」：
+          // 对拍时 3.5-flash / 3.7-flash 按默认值跑，每张图都撞满 15s 硬超时被判复审失败，
+          // 显式关掉后同一批图最慢 4.9s。而选片判定只要一个 JSON，不需要它推理。
+          // qwen3-vl-plus 无思考模式，实测发这个字段仍返回 200、判词无变化（无副作用），
+          // 所以这里无条件发——后端哪天把 model 下发成主线型号，不用改代码就不会集体超时。
+          enable_thinking: false,
           messages: [
             { role: 'system', content: system },
             {

@@ -32,6 +32,7 @@ const MODES: { key: ExportOptions['mode']; label: string }[] = [
 export default function ExportDialog(): JSX.Element {
   const close = (): void => useStore.setState({ showExport: false })
   const counts = useStore((s) => s.counts)
+  const openCategory = useStore((s) => s.openCategory)
   const customCategories = useStore((s) => s.customCategories)
   const settings = useStore((s) => s.settings)
   const exportProgress = useStore((s) => s.exportProgress)
@@ -51,6 +52,12 @@ export default function ExportDialog(): JSX.Element {
   const [selectedTiers, setSelectedTiers] = useState<Set<TierKey>>(new Set([1, 2, 3]))
   const [tierLayout, setTierLayout] = useState<'flat' | 'subdirs'>('flat')
   const [folderName, setFolderName] = useState('交付库')
+
+  // 导出前提醒（用户 2026-10-15 定）：点「导出交付」时若「待确认」还有没审核的照片，先弹一句警告——
+  // 这些照片不在交付库里、本次导出默认不带它们，其中可能存在可交付的优质照片；待确认空了就不打扰。
+  // 两个入口（顶栏按钮 + 侧栏交付库「导出」小字）都走本弹窗，拦在这里一处管住。
+  const reviewPending = counts[CAT_REVIEW] || 0
+  const [guard, setGuard] = useState(() => reviewPending > 0)
 
   const opts: ExportOptions = useMemo(() => ({
     mode,
@@ -89,6 +96,32 @@ export default function ExportDialog(): JSX.Element {
     if (next.has(t)) next.delete(t)
     else next.add(t)
     setSelectedTiers(next)
+  }
+
+  // 警告层：只挡住导出面板的打开，点空白/关闭 = 整个导出取消（没看完提醒就不进面板）
+  if (guard) {
+    return (
+      <div className="fixed inset-0 z-[60] bg-black/70 flex items-center justify-center p-4" onClick={(e) => e.target === e.currentTarget && close()}>
+        <div className="bg-panel border border-line rounded-xl shadow-2xl w-full max-w-md fade-in">
+          <div className="px-6 pt-6 pb-1 text-[16px] font-bold text-fg">待确认里还有 {reviewPending} 张未审核</div>
+          <div className="px-6 py-4 space-y-2 text-[13px] text-fg2 leading-relaxed">
+            <p>「待确认」是 AI 判定存疑、等待人工审核的照片，<b className="text-fg">不在交付库中，本次导出默认不包含这些照片</b>。</p>
+            <p>其中可能存在可以交付的优质照片，直接导出可能漏交；建议先完成审核再导出。</p>
+            <p className="text-xs text-fg3">如需带上这些照片，也可以在导出面板勾选「包含“待确认”」。</p>
+          </div>
+          <div className="px-6 py-4 border-t border-line flex items-center justify-end gap-2">
+            <button className="btn px-4 py-2" onClick={() => setGuard(false)}>仍然导出</button>
+            <button
+              className="btn-primary px-4 py-2"
+              title="关闭导出并跳到「待确认」相册，逐张审核"
+              onClick={() => { close(); void openCategory(CAT_REVIEW) }}
+            >
+              先去确认
+            </button>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   return (
