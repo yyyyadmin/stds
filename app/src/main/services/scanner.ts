@@ -526,4 +526,22 @@ export function reclassifyImage(id: number): ImageRecord | null {
   return getImage(id)
 }
 
+/**
+ * v2.0.93 反选模型小迁移（不重跑引擎）：极少数历史遗留行 category 还写死成 'duplicate'，
+ * 会被 isDeliverable 旧数据兼底继续挡在交付库外。按已存 tags 把它们重算回人数身份，使新闸门生效。
+ * 人工定过位置的（category_by='user'）一律不插手。幂等：重算后这些行不再是 'duplicate'，重复跑不再命中。
+ */
+export function reclassStaleDuplicate(): number {
+  const rows = getDb()
+    .prepare("SELECT id FROM images WHERE category = 'duplicate' AND (category_by IS NULL OR category_by <> 'user')")
+    .all() as Array<{ id: number }>
+  for (const r of rows) {
+    const rec = getImage(r.id)
+    if (!rec) continue
+    const cat = computeCategory(rec.tags, getSettings(), { ...rec, categoryBy: null } as ImageRecord)
+    if (cat !== rec.category) getDb().prepare('UPDATE images SET category = ? WHERE id = ?').run(cat, r.id)
+  }
+  return rows.length
+}
+
 export const scanner = new Scanner()

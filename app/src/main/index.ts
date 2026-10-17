@@ -17,7 +17,7 @@ import { getSettings, saveSettings, backfillTiers } from './db'
 import { setupErrorLogger, getLogRoot, logRendererError } from './logger'
 import { dumpCalibration } from './services/calib'
 import { harmonizePersonCountOnce } from './services/personHarmony'
-import { reclassifyAll, regradeAll, reclusterStored } from './services/scanner'
+import { reclassifyAll, regradeAll, reclusterStored, reclassStaleDuplicate } from './services/scanner'
 import { REGRADE_VERSION } from '../shared/types'
 
 // 尽早安装错误日志（捕获启动期异常），在所有逻辑之前
@@ -123,6 +123,19 @@ if (!gotLock) {
       }
     } catch (e) {
       console.error('dup park migration on startup failed', e)
+    }
+
+    // v2.0.93 反选模型小迁移（版本门控，不重跑引擎）：拆掉 isDeliverable 的重复闸门后，交付/侧栏/导出
+    // 都是现算、存量库自动生效；只需兜底极少数 category 还写死成 'duplicate' 的历史行，重算回人数维才会进库。
+    try {
+      const st = getSettings()
+      if ((st.dupUngateMigration ?? 0) < 1) {
+        const n = reclassStaleDuplicate()
+        saveSettings({ dupUngateMigration: 1 })
+        console.log(`[dup-ungate] 旧 category='duplicate' 残留行重算回人数维完成（处理 ${n} 行，未重跑引擎）`)
+      }
+    } catch (e) {
+      console.error('dup ungate migration on startup failed', e)
     }
 
     const iconCandidates = [

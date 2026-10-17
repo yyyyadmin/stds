@@ -100,6 +100,8 @@ jobs:
         run: npm run fetch-models
       - name: 构建自带 Python AI 引擎（PyInstaller, arm64）
         run: npm run build:engine
+      - name: 引擎二进制 ad-hoc 签名（M 芯片必签：未签名可执行文件在 Apple Silicon 上运行会被系统当场终止）
+        run: find engine-dist/mac -type f \( -name 'screener-engine' -o -name '*.so' -o -name '*.dylib' \) -exec codesign --force --sign - --timestamp=none {} +
       - name: 引擎自检（硬门禁：降级引擎一律不发）
         run: |
           mkdir -p engine-dist/mac/tests/fixtures
@@ -125,6 +127,7 @@ jobs:
             echo "未配置苹果签名证书，产出未签名包（客户需按 DMG 内一键修复脚本操作）"
           fi
           npx electron-builder --mac --arm64 --publish never $ARGS
+      # 整包 ad-hoc 补签在 electron-builder 的 afterPack 钩子里做（app/scripts/after-pack-mac.cjs），DMG 封装前生效
       - uses: actions/upload-artifact@v4
         with:
           name: mac-arm64
@@ -154,6 +157,8 @@ jobs:
         run: npm run fetch-models
       - name: 构建自带 Python AI 引擎（PyInstaller, x64）
         run: npm run build:engine
+      - name: 引擎二进制 ad-hoc 签名（与 arm64 同流程；x64 虽不强制签，但保持两套产物一致，自检也在签后的二进制上跑）
+        run: find engine-dist/mac -type f \( -name 'screener-engine' -o -name '*.so' -o -name '*.dylib' \) -exec codesign --force --sign - --timestamp=none {} +
       - name: 引擎自检（硬门禁：降级引擎一律不发；Intel Mac 固定 mediapipe 0.10.21，与 Win/arm 的 1.1.0 不同属官方无包所致）
         run: |
           mkdir -p engine-dist/mac/tests/fixtures

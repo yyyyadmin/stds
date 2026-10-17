@@ -264,7 +264,35 @@ body {
   animation: sheen 2.2s ease-in-out infinite;
   pointer-events: none;
 }
-/* 尊重系统“减少动态效果”偏好：关闭引擎徽章动画与“开始筛选”呼吸光 */
+/* ===== 新手指导（聚光灯带路）===== */
+/* 手指戳动：只动位移，方向旋转交给内层 span，否则 animation 的 transform 会把旋转覆盖掉 */
+@keyframes tourPoint {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-9px);
+  }
+}
+.tour-finger {
+  animation: tourPoint 1.05s ease-in-out infinite;
+}
+/* 目标框颜色缓慢呼吸，跟下方卡片里“就是这里”呼应；只动边框，不闪文字 */
+@keyframes tourRing {
+  0%,
+  100% {
+    border-color: rgba(59, 130, 246, 0.9);
+  }
+  50% {
+    border-color: rgba(139, 92, 246, 0.95);
+  }
+}
+.tour-ring {
+  animation: tourRing 2.2s ease-in-out infinite;
+}
+
+/* 尊重系统“减少动态效果”偏好：关闭引擎徽章动画、“开始筛选”呼吸光与新手指导的手指/目标框动画 */
 @media (prefers-reduced-motion: reduce) {
   .engine-live,
   .engine-glow,
@@ -272,7 +300,9 @@ body {
   .engine-busy-glow,
   .engine-eq > i,
   .btn-nudge,
-  .engine-sheen::after {
+  .engine-sheen::after,
+  .tour-finger,
+  .tour-ring {
     animation: none !important;
   }
 }

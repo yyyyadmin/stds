@@ -311,8 +311,9 @@ function matchesView(r: ImageRecord, cat: CategoryKey): boolean {
   // 停在待确认拍板位的（重复组代表帧）不再同时出现在瑕疵片：一题只让用户答一次
   if (cat === CAT_FLAWS) return !isTrashLike(r.category) && r.category !== CAT_REVIEW && fl === 'high'
   if (cat === CAT_REVIEW) {
-    // 冗余帧不占待确认：它不需要“复核 AI 拿不准的判定”，要的是去分组里选留哪张（与侧栏计数同口径）
-    if (isTrashLike(r.category) || isDupRedundant(r.tags)) return false
+    // v2.0.93 反转：不再把冗余帧排除在待确认外。干净冗余帧靠 isDeliverable 已进交付库（不命中此分支）；
+    // 只有带中置信瑕疵的冗余帧才会落到这里（fl==='mid'），它确实需要用户复核，与侧栏计数同口径。
+    if (isTrashLike(r.category)) return false
     return r.category === CAT_REVIEW || fl === 'mid'
   }
   if (isDimCat(cat)) {
@@ -697,7 +698,6 @@ export function categoryCounts(): Record<string, number> {
   let lib = 0
   let flaws = 0
   let review = 0
-  let dupRedundant = 0
   // 重复组数（侧栏“重复照片”行按组计）：跟分组视图一样“至少一张还在本分类的组才算”，
   // 全组都处理完的历史组不会再出现在视图里，也不该占侧栏一个数字。
   const dupGroups = new Set<string>()
@@ -717,7 +717,6 @@ export function categoryCounts(): Record<string, number> {
     if (!isTrashLike(r.category)) {
       if (isDupRedundant(tags) || r.category === 'duplicate') dupGroups.add(r.dup_group || `single:${r.id}`)
       if (fl === 'high' && r.category !== CAT_REVIEW) flaws += 1
-      else if (isDupRedundant(tags)) dupRedundant += 1
       else if (r.category === CAT_REVIEW || fl === 'mid') review += 1
       else if (isDeliverable(r.category, tags)) {
         lib += 1 // 与交付库视图/导出同一函数口径，含旧坏维度孤儿排除
@@ -734,9 +733,9 @@ export function categoryCounts(): Record<string, number> {
   map[CAT_LIBRARY] = lib
   map[CAT_FLAWS] = flaws
   map[CAT_REVIEW] = review
-  // 侧栏“重复多余”行：只数“单因冗余被拦下、本身没拍坏”的那批（与上档互斥求和同口径）；
-  // 它现在只用在 tooltip，行上显的是下面那个组数。
-  map[DUP_REDUNDANT_KEY] = dupRedundant
+  // v2.0.93 反转后不再有"因冗余被单独拦下"这一档（干净冗余帧已并进交付库）；
+  // DUP_REDUNDANT_KEY 保留仅为向后兼容侧栏取数，恒为 0，行上点亮靠下面的组数。
+  map[DUP_REDUNDANT_KEY] = 0
   // 侧栏“重复照片”行：按组数（用户 2026-10-15：“实际 2 组、左边只显 1”）。带“组”字后缀。
   map[DUP_GROUP_KEY] = dupGroups.size
   map['tier:1'] = tierCount[1]

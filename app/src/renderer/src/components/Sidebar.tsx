@@ -24,7 +24,6 @@ import {
   DIMENSION_LABELS,
   NEUTRAL_DIMENSIONS,
   DEFAULT_TIER_NAMES,
-  DUP_REDUNDANT_KEY,
   DUP_GROUP_KEY,
   isBadDim,
   isStructuralDim,
@@ -193,6 +192,8 @@ function Row(props: {
   /** 传了就在标签后紧跟一枚可点的小字「导出」，点击直接开导出面板（不触发选中分类）。
    *  颜色走品牌蓝而不是绿：交付库整行已是绿色（内容状态），蓝是“这里可以点”的通用信号，两者不抢 */
   onExport?: () => void
+  /** 灯标名：新手指导（聚光灯带路）靠 data-tour 找到真元素并把框打在这里，不参与任何交互 */
+  tour?: string
   /** 标签文字后、数字前的一块自定义区域（如「待确认」行后的 AI 复审运行态小字）：靠排版内联，不改变行点击语义 */
   after?: ReactNode
   /** 欠账着色（用户 2026-10-15 定）：传了就在本行有图时一路生效（选中与否都走这个色）。
@@ -224,6 +225,7 @@ function Row(props: {
         (props.count === 0 ? ' opacity-50' : '')
       }
       data-drop-cat={props.cat ?? '@null'}
+      data-tour={props.tour}
       data-drop-off={props.noDrop || props.cat === null ? '1' : undefined}
       onClick={() => void openCategory(props.cat)}
       title={
@@ -386,7 +388,7 @@ export default function Sidebar(): JSX.Element {
       >
       <Row emphasis="total" label="全部文件" cat={null} count={counts.all} icon="all" tip="全部照片总览（含各分类）" />
       {/* 筛选结果区域：只靠淡底色与下方 Group 拉开差异，行缩进与 Group 完全一致 */}
-      <section className="mt-1 pt-1 pb-1 rounded-lg bg-panel2/25">
+      <section className="mt-1 pt-1 pb-1 rounded-lg bg-panel2/25" data-tour="result">
       <div className="flex items-center gap-2 px-4 pb-1 pt-1">
         <span className="flex-1 border-t border-fg/20"></span>
         <span className="flex items-center gap-1.5">
@@ -405,7 +407,7 @@ export default function Sidebar(): JSX.Element {
         </span>
         <span className="flex-1 border-t border-fg/20"></span>
       </div>
-            <Row emphasis="status" label="交付库" cat={CAT_LIBRARY} count={counts[CAT_LIBRARY]} icon="library" tone="text-good" color={lit(counts[CAT_LIBRARY], '#22c55e')} noDrop onExport={counts[CAT_LIBRARY] ? () => void useStore.setState({ showExport: true }) : undefined} tip="无缺陷照片，默认全量导出；不可直接拖入，请拖至下方档位" />
+            <Row emphasis="status" label="交付库" cat={CAT_LIBRARY} count={counts[CAT_LIBRARY]} icon="library" tone="text-good" color={lit(counts[CAT_LIBRARY], '#22c55e')} noDrop onExport={counts[CAT_LIBRARY] ? () => void useStore.setState({ showExport: true }) : undefined} tip="无缺陷照片，默认全量导出；不可直接拖入，请拖至下方档位" tour="library" />
       {/* 档位三子行：行首「└──」层级连接符 + 外层 ml-2 缩进，跟父行文字拉开一档；
           点开=只看该档，拖入=改档（不移动归属、不清标签） */}
       {([1, 2, 3] as TierKey[]).map((t) => (
@@ -413,13 +415,12 @@ export default function Sidebar(): JSX.Element {
           <Row connector="└──" label={tierNames[t - 1] || String(t)} cat={`tier:${t}`} count={counts[`tier:${t}`]} tip={`${tierTips[t]}；点击仅看该档，拖入可改档`} />
         </div>
       ))}
-      <Row emphasis="status" tone="text-warn" label="待确认" cat={CAT_REVIEW} count={counts[CAT_REVIEW]} icon="review" color={lit(counts[CAT_REVIEW], '#eab308')} after={<AiReviewTag scope="review" />} tip="AI 判定存疑、需人工拍板，暂不导出" />
+      <Row emphasis="status" tone="text-warn" label="待确认" cat={CAT_REVIEW} count={counts[CAT_REVIEW]} icon="review" color={lit(counts[CAT_REVIEW], '#eab308')} after={<AiReviewTag scope="review" />} tip="AI 判定存疑、需人工拍板，暂不导出" tour="review" />
       <Row emphasis="status" label="瑕疵片" cat={CAT_FLAWS} count={counts[CAT_FLAWS]} icon="face_ugly" color={lit(counts[CAT_FLAWS], '#ef4444')} noDrop after={<AiReviewTag scope="flaws" />} tip="AI 判出缺陷，默认不导出；确认为误判后删除标签即放行" />
-      {/* 重复照片（v2.0.67，客户看到的名字从“重复多余”改成“重复照片”）：本身没拍坏、只因同组已经有一张进了交付库而不导出的那批图。
-          以前它们混在“瑕疵片”里，用户看到的就是“好片被当坏片”，10-13 投诉的根源。
-          数字改成按组数（用户 2026-10-15：“实际 2 组、左边只显 1”）：点进去看到的几张堆叠卡，就是这儿的数字，
-          跟旁边按张数的几行不同义，所以带个“组”字、也不能相加。 */}
-      <Row emphasis="status" label="重复照片" cat="duplicate" count={counts[DUP_GROUP_KEY]} unit="组" icon="duplicate" color={lit(counts[DUP_REDUNDANT_KEY], BAD_DOT_COLORS.duplicate)} noDrop tip="按组统计，不与张数相加；每组仅保留一张导出" />
+      {/* 重复照片（v2.0.93 反选模）：一组重复/连拍照，干净的那几张现在会跟着代表帧一起自动进交付库、正常导出；
+          这一行只当"入口"，按组统计（用户 2026-10-15：“实际 2 组、左边只显 1”），点进去逐组反选、快速删不要的。
+          旧行靠"重复多余"张数亮圆点；拆闸后那一档恒为 0，改按组数亮（有组待处理就亮）。 */}
+      <Row emphasis="status" label="重复照片" cat="duplicate" count={counts[DUP_GROUP_KEY]} unit="组" icon="duplicate" color={lit(counts[DUP_GROUP_KEY], BAD_DOT_COLORS.duplicate)} noDrop tip="按组统计，不与张数相加；组里干净的那几张会自动进交付库，点进去可反选删除不要的" />
       </section>
 
       {/* 人物在前、瑕疵在后（用户 10-13 指定）：先按人/影调找图是高频动线，
@@ -512,13 +513,23 @@ export default function Sidebar(): JSX.Element {
           />
         ))}
       </Group>
-      {/* 底部教程中心：文档式弹窗，左边页签切章节（快速上手/分类/操作/会员/设置） */}
-      <div className="mx-3 mt-4 flex justify-center">
+      {/* 底部教程入口两枚：教程中心是文档（左边页签切七章），新手指导是可重放的分步引导
+          （首次启动自动弹一次，看完就不再打扰，这里随时能重看） */}
+      <div className="mx-3 mt-4 flex flex-col gap-2">
         <button
           onClick={() => setShowTutorial(true)}
+          data-tour="tutorial"
           className="w-full text-[13px] font-semibold text-fg2 hover:text-fg bg-panel2 hover:bg-line/60 border border-line rounded-lg px-4 py-2.5 transition-colors cursor-pointer"
         >
           📖 教程中心
+        </button>
+        <button
+          onClick={() => useStore.getState().openOnboarding()}
+          data-tour="replay"
+          title="重放开机新手指导（手指一步一步指着该点哪里）"
+          className="w-full text-[13px] font-semibold text-fg2 hover:text-fg bg-panel2 hover:bg-line/60 border border-line rounded-lg px-4 py-2.5 transition-colors cursor-pointer"
+        >
+          🎓 新手指导
         </button>
       </div>
       {showTutorial && <TutorialCenter onClose={() => setShowTutorial(false)} />}

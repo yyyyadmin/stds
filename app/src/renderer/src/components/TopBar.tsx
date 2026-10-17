@@ -183,6 +183,7 @@ export default function TopBar(): JSX.Element {
       <div className="relative shrink-0" ref={importRef}>
         <button
           className="btn"
+          data-tour="import"
           disabled={!!s.importProgress}
           onClick={() => setImportMenu((v) => !v)}
           title="支持单张、多选图片，也支持整个文件夹（或直接把照片拖进窗口）"
@@ -230,6 +231,7 @@ export default function TopBar(): JSX.Element {
       {!running ? (
         <button
           className={'btn-primary shrink-0' + (pendingN > 0 && !s.engineBusy && !s.importProgress && !s.thumbsProgress ? ' btn-nudge' : '')}
+          data-tour="scan"
           onClick={() => void s.startScan()}
           disabled={s.engineBusy || !!s.importProgress || !!s.thumbsProgress}
           title={
@@ -545,6 +547,7 @@ export default function TopBar(): JSX.Element {
 
       <button
         className="btn-primary shrink-0 inline-flex items-center gap-1.5 disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-brand"
+        data-tour="export"
         onClick={() => void useStore.setState({ showExport: true })}
         disabled={s.counts.all === 0}
         title="导出交付：把选中的分类导出到指定文件夹"
@@ -561,23 +564,29 @@ export default function TopBar(): JSX.Element {
       </button>
       {/* AI 引擎状态徽章（三态动效）：
           扫描中 = 青→蓝→紫流动渐变 + 外发光呼吸 + 斜光扫过 + 均衡器跳动条（「正在使用 AI 引擎」）
-          启动中 = 琥珀脉冲；空闲就绪 = 青绿柔和呼吸 */}
+          启动中 = 琥珀脉冲；空闲就绪 = 青绿柔和呼吸。
+          用户 10-18 拍板：“运行中”只许完整 Python 引擎戴——降级成 node 基础引擎的机器
+          常显黄色“引擎异常”（扫描动画照跑，但文字/颜色如实报病，不能让人误以为全功能在干活）。 */}
       <span
         className={
           'chip shrink-0 !gap-1.5 !border-0 !py-1.5 ' +
-          (running
-            ? 'engine-live engine-glow engine-sheen text-white !px-3 !text-[13px] font-bold tracking-wide'
-            : s.engineBusy
-              ? 'engine-busy-glow bg-yellow-900/60 text-yellow-200 !px-2.5 !text-[12px]'
-              : 'engine-ready-glow bg-emerald-900/60 text-emerald-200 !px-2.5 !text-[12px]')
+          (s.engineType !== 'python' && s.engineType !== 'none'
+            ? 'engine-busy-glow bg-yellow-900/60 text-yellow-200 !px-2.5 !text-[12px]'
+            : running
+              ? 'engine-live engine-glow engine-sheen text-white !px-3 !text-[13px] font-bold tracking-wide'
+              : s.engineBusy
+                ? 'engine-busy-glow bg-yellow-900/60 text-yellow-200 !px-2.5 !text-[12px]'
+                : 'engine-ready-glow bg-emerald-900/60 text-emerald-200 !px-2.5 !text-[12px]')
         }
         title={
-          s.toast?.msg ||
-          (running
-            ? 'AI 引擎正在实时处理照片…'
-            : s.engineBusy
-              ? 'AI 引擎启动中…'
-              : 'AI 引擎已就绪（后台运行，详见设置）')
+          s.engineType === 'node'
+            ? '完整 AI 引擎没能启动，已降级为基础引擎：只会查重复/模糊/曝光/黑白，人物分类和闭眼、半截头这些全不会。Mac 客户按安装教程“常见问题”里那条处理，或联系提供方'
+            : s.toast?.msg ||
+              (running
+                ? 'AI 引擎正在实时处理照片…'
+                : s.engineBusy || s.engineType === 'none'
+                  ? 'AI 引擎启动中…'
+                  : 'AI 引擎已就绪（后台运行，详见设置）')
         }
       >
         {running ? (
@@ -587,12 +596,19 @@ export default function TopBar(): JSX.Element {
         ) : (
           <span
             className={
-              'w-1.5 h-1.5 rounded-full ' + (s.engineBusy ? 'bg-yellow-400 animate-pulse' : 'bg-emerald-400')
+              'w-1.5 h-1.5 rounded-full ' +
+              (s.engineType !== 'python'
+                ? 'bg-yellow-400 animate-pulse'
+                : s.engineBusy
+                  ? 'bg-yellow-400 animate-pulse'
+                  : 'bg-emerald-400')
             }
           />
         )}
         {/* 徽章只说状态：「AI 引擎」四个字靠鼠标提示讲（提示里本来就有），窄屏不必再让位 */}
-        <span>{s.engineBusy ? '启动中' : '运行中'}</span>
+        <span>
+          {s.engineType === 'node' ? '引擎异常' : s.engineType === 'none' ? '启动中' : s.engineBusy ? '启动中' : '运行中'}
+        </span>
       </span>
 
       {/* 主题切换入口（用户拍板 2026-10-14：默认就是简白主题，顶栏不摆月亮）。
@@ -614,6 +630,7 @@ export default function TopBar(): JSX.Element {
           名字是后端下发什么就显示什么；普通会员/未登录走灰底，付费身份金色+皇冠 */}
       {auth.loggedIn ? (
         <button
+          data-tour="account"
           className={
             'inline-flex items-center gap-1.5 shrink-0 rounded-md border px-2.5 py-1 text-base font-semibold cursor-pointer transition-colors ' +
             (isMember ? 'bg-warn/15 text-warn border-warn/40' : 'bg-panel2 text-fg2 border-line hover:bg-line')
@@ -625,7 +642,7 @@ export default function TopBar(): JSX.Element {
           <span className="whitespace-nowrap">{memberLabel.text}</span>
         </button>
       ) : (
-        <button className="btn-primary shrink-0 text-sm py-1.5" onClick={() => useStore.setState({ showLogin: true })}>
+        <button className="btn-primary shrink-0 text-sm py-1.5" data-tour="account" onClick={() => useStore.setState({ showLogin: true })}>
           登录 / 注册
         </button>
       )}

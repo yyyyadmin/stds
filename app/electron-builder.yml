@@ -32,6 +32,10 @@ extraResources:
 asar: true
 npmRebuild: false
 
+# Mac 未签名分发阶段的整包 ad-hoc 补签钩子（详见 scripts/after-pack-mac.cjs：不签则 M 芯片客户内置 AI 引擎被系统杀死）；
+# 配置了 Developer ID 时钩子自动跳过，不干扰正式签名。
+afterPack: scripts/after-pack-mac.cjs
+
 # 原生模块（sharp / sql.js 均为预构建，无需编译工具链）
 # sharp 平台分包由 optionalDependencies 机制在目标平台安装时自动匹配
 

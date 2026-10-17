@@ -19,7 +19,6 @@ import {
   CAT_TRASH,
   DEFAULT_TIER_NAMES,
   flawLevel,
-  isDupRedundant,
   isTrashLike,
   type CategoryKey,
   type ImageRecord,
@@ -88,10 +87,10 @@ export default function JudgmentBar({
 
   // D2 §8：待确认语境（中置信瑕疵派生或手动/程序停泊）换成三按钮组：废弃库 / 好图→交付库 /
   // 此判定错误（重判面板）。图去别的相册一律拖左侧栏，这里不再摆“移动到”。
-  // 与 db.matchesView 同口径：主分类停在待确认的算待确认语境（重复组“整组没一张能交”的代表帧
-  // 带着高置信瑕疵也停在这里等你拍板），冗余帧不算（它属于重复照片那一栏）。
+  // 与 db.matchesView 同口径：主分类停在待确认的、或带中置信瑕疵的都算待确认语境。
+  // v2.0.93 反转后冗余帧不再单独排除（带中置信瑕疵的冗余帧归待确认；干净冗余帧已进库、不命中此判定）。
   const fl = flawLevel(img.tags)
-  const inReview = !isTrashLike(img.category) && !isDupRedundant(img.tags) && (img.category === CAT_REVIEW || fl === 'mid')
+  const inReview = !isTrashLike(img.category) && (img.category === CAT_REVIEW || fl === 'mid')
 
   return (
     <div ref={anchorRef} className="grid grid-cols-2 gap-2">

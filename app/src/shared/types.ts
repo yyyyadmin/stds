@@ -226,15 +226,15 @@ export function flawLevel(tags: Record<string, { level?: string } | undefined> |
  * 是否属于「交付库（好片，默认导出）」——D2 后这是"主分类 + 瑕疵标签"双条件判定：
  * 非废弃库/待确认/瑕疵片虚桶，且没有任何中/高置信瑕疵标签（人数、黑白这些客观事实不算瑕疵）。
  * 一张"疑似闭眼"的图 category 仍是单人照，但不属于交付库、不导出，而是落在待确认。
- * v2.0.67 追加第二个闸门：重复组里的冗余帧（带可见 duplicate 标签）也不导出，
- * 但它不是因为拍坏才被拦的，所以绝不进瑕疵片/待确认，单独算“重复多余”。
+ * v2.0.93 起反转去重语义：重复组里的冗余帧不再因"带重复标签"被拦在库外——只要它自己没拍坏
+ * （flawLevel none），就跟着代表帧一起进交付库、正常导出；要不要留由用户在分组视图里反选删除。
+ * 重复标签从此只当"分组信号"，不再当"导出抑制闸门"（瑕疵闸门 flawLevel 原样复用）。
  * 口径必须与 db.virtualCategorySql/matchesView、exporter 完全一致（三数一致）。
  */
 export function isDeliverable(cat: CategoryKey, tags: Record<string, { level?: string } | undefined> | null | undefined): boolean {
   if (isTrashLike(cat) || cat === CAT_REVIEW || cat === CAT_FLAWS) return false
   if (isBadDim(cat)) return false // 旧数据 category 仍指向坏维度：按瑕疵处理，不作交付
-  if (cat === 'duplicate') return false // 旧数据 category 停在重复视图：当年就是被当冗余拦下的
-  if (isDupRedundant(tags)) return false // 组内非代表帧：默认不导出，由用户在分组里改留
+  if (cat === 'duplicate') return false // 旧数据 category 停在重复视图：小迁移重归人数维前暂不当交付
   return flawLevel(tags) === 'none'
 }
 
@@ -601,6 +601,13 @@ export interface AppSettings {
    * （只用库里现存 phash 重新成组改挂，不重跑引擎）。停泊/挑选规则升级时 +1。
    */
   dupParkMigration?: number
+  /**
+   * v2.0.93 反选模型小迁移版本门控：拆掉 isDeliverable 里"带重复标签就拦在库外"那道闸门后，
+   * 交付/侧栏/导出都是现算，存量库无需重扫即自动生效；唯一要兜底的是极少数历史遗留、category 还写死成
+   * 'duplicate' 的行（不重算它们会被 isDeliverable 的 `cat==='duplicate'` 旧数据兼底继续挡在库外）。
+   * 启动时按已存 tags 把它们重算回人数身份（不重跑引擎，category_by='user' 不插手）。规则再升级时 +1。
+   */
+  dupUngateMigration?: number
   /** 档位目录名（3 项，侧栏与导出子目录共用）；不设时用 DEFAULT_TIER_NAMES */
   tierNames?: string[]
   /** 修正记录积累后的自动阈值微调 */
@@ -631,6 +638,12 @@ export interface AppSettings {
   aiReviewEnabled?: boolean
   /** AI 复审首次隐私授权是否已同意（未同意则开开关时先弹授权）。仅存偏好，不含判定 */
   aiReviewConsent?: boolean
+  /**
+   * 新手指导（首启分步引导）是否已看过。仅存偏好，不含任何判定含义。
+   * 没看过的第一次进软件自动弹一次，看完或点 × 关掉都算看过；之后只由侧栏「新手指导」手动重放。
+   * 老库没这个键时为 undefined（视为没看过），跟 dupGuideSeen 一样不进 DEFAULT_SETTINGS。
+   */
+  onboardGuideSeen?: boolean
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {

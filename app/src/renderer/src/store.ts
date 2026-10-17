@@ -5,7 +5,7 @@
  */
 import { create } from 'zustand'
 import type { AppSettings, CategoryKey, ImageRecord, DimensionKey, PerfHint, TierKey, AiReviewSuggestion, AiReviewScope } from '../../shared/types'
-import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, CAT_FLAWS, QC_MANUAL_DIMENSIONS, DIMENSION_LABELS, isBadDim, isStructuralDim, isTrashLike, NEUTRAL_DIMENSIONS, PERSON_DIMS, guessMidDim, flawLevel, isDupRedundant, SUPPORTED_EXTS, tierOfCat, DEFAULT_TIER_NAMES } from '../../shared/types'
+import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, CAT_FLAWS, QC_MANUAL_DIMENSIONS, DIMENSION_LABELS, isBadDim, isStructuralDim, isTrashLike, NEUTRAL_DIMENSIONS, PERSON_DIMS, guessMidDim, flawLevel, SUPPORTED_EXTS, tierOfCat, DEFAULT_TIER_NAMES } from '../../shared/types'
 import type { AiReviewProgress, AuthState, BootstrapInfo, ConsumeResult, MoveRequest, PlanInfo, UpdateInfo } from '../../shared/ipc'
 import { isVip } from '../../shared/membership'
 import type { ScanProgress } from '../../main/services/scanner'
@@ -343,11 +343,18 @@ interface StoreState {
   updateInfo: UpdateInfo | null
   /** 失败照片定位弹窗（顶栏红色徽章点开） */
   showFailedImages: boolean
+  /** 新手指导（首启分步带路）：没看过则启动后自动弹一次，之后只能从侧栏「新手指导」重放 */
+  showOnboarding: boolean
+  /** 带路“暂停”：亮层收起、界面交还给用户自己点（引导没结束，底部留胶囊可继续）。
+   *  暂停时全局快捷键不再屏蔽，不然用户想按 1/2/3 换视图、按 Del 丢废片都按不动。 */
+  onboardingPaused: boolean
   auth: AuthState
   toast: { msg: string; kind: 'info' | 'error' | 'success'; duration?: number } | null
   /** 多选（≥2 张）移入废弃库的确认弹窗（单选直接移，不弹；null = 不显示） */
   trashAsk: { physical: boolean } | null
   engineBusy: boolean
+  /** 当前真引擎类型（顶栏徽章用，用户 10-18）：python 才显“运行中”；node=降级被杀显黄色“引擎异常”；none=还没握手完 */
+  engineType: 'python' | 'node' | 'none'
   appVersion: string
   /** 是否未打包的开发版。截至 v2.0.76 仅被赋值，没有任何界面消费它。
       旧引擎重扫横幅（StaleBanner）开发版与正式版都显示——用户 2026-10-14 拍板：
@@ -483,6 +490,13 @@ interface StoreState {
   pickAndImportImages(): Promise<void>
   /** 启动静默检查更新：有新版且未跳过该版本时弹 UpdateDialog */
   checkUpdateSilent(): Promise<void>
+  /** 打开新手指导（侧栏「新手指导」重放 / 首启自动弹均走这里） */
+  openOnboarding(): void
+  /** 关掉新手指导：看完和提前点 × 都落“已看过”，不重复打扰 */
+  closeOnboarding(): void
+  /** 带路中途暂停 / 继续（不改任何数据，只切亮层显示与否） */
+  pauseOnboarding(): void
+  resumeOnboarding(): void
   runExport(opts: Parameters<typeof window.api.exportRun>[0]): Promise<void>
   cancelExport(): Promise<void>
   dismissToast(): void
@@ -529,6 +543,32 @@ function startStalePoll(): void {
       }
     })
   }, 3000)
+}
+
+/*
+ * 顶栏徽章的引擎真类型轮询（用户 10-18）：主进程引擎初始化是异步的，bootstrap 那一刻常报 none，
+ * 徽章不能拿 none 冒充“运行中”。每 2 秒轻询一次 engineStatus，握手出真结果（python/node）即停，
+ * 最多 20 次防死循环。降级成 node 的机器从此常显“引擎异常”，不靠瞬时 toast 提醒。
+ */
+let engineTypePollTimer: ReturnType<typeof setTimeout> | null = null
+let engineTypePollTries = 0
+function startEngineTypePoll(): void {
+  if (engineTypePollTimer || engineTypePollTries >= 20) return
+  engineTypePollTimer = setTimeout(() => {
+    engineTypePollTimer = null
+    void window.api
+      .engineStatus()
+      .then((st) => {
+        useStore.setState({ engineType: st.type })
+        if (st.type === 'none') {
+          engineTypePollTries++
+          startEngineTypePoll()
+        }
+      })
+      .catch(() => {
+        /* 主进程瞬时未就绪：下轮再取，不打扰用户 */
+      })
+  }, 2000)
 }
 
 /*
@@ -695,6 +735,7 @@ export const useStore = create<StoreState>((set, get) => ({
   toast: null,
   trashAsk: null,
   engineBusy: false,
+  engineType: 'none',
   appVersion: '',
   isDev: false,
   staleReady: false,
@@ -704,6 +745,8 @@ export const useStore = create<StoreState>((set, get) => ({
   showUpdate: false,
   updateInfo: null,
   showFailedImages: false,
+  showOnboarding: false,
+  onboardingPaused: false,
 
   async bootstrap() {
     const info: BootstrapInfo = await window.api.bootstrap()
@@ -719,6 +762,7 @@ export const useStore = create<StoreState>((set, get) => ({
       // 见 openLargePreview）：不兜一下主区三个分支都匹配不上，什么都不渲染，看着像图全没了
       viewMode: VIEW_MODES.includes(info.settings.viewMode) ? info.settings.viewMode : 'grid',
       isDev: info.isDev,
+      engineType: info.engine.type,
       toast: info.engine.type === 'node' ? { msg: info.engine.message, kind: 'info' } : null
     })
     // 低配机自动降级（第二档 A1）：探测一次并缓存，perfMode=auto 时据此进精简模式；不阻塞首屏
@@ -747,8 +791,35 @@ export const useStore = create<StoreState>((set, get) => ({
     // 拉一次旧引擎过期信息并起轮询（等引擎握手报出签名后横幅才能数得准）：开发版+正式版都需要
     void get().refreshStale()
     startStalePoll()
+    // 引擎握手是异步的，bootstrap 那一下常拿到 none：轻轮询到真类型为止，徽章才能如实显“运行中/引擎异常”
+    startEngineTypePoll()
     // 启动后静默检查更新（错开 2.5s 不拖慢首屏），有新版自动弹窗
     setTimeout(() => void get().checkUpdateSilent(), 2500)
+    // 新手指导：这台电脑第一次用才自动弹（已看过 / 正在弹都不重复触发）。
+    // 错开 3.2s 让上面的更新弹窗先落地：引导自己会等 UpdateDialog 关掉才现身，两层不会摞在一起。
+    if (!info.settings.onboardGuideSeen && !get().showOnboarding) {
+      setTimeout(() => {
+        if (!get().settings.onboardGuideSeen && !get().showOnboarding) set({ showOnboarding: true })
+      }, 3200)
+    }
+  },
+
+  openOnboarding() {
+    set({ showOnboarding: true, onboardingPaused: false })
+  },
+
+  closeOnboarding() {
+    set({ showOnboarding: false, onboardingPaused: false })
+    // 落盘幂等：手动重放时这个标记早就为 true，再写一次也不影响别的设置
+    if (!get().settings.onboardGuideSeen) void get().saveSettings({ onboardGuideSeen: true })
+  },
+
+  pauseOnboarding() {
+    set({ onboardingPaused: true })
+  },
+
+  resumeOnboarding() {
+    set({ onboardingPaused: false })
   },
 
   async checkUpdateSilent() {
@@ -1077,17 +1148,25 @@ export const useStore = create<StoreState>((set, get) => ({
     const order = displayIds.length === images.length ? displayIds : images.map((i) => i.id)
     const id = order[index]
     if (id == null) return
+    // 标准文件管理器语义（用户 10-18 拍板“单击为选中”，教程里写的“单击选中/Ctrl 加选”也以此为准）：
+    // 普通单击 = 只选中这一张（替掉旧的）；Ctrl/Cmd 单击 = 加选/取消这一张（多选不动其他）；
+    // Shift = 从锚点连选到这一张。旧行为是“每次点击都 toggle”，点已选中的图会把它取消、
+    // 选中的第一张却永远消不掉，和双击放大混在一起时尤其拧巴。
     const sel = new Set(selection)
     if (e.shiftKey && anchorIndex >= 0) {
       const [a, b] = [Math.min(anchorIndex, index), Math.max(anchorIndex, index)]
       for (let i = a; i <= b; i++) sel.add(order[i])
-    } else {
-      // 单击即多选：每次点击都加入选中，再点一次取消（不清掉其他已选）
+      set({ selection: sel })
+      return
+    }
+    if (e.ctrlKey || e.metaKey) {
       if (sel.has(id)) sel.delete(id)
       else sel.add(id)
-      set({ anchorIndex: index })
+    } else {
+      sel.clear()
+      sel.add(id)
     }
-    set({ selection: sel })
+    set({ anchorIndex: index, selection: sel })
   },
 
   marqueeSelect(ids, additive = false) {
@@ -1502,8 +1581,8 @@ export const useStore = create<StoreState>((set, get) => ({
     const sug = img?.ai_review
     if (!img || !sug) return false
     // 二次校验仍在它被复审时那一栏（与 db.matchesView 同一口径），否则早已结案/移走，跳过：
-    //  - review：非废弃 ∩ 非冗余帧 ∩（category=review ∪ 带中置信瑕疵）——category 停在待确认的
-    //    算待确认，哪怕身上挂着高置信瑕疵（重复组“整组没一张能交”的代表帧就被停在这里拍板）
+    //  - review：非废弃 ∩（category=review ∪ 带中置信瑕疵）——v2.0.93 反转后不再拿冗余帧单独排除
+    //    （category 停在待确认的算待确认，哪怕挂着高置信瑕疵；带中置信瑕疵的冗余帧也归此栏）
     //  - flaws：非废弃 ∩ 高置信瑕疵且没停在拍板位（采纳掉标后即自动离开瑕疵片）
     const fl = flawLevel(img.tags || {})
     const scope = sug.scope ?? 'review'
@@ -1511,7 +1590,7 @@ export const useStore = create<StoreState>((set, get) => ({
       ? false
       : scope === 'flaws'
         ? fl === 'high' && img.category !== CAT_REVIEW
-        : !isDupRedundant(img.tags || {}) && (img.category === CAT_REVIEW || fl === 'mid')
+        : img.category === CAT_REVIEW || fl === 'mid'
     if (!stillValid) return false
     for (const key of Object.keys(sug.flaws) as (keyof typeof sug.flaws)[]) {
       const dim = AI_FLAW_TO_DIM[key]

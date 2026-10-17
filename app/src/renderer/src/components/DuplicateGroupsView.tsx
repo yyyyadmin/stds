@@ -13,11 +13,11 @@
  *   · keep 模式（在【重复照片】分类内）：每张未入库照片下面只有两个动作——
  *     「要这张→选档加进库」（点后弹出优质/良好/一般三档，点其中一档才确认把这张加进交付库，并按你选的档手动定死；
  *       不顶掉库里原来那张——一组可以同时交好几张）与「丢弃」（进废弃桶，永不导出）。
- *     点一下立刻生效，没有标红标绿、没有选图模式切换、也没有批量按钮；点照片本身可放大对比原图。
+ *     点一下立刻生效，没有标红标绿、没有选图模式切换；单击卡片勾选、双击才放大对比原图（与主图库一致）。
  *     已入库那张带「移出交付库」可退回本组（不自动顶别人上来）；没点过的先留着，下次接着挑。
  *     改档/进库/丢弃都会清 duplicate 标签，重聚类不会再抓回来。
  *   · trash 模式（在【重复照片-废弃】分类内）：仍是勾选 → 批量恢复回【重复照片】（这套本来就简单，保留）。
- * - 点照片进入原图全屏查看器：键盘上下左右 / 滚轮切换，底部有「要这张（弹三档加库）/ 丢弃 / 移出交付库 / 恢复」按钮。
+ * - 双击照片进入原图全屏查看器：键盘上下左右 / 滚轮切换，底部有「要这张（弹三档加库）/ 丢弃 / 移出交付库 / 恢复」按钮。
  * - 两个分类都不允许从别处拖入（在 Sidebar 已禁用 drop），只能经此流程进出。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -128,8 +128,9 @@ function TierBadge({ img, tierNames }: { img: ImageRecord; tierNames: string[] }
 /**
  * 卡片下沿的标签条：把“这张为什么没进库”直接写在图上（用户 10-13 指定：下面那批要显示瑕疵标签，比如闭眼）。
  * 只读不折行：人数/黑白这类客观事实标签在这页不决定去留，占位反而噪，所以只取坏维度 + 冗余。
+ * belowBadge：左上已有一枚“在待确认/废弃”位置标时，标签条往下让开一行，别被它盖住。
  */
-function TagStrip({ img }: { img: ImageRecord }): JSX.Element | null {
+function TagStrip({ img, belowBadge }: { img: ImageRecord; belowBadge?: boolean }): JSX.Element | null {
   const dims = (BAD_DIMENSIONS as string[]).filter((d) => {
     const t = img.tags[d as DimensionKey]
     return !!t && t.level !== 'low'
@@ -138,7 +139,7 @@ function TagStrip({ img }: { img: ImageRecord }): JSX.Element | null {
   if (dupTag && dupTag.level !== 'low') dims.push('duplicate')
   if (!dims.length) return null
   return (
-    <span className="absolute left-1 top-1.5 z-10 flex flex-wrap gap-1 max-w-[72%] pointer-events-none">
+    <span className={'absolute left-1 z-10 flex flex-wrap gap-1 max-w-[72%] pointer-events-none ' + (belowBadge ? 'top-8' : 'top-1.5')}>
       {dims.map((d) => {
         const c = dimTagColor(d)
         const high = img.tags[d as DimensionKey]?.level === 'high'
@@ -161,11 +162,9 @@ function TagStrip({ img }: { img: ImageRecord }): JSX.Element | null {
 function StackCard({ group, onOpen }: { group: Group; onOpen: () => void }): JSX.Element {
   const layers = group.arr.slice(0, 4)
   const n = group.arr.length
-  const todo = n - group.locked.size
-  // 堆叠卡直接展示整组第一张：列表与弹窗已统一成“已入交付库的排最前”，封面再拿最早导入那张会两头对不上
   const libCount = group.arr.filter(inLibrary).length
-  // 库外同伴到底在哪个“库”：不能写死交付库（它也可能停在待确认/废弃库），取第一张非库成员的短名
-  const lockedFirst = group.arr.find((i) => group.locked.has(i.id) && !inLibrary(i))
+  // 待决定 = 没入库的张数（上面那段），已入库 = 入库张数（下面那段）；哪个为 0 卡片上就不显示哪个
+  const todo = n - libCount
   const step = 14
   return (
     <button
@@ -193,14 +192,9 @@ function StackCard({ group, onOpen }: { group: Group; onOpen: () => void }): JSX
       <span className="absolute -right-1 -top-1 z-20 min-w-[22px] h-[22px] px-1 rounded-full bg-brand text-white text-[12px] font-bold flex items-center justify-center shadow ring-2 ring-base">
         {n}
       </span>
-      {/* 整组张数 vs 已入库 / 待你决定的张数（用户 10-13：打开就该先看见“这组已经有张进库了”） */}
+      {/* 两个数永远都显示（0 也照写）：待决定（未入库）几张 · 已入库几张 */}
       <span className="absolute left-1/2 -translate-x-1/2 -bottom-2.5 z-20 whitespace-nowrap rounded-full bg-panel border border-line px-2 py-0.5 text-[11px] text-fg2 shadow">
-        {libCount > 0 ? (
-          <span className="text-good font-bold">已入交付库 {libCount} 张</span>
-        ) : (
-          <span className="text-fg3">{lockedFirst ? `库里一张都没（有张停在${placeShort(lockedFirst)}）· ` : '库里一张都没 · '}</span>
-        )}
-        待你决定 {todo}
+        待决定 {todo} · <span className="text-good font-bold">已入库 {libCount}</span>
       </span>
     </button>
   )
@@ -441,8 +435,9 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
     }
     return s
   }, [group, mode])
-  // 卡片展示顺序：已入库的在前，其余按 id（= 导入顺序）；放大查看器跟着这个顺序走，两处序号不会打架
-  const ordered: ImageRecord[] = [...libImgs, ...restImgs]
+  // 卡片展示顺序：keep 模式下"未入库在上、已入库在下"（与下面分段渲染一致，放大查看器序号不会打架）；
+  // trash 模式沿用旧顺序（已入库作对比在前、废弃成员在后）。
+  const ordered: ImageRecord[] = mode === 'keep' ? [...restImgs, ...libImgs] : [...libImgs, ...restImgs]
   const tierNames: string[] = settings.tierNames ?? DEFAULT_TIER_NAMES
   // 把这张“加”进交付库的某一档（用户 10-13：交付库保留优质/良好/一般三个子分类，点进库先选档再确认）：
   // moveIds 到 'tier:N' 走主进程档位分支——不在库的先清瑕疵/冗余标签、落回交付库、按你选的档手动定死（tier_by=user，重筛不改）。
@@ -473,8 +468,10 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
     setPending({ id: img.id, kind: 'restore' })
   }
   const toggle = (id: number): void => {
-    // 锁定帧（不在本分类，如交付库里的保留帧）不参与选择，只能看
-    if (group.locked.has(id)) return
+    // keep 多选：只要不是已经在废弃库的就能勾（已入库的=勾了批量移入垃圾桶，未入库的=勾了批量丢弃）；
+    // 废弃库成员没有"再丢一次"的意义，排除。trash 模式沿用旧规则：锁定帧不参与勾选。
+    const img = group.arr.find((x) => x.id === id)
+    if (mode === 'keep' ? !!img && isTrashLike(img.category) : group.locked.has(id)) return
     setMarked((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
@@ -482,6 +479,18 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
       return next
     })
   }
+  // keep 批量：勾了哪几张就一次性丢进统一废弃库（moveIds 带 source=duplicate，不记误判样本，废弃库可"从哪来回哪去"还原）
+  const trashSelected = (): void => {
+    if (!marked.size) return
+    void moveIds([...marked], CAT_TRASH)
+    setMarked(new Set())
+  }
+  // 某一段"全选"：把这段里能勾的（非废弃库成员）并进 marked
+  const selectSegment = (list: ImageRecord[]): void => {
+    const ids = list.filter((i) => !isTrashLike(i.category)).map((i) => i.id)
+    setMarked((prev) => new Set([...prev, ...ids]))
+  }
+  const clearMarked = (): void => setMarked(new Set())
   const nav = (delta: number): void =>
     setZoomIdx((cur) => (cur === null ? cur : Math.min(group.arr.length - 1, Math.max(0, cur + delta))))
 
@@ -512,12 +521,16 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
             key={img.id}
             className={
               'relative rounded-lg overflow-hidden border-2 aspect-square transition-all ' +
-              (inLib
-                ? 'border-good'
-                : mode === 'keep'
-                  ? isTrash
-                    ? 'border-dashed border-gray-500'
-                    : 'border-line'
+              (mode === 'keep'
+                ? on
+                  ? 'border-brand ring-2 ring-brand/60'
+                  : inLib
+                    ? 'border-good'
+                    : isTrash
+                      ? 'border-dashed border-gray-500'
+                      : 'border-line'
+                : inLib
+                  ? 'border-good'
                   : locked
                     ? 'border-dashed border-gray-500'
                     : on
@@ -526,10 +539,11 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
             }
             title={inLib ? `${img.filename} · 已在交付库（会被导出），点「移出交付库」可退回本组` : mode === 'keep' && isTrash ? `${img.filename} · 已在${placeShort(img)}，点「恢复」可挪回本组` : mode === 'keep' && group.locked.has(img.id) ? `${img.filename} · ${exportStateText(img)}，可就地收进库或丢弃` : img.filename}
           >
-            {/* 图片本体：keep 模式点它放大对比；trash 模式点它切换勾选 */}
+            {/* 图片本体：与主图库一致——单击切换勾选，双击放大对比（不再一点就弹大窗） */}
             <button
-              className={'absolute inset-0 w-full h-full ' + (mode === 'keep' ? 'cursor-zoom-in' : locked ? 'cursor-default' : 'cursor-pointer')}
-              onClick={() => (mode === 'keep' ? setZoomIdx(idx) : toggle(img.id))}
+              className={'absolute inset-0 w-full h-full ' + (locked ? 'cursor-default' : 'cursor-pointer')}
+              onClick={() => toggle(img.id)}
+              onDoubleClick={() => setZoomIdx(idx)}
               aria-label={img.filename}
             >
               {bigGrid ? <BigCardImg img={img} /> : <img src={src(img)} loading="lazy" className="w-full h-full object-cover" alt={img.filename} draggable={false} />}
@@ -547,8 +561,17 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
             {mode !== 'keep' && on && !inLib && (
               <span className="absolute left-1.5 top-1.5 z-20 px-1.5 py-0.5 rounded text-[11px] font-bold text-white shadow bg-brand">✓ 恢复</span>
             )}
-            {/* 待收那张：左上挂瑕疵标签（它为什么没进库） */}
-            {canKeep && <TagStrip img={img} />}
+            {/* 待收那张：左上挂瑕疵标签（它为什么没进库）；若同位叠了“在待确认/废弃”位置标则往下让一行 */}
+            {canKeep && <TagStrip img={img} belowBadge={!inLib && group.locked.has(img.id)} />}
+            {/* keep 多选勾选圈：浮在卡片右缘中部，避开右上档位/左上标签/底部按钮；点它只切换勾选，不放大 */}
+            {mode === 'keep' && !isTrash && (
+              <button
+                className={'absolute right-1 top-1/2 -translate-y-1/2 z-40 w-6 h-6 rounded-full border-2 flex items-center justify-center text-[13px] font-bold leading-none transition-colors ' + (on ? 'bg-brand border-brand text-white' : 'bg-black/55 border-white/70 text-transparent hover:border-white')}
+                onClick={(e) => { e.stopPropagation(); toggle(img.id) }}
+                title={inLib ? '勾选：批量把这【张已入库】的移入垃圾桶（从交付库丢弃）' : '勾选：批量把这张丢弃到垃圾桶'}
+                aria-label="选择"
+              >✓</button>
+            )}
             {/* keep 底部操作条：已入库=移出交付库；废弃库/废弃桶=恢复回本组；其余=要这张（选档加进库，7）/丢弃（3） */}
             {mode === 'keep' && (
               <div className="absolute left-1 right-1 bottom-1 z-30 flex items-center gap-1">
@@ -604,7 +627,7 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
       <div className="relative bg-panel border border-line rounded-xl shadow-2xl w-[95vw] max-w-[1600px] max-h-[94vh] flex flex-col fade-in">
         <div className="px-5 py-3 border-b border-line relative flex items-center">
           <h2 className="text-fg font-bold">
-            {mode === 'keep' ? '重复照片 · 逐张挑谁进交付库' : '重复照片-废弃 · 选择恢复'}
+            {mode === 'keep' ? '重复照片 · 干净的已自动进库，勾掉不要的' : '重复照片-废弃 · 选择恢复'}
             <span className="text-fg3 font-normal ml-2 text-sm">
               本组 {group.arr.length} 张 · 已入交付库 {libImgs.length} 张 · 待你决定 {catIds.length} 张
             </span>
@@ -624,28 +647,57 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
         <div className="p-4 overflow-y-auto">
           <div className="text-sm text-fg3 mb-3">
             {mode === 'keep' ? (
-              <>绿框那张已在交付库；下面每张点<span className="text-good font-medium">「要这张→」</span>选一档就加进库，点<span className="text-bad font-medium">「丢弃」</span>进废弃桶；点图放大对比。</>
+              <>这一组里干净的几张已经自动收进交付库（绿框、在下方）；上面带瑕疵/停在待确认的默认不入库。要删哪几张，单击卡片勾选（或点右边的✓），右下角一键“移入垃圾桶”；双击卡片放大对比原图。</>
             ) : (
-              '点卡片勾选要恢复的，点右下角放大镜看原图；确认后移回【重复照片】。'
+              '单击卡片勾选要恢复的，双击放大看原图（或点右下角放大镜）；确认后移回【重复照片】。'
             )}
           </div>
-          {libImgs.length > 0 && (
-            <div className="mb-2 text-sm">
-              <span className="font-bold text-good">✓ 已入交付库 {libImgs.length} 张</span>
-            </div>
+          {mode === 'keep' ? (
+            <>
+              {restImgs.length > 0 && (
+                <div className="mb-2 flex items-center gap-2 text-sm flex-wrap">
+                  <span className="font-bold text-bad">🔴 未入交付库 {restImgs.length} 张</span>
+                  <span className="text-fg3">判到瑕疵 / 停在待确认，默认不导出；想收哪张点它下面「要这张→」</span>
+                  <div className="flex-1" />
+                  <button className="btn text-xs" onClick={() => selectSegment(restImgs)}>全选这段</button>
+                </div>
+              )}
+              {restImgs.length > 0 && renderGrid(restImgs, 0)}
+              {restImgs.length > 0 && libImgs.length > 0 && <div className="my-3 border-t border-line" />}
+              {libImgs.length > 0 && (
+                <div className="mb-2 flex items-center gap-2 text-sm flex-wrap">
+                  <span className="font-bold text-good">🟢 已入交付库 {libImgs.length} 张</span>
+                  <span className="text-fg3">干净的那几张 AI 已自动收进库、会导出；勾选不要的，一键移入垃圾桶</span>
+                  <div className="flex-1" />
+                  <button className="btn text-xs" onClick={() => selectSegment(libImgs)}>全选这段</button>
+                </div>
+              )}
+              {libImgs.length > 0 && renderGrid(libImgs, restImgs.length)}
+            </>
+          ) : (
+            <>
+              {libImgs.length > 0 && (
+                <div className="mb-2 text-sm"><span className="font-bold text-good">✓ 已入交付库 {libImgs.length} 张</span></div>
+              )}
+              {renderGrid(libImgs, 0)}
+              {libImgs.length > 0 && restImgs.length > 0 && <div className="my-3 border-t border-line" />}
+              {restImgs.length > 0 && (
+                <div className="mb-2 text-sm"><span className="font-bold text-fg2">废弃桶 {restImgs.length} 张</span></div>
+              )}
+              {renderGrid(restImgs, libImgs.length)}
+            </>
           )}
-          {renderGrid(libImgs, 0)}
-          {libImgs.length > 0 && restImgs.length > 0 && <div className="my-3 border-t border-line" />}
-          {restImgs.length > 0 && (
-            <div className="mb-2 text-sm">
-              <span className="font-bold text-fg2">还没入交付库 {restImgs.length} 张</span>
-            </div>
-          )}
-          {renderGrid(restImgs, libImgs.length)}
         </div>
 
         <div className="px-5 py-3 border-t border-line flex items-center gap-2 flex-wrap">
-          {mode !== 'keep' && (
+          {mode === 'keep' ? (
+            <>
+              <button className="btn text-xs" onClick={() => selectSegment(restImgs)}>全选未入库</button>
+              <button className="btn text-xs" onClick={() => selectSegment(libImgs)}>全选已入库</button>
+              <button className="btn text-xs" onClick={clearMarked}>全不选</button>
+              {marked.size > 0 && <span className="text-sm text-fg2 ml-1">已勾选 <b className="text-fg">{marked.size}</b> 张</span>}
+            </>
+          ) : (
             <>
               <button className="btn text-xs" onClick={() => setMarked(new Set(catIds))}>全选</button>
               <button className="btn text-xs" onClick={() => setMarked(new Set())}>全不选</button>
@@ -653,7 +705,9 @@ function GroupModal({ group, mode, onClose }: { group: Group; mode: 'keep' | 'tr
           )}
           <div className="flex-1" />
           <button className="btn" onClick={onClose} title="不执行任何移动，未处理的照片留在重复照片里">{mode === 'keep' ? '关闭' : '稍后再说'}</button>
-          {mode !== 'keep' && (
+          {mode === 'keep' ? (
+            <button className="px-4 py-2 rounded-md text-sm font-bold text-white bg-bad/90 hover:bg-bad transition-colors disabled:opacity-40 disabled:cursor-not-allowed" disabled={!marked.size} onClick={trashSelected} title="把勾选的这几张一次性丢进废弃桶（永不导出，之后可在废弃库还原）">移入垃圾桶（丢弃 {marked.size} 张）</button>
+          ) : (
             <button className="btn-primary" disabled={!marked.size} onClick={applyMarked}>
               恢复 {marked.size} 张
             </button>
@@ -792,7 +846,7 @@ export default function DuplicateGroupsView({ images, mode }: { images: ImageRec
       <div className="h-full overflow-auto flex flex-col items-center justify-center text-fg2 p-6">
         <div className="text-5xl mb-3">{mode === 'keep' ? '✨' : '🗑'}</div>
         <div className="text-lg text-fg">{mode === 'keep' ? '没有检测到重复照片' : '废弃桶是空的'}</div>
-        <div className="text-xs text-fg3 mt-1">{mode === 'keep' ? '筛选完成后，同一瞬间多出来的那几张会自动归到这里（每组已挑一张进交付库）' : '在【重复照片】分组里丢弃的多余图会集中到这里，永不导出'}</div>
+        <div className="text-xs text-fg3 mt-1">{mode === 'keep' ? '筛选完成后，同一瞬间多出来的那几张会自动归到这里（干净的那几张会自动进交付库）' : '在【重复照片】分组里丢弃的多余图会集中到这里，永不导出'}</div>
       </div>
     )
   }
@@ -807,8 +861,8 @@ export default function DuplicateGroupsView({ images, mode }: { images: ImageRec
             {/* 收起态只留这一行极简摘要，和标题挤在同一行，不再单独占版面 */}
             {!bannerOpen && (
               <span className="text-fg3">
-                每组已挑一张<b className="text-good">进交付库</b>（排在最前、绿角标），<span className="text-brand font-medium">可再加也可移出</span>；
-                <span className="text-good font-medium">绿→交付库</span>·<span className="text-bad font-medium">红→废弃桶</span>·没点过的下次接着挑
+                同一组里<b className="text-good">干净的那几张会自动进交付库</b>（绿框、排在弹窗下方），<span className="text-brand font-medium">不要的勾上批量移入垃圾桶</span>；
+                带瑕疵/待确认的默认不入库，想收可单张「要这张→」
               </span>
             )}
             {/* 展开/收起紧跟在文字后面，做成带蓝边的实心按钮：挂行尾没人看得见 */}
@@ -827,25 +881,12 @@ export default function DuplicateGroupsView({ images, mode }: { images: ImageRec
           </div>
           {bannerOpen && (
             <ul className="space-y-1 mt-1.5 leading-relaxed">
-              <li>
-                · 每一组重复照片，AI 已经先挑出<b className="text-fg2">最像能交的那张</b>：它本身干净就直接进【交付库】兜底——你一张都不整理，这组也有一张会被导出；
-                <b className="text-fg2">整组都带着瑕疵时不再硬交</b>，那张会被送到【待确认】等你拍板，这种组现在 0 张在库里是正常的。
-              </li>
-              <li>
-                · 所以点开分组会看到<span className="text-good font-medium">横线上面</span>是已入库的那几张（绿框 + <b className="text-good">✓ 已在交付库</b>），横线下面才是还没入库、由你挑的。
-              </li>
-              <li>
-                · 想再多收一张进库：点横线下面那张卡片下面的<span className="text-good font-medium">「要这张→」</span>，选优质/良好/一般一档，它就<span className="text-good font-medium">加进交付库</span>（不影响上面已入库那张，一组可以同时交好几张）。
-              </li>
-              <li>
-                · <b className="text-fg2">不想要库里某张？</b>点它下面的<span className="text-brand font-medium">「移出交付库」</span>：它退回横线下面重新由你挑，不会自动顶别人上来；一组几张全由你定。
-              </li>
-              <li>
-                · 横线下面那批由你定：<span className="text-good font-medium">「要这张→」选一档加进交付库（一起导出）</span>；<span className="text-bad font-medium">「丢弃」→ 进废弃桶（永不导出）</span>；没点过的留在组里，下次接着挑。它们右上角不标档位（还没定），身上写的是它被判到的<span className="text-fg2 font-medium">瑕疵</span>（闭眼、模糊这些）。
-              </li>
-              <li>
-                · 为什么要有这张兜底：怕你还没整理到这一组就去导出，结果整组一张不剩。真想一张都不要也可以（把库里那张「移出交付库」，系统会先提示你这组就 0 张了），移出的随时能找回来。
-              </li>
+              <li>· 新规则（反选）：一组重复/连拍照，<b className="text-fg2">只要它本身没拍坏，就自动跟着一起进【交付库】、正常导出</b>——你再不用为"想多留几张"逐张点进库，想删哪几张反而更快。</li>
+              <li>· 点开分组：<span className="text-good font-medium">横线下面</span>是已经自动入库的那几张（绿框 + 档位角标），<span className="text-bad font-medium">横线上面</span>是判到瑕疵 / 停在待确认、默认没入库的。</li>
+              <li>· <b className="text-fg2">快速删不要的：</b>勾选卡片右边的 ✓（一段可点“全选这段”），右下角<span className="text-bad font-medium">「移入垃圾桶」</span>一键把勾着的都丢进废弃桶（永不导出，之后能在废弃库还原）。</li>
+              <li>· 上面带瑕疵那批想收某张：点它下面<span className="text-good font-medium">「要这张→」</span>选优质/良好/一般一档，就单独加进交付库；也可勾 ✓ 批量丢弃。</li>
+              <li>· 闭眼 / 半截头 / 表情崩坏 / 模糊 / 曝光 这五个瑕疵都会自动把那张挡在库外（高置信进瑕疵片、拿不准的进待确认），不用担心糊片混进交付。</li>
+              <li>· 一组可以同时交好几张，也能一张都不留（全丢也行）；单张还可点它下面“移出交付库”退回本组重新决定。</li>
             </ul>
           )}
         </div>

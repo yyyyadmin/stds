@@ -45,7 +45,7 @@ import { clearEngineInputCache } from './services/rawPreview'
 import { sweepCaches } from './services/cleanup'
 import { authManager } from './services/auth'
 import { engineManager } from './engine'
-import { CAT_LIBRARY, CAT_TRASH, CAT_FLAWS, CAT_REVIEW, isBadDim, isStructuralDim, isTrashLike, BAD_DIMENSIONS, SUPPORTED_EXTS, PERSON_DIMS, guessMidDim, tierOfCat, isDeliverable, isDupRedundant, flawLevel, type CategoryKey, type DimensionKey, type ImageRecord } from '../shared/types'
+import { CAT_LIBRARY, CAT_TRASH, CAT_FLAWS, CAT_REVIEW, isBadDim, isStructuralDim, isTrashLike, BAD_DIMENSIONS, SUPPORTED_EXTS, PERSON_DIMS, guessMidDim, tierOfCat, isDeliverable, flawLevel, type CategoryKey, type DimensionKey, type ImageRecord } from '../shared/types'
 import { computeCategory } from './classify'
 
 /**
@@ -429,12 +429,12 @@ export function registerIpc(win: BrowserWindow): void {
         setCategory(id, newCat, 'user')
       } else if (rec.category === CAT_REVIEW && rec.categoryBy !== 'user' && (isBadDim(dim) || isStructuralDim(dim))) {
         // 重复组代表帧“全组没一张能交”时被 AI 停到待确认拍板（原因就是身上那条中高瑕疵）。
-        // 用户删掉这条瑕疵 = 认定它没拍坏，图得自己回落相册——不补这一步它会赖在待确认出不去
-        // （新规则把这条路走宽了，必须配套）。只动 AI 停泊的（人工搁置在待确认的一律尊重），
-        // 且删完确实没中高瑕疵、也不是组里冗余帧时才重算。
+        // 用户删掉这条瑕疵 = 认定它没拍坏，图得自己回落相册——不补这一步它会赖在待确认出不去。
+        // 只动 AI 停泊的（人工搁置在待确认的一律尊重），删完确实没中高瑕疵就重算回落。
+        // v2.0.93 反转后不再拿"是否冗余帧"卡住回落：干净冗余帧删完瑕疵本就该进交付库。
         const nextTags = { ...rec.tags }
         delete nextTags[dim]
-        if (flawLevel(nextTags) === 'none' && !isDupRedundant(nextTags)) {
+        if (flawLevel(nextTags) === 'none') {
           const nc = computeCategory(nextTags as ImageRecord['tags'], getSettings(), { ...rec, categoryBy: null } as ImageRecord)
           if (nc !== CAT_REVIEW) {
             setCategory(id, nc, 'ai')

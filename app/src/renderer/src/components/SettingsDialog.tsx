@@ -110,6 +110,8 @@ export default function SettingsDialog(): JSX.Element {
             <div className="rounded-md bg-panel2 border border-line p-3 text-xs space-y-1">
               {engine ? (
                 <>
+                  {/* 用户 10-18 拍板：只留“当前引擎”这一整行，下面那行 message 解释与降级长文说明全取消——
+                      引擎状态顶栏徽章已会直接报“运行中/引擎异常”，设置里不再重复铺文字。 */}
                   <div>
                     当前引擎：<b className={engine.type === 'python' ? 'text-good' : 'text-warn'}>
                       {engine.type === 'python'
@@ -117,14 +119,6 @@ export default function SettingsDialog(): JSX.Element {
                         : engine.type === 'node' ? 'Node 基础引擎（降级模式）' : '未就绪'}
                     </b> · 设备：<b className="text-fg">{engine.device}</b> · 并行进程：<b className="text-fg">{engine.workers}</b>
                   </div>
-                  <div className="text-fg3">{engine.message}</div>
-                  {engine.type === 'node' && (
-                    <div className="text-warn">
-                      降级模式仅支持：模糊 / 曝光 / 黑白照 / 重复连拍。人脸类维度（闭眼/斜眼/狰狞/半截头/人数）需完整引擎：
-                      发布版已自带 Python 引擎（无需安装）；若本机为开发版，安装 Python 3.9+ 并 pip install -r ai-engine/requirements.txt，
-                      或运行 npm run build:engine 生成自带引擎后重启软件即自动升级为 12 维。
-                    </div>
-                  )}
                 </>
               ) : (
                 <div className="text-fg3">引擎状态查询中…</div>

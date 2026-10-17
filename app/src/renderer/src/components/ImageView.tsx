@@ -1,6 +1,6 @@
 /**
  * 多视图（9.2）：网格(格子最小 160px，列数自适应并把整行铺满) / 列表(80px) / 瀑布流(保留比例)
- * 缩略图带 AI 标签名（不显示置信度数字）；单击选中 / Shift 连选 / Ctrl 加选 / 双击放大预览
+ * 缩略图带 AI 标签名（不显示置信度数字）；单击只选中这一张 / Ctrl 加选 / Shift 连选 / 双击放大预览
  * （以前还有第四种「大图」布局，与双击小图弹出的放大弹窗功能重叠，已下线：顶栏「大图」直接开那个弹窗）
  */
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
@@ -333,14 +333,8 @@ function StatusRibbon({ img }: { img: ImageRecord }): JSX.Element | null {
     return <span className="chip bg-warn text-white absolute right-1 top-1">待确认</span>
   if (fl === 'high')
     return <span className="chip bg-bad/90 text-white absolute right-1 top-1" title="判出缺陷的图：不进交付库、默认不导出">瑕疵</span>
-  // 重复照片（v2.0.67，旧名“重复多余”）：本身没拍坏，只是同组已经挑了一张更好的进库。它不是瑕疵，必须单独一枚角标，
-  // 否则这张图在网格上看起来与交付库里的图一模一样（用户分不清哪张会被导出去）。
-  if (isDupRedundant(img.tags))
-    return (
-      <span className="chip bg-indigo-500/90 text-white absolute right-1 top-1" title="同一瞬间已经有更好的那张进了交付库，这张默认不导出；想多留这张，去【重复照片】那一组里点保留">
-        重复照片
-      </span>
-    )
+  // v2.0.93 反转：干净重复冗余帧不再挂"重复照片"灰标——它和代表帧一样属交付库，走下面的档位角标。
+  // （带中/高置信瑕疵的冗余帧已在上面被待确认/瑕疵兵分拦截；"同属哪组"靠【重复照片】行/分组视图体现。）
   // 交付角标走虚桶判定（传入 tags）：干净的人数图属交付库且正常导出；
   // D4：文案改用档位名（优质=绿、良好=蓝、一般=灰），无档位（尚未 backfill）时仍写“交付”
   if (isLibraryBucket(img.category, img.tags)) {

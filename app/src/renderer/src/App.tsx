@@ -22,6 +22,7 @@ import FailedImagesDialog from './components/FailedImagesDialog'
 import AiReviewConsent from './components/AiReviewConsent'
 import AiReviewModal from './components/AiReviewModal'
 import StaleBanner from './components/StaleBanner'
+import OnboardingGuide from './components/OnboardingGuide'
 
 export default function App(): JSX.Element {
   const ready = useStore((s) => s.ready)
@@ -34,6 +35,8 @@ export default function App(): JSX.Element {
   const showContactQr = useStore((s) => s.showContactQr)
   const showUpdate = useStore((s) => s.showUpdate)
   const showFailedImages = useStore((s) => s.showFailedImages)
+  const showOnboarding = useStore((s) => s.showOnboarding)
+  const onboardingPaused = useStore((s) => s.onboardingPaused)
   const tagManagerIds = useStore((s) => s.tagManagerIds)
   const closeTagManager = useStore((s) => s.closeTagManager)
   const reviewPanelIds = useStore((s) => s.reviewPanelIds)
@@ -62,7 +65,8 @@ export default function App(): JSX.Element {
         }
         return
       }
-      const dialogOpen = showExport || showSettings || showLogin || showMember || showContactQr || showUpdate || showFailedImages
+      // 新手指导亮着时不响应快捷键（别一边看带路一边把页面切走）；但“暂停、我自己试试”时不屏蔽
+      const dialogOpen = showExport || showSettings || showLogin || showMember || showContactQr || showUpdate || showFailedImages || (showOnboarding && !onboardingPaused)
       if (!previewId && !dialogOpen) {
         if (e.key === '1') void setViewMode('grid')
         if (e.key === '2') void setViewMode('list')
@@ -99,7 +103,7 @@ export default function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [previewId, showExport, showSettings, showLogin, showMember, showContactQr, showUpdate, showFailedImages, tagManagerIds, closeTagManager, setViewMode, stepPreview, closePreview])
+  }, [previewId, showExport, showSettings, showLogin, showMember, showContactQr, showUpdate, showFailedImages, showOnboarding, onboardingPaused, tagManagerIds, closeTagManager, setViewMode, stepPreview, closePreview])
 
   // toast 自动消失：移动类即时反馈 1 秒自收（调用方传 duration），其余默认 6 秒供读完错误信息
   useEffect(() => {
@@ -185,7 +189,7 @@ export default function App(): JSX.Element {
           <StaleBanner />
           <div className="flex-1 flex min-h-0">
             <Sidebar />
-            <main className="flex-1 min-w-0 relative">
+            <main className="flex-1 min-w-0 relative" data-tour="grid">
               <ImageView />
               <DropZone />
               {/* 导入/缩略图生成期间盖住内容区，吸收点击（开始筛选按钮在 TopBar 同步禁用） */}
@@ -208,6 +212,8 @@ export default function App(): JSX.Element {
           {showFailedImages && <FailedImagesDialog />}
           {/* AI 复审首次授权弹窗（组件自管开关，未开启时返回 null） */}
           <AiReviewConsent />
+          {/* 新手指导（首启分步引导）：组件自管开关与“有更新弹窗先让它走完”，不写条件 */}
+          <OnboardingGuide />
           {/* 标签写入中：不阻断操作的进度胶囊（乐观更新已先改好界面，这里只说明“正在喂 AI”） */}
           {tagBusy && (
             <div className="fixed inset-x-0 bottom-0 z-[60] flex justify-center pointer-events-none pb-3">
