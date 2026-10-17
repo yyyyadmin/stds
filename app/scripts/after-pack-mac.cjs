@@ -24,6 +24,33 @@ exports.default = async function (context) {
   const appPath = readdirSync(context.appOutDir).filter((f) => f.endsWith('.app')).map((f) => join(context.appOutDir, f))[0]
   if (!appPath) throw new Error('[afterPack] 在 ' + context.appOutDir + ' 里找不到 .app，无法补签，中断发包')
   console.log(`[afterPack] 未签名分发模式，整包 ad-hoc 补签: ${appPath}`)
+  // 签名前先清掉 bundle 里"已失效"或"指向包外绝对路径"的符号链接：PyInstaller 在构建机上
+  // 常残留指向 /Library/... 的绝对软链，客户机上既失效又越界，codesign --deep 一遇就报
+  // "invalid destination for symbolic link in bundle" 直接失败。包内相对软链（framework 的
+  // Current->A 那种）一律保留，只删真坏/真越界的。清理本身失败也不打断，交给后面签名校验兑底。
+  try {
+    execFileSync(
+      'bash',
+      [
+        '-c',
+        [
+          'APP="$1"',
+          'find "$APP" -type l | while IFS= read -r l; do',
+          '  if [ ! -e "$l" ]; then rm -f "$l"; continue; fi',
+          '  t=$(readlink "$l")',
+          '  case "$t" in',
+          '    /*) case "$t" in "$APP"/*) : ;; *) rm -f "$l" ;; esac ;;',
+          '  esac',
+          'done',
+        ].join('\n'),
+        'after-pack-mac',
+        appPath,
+      ],
+      { stdio: 'inherit' },
+    )
+  } catch (e) {
+    console.log('[afterPack] 软链清理跳过（不影响后续签名校验）：' + String(e).slice(0, 120))
+  }
   execFileSync('codesign', ['--force', '--deep', '--sign', '-', '--timestamp=none', appPath], { stdio: 'inherit' })
   try {
     execFileSync('codesign', ['--verify', '--deep', '--strict', appPath], { stdio: 'inherit' })
