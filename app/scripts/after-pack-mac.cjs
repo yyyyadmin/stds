@@ -24,10 +24,12 @@ exports.default = async function (context) {
   const appPath = readdirSync(context.appOutDir).filter((f) => f.endsWith('.app')).map((f) => join(context.appOutDir, f))[0]
   if (!appPath) throw new Error('[afterPack] 在 ' + context.appOutDir + ' 里找不到 .app，无法补签，中断发包')
   console.log(`[afterPack] 未签名分发模式，整包 ad-hoc 补签: ${appPath}`)
-  // 签名前先清掉 bundle 里"已失效"或"指向包外绝对路径"的符号链接：PyInstaller 在构建机上
-  // 常残留指向 /Library/... 的绝对软链，客户机上既失效又越界，codesign --deep 一遇就报
-  // "invalid destination for symbolic link in bundle" 直接失败。包内相对软链（framework 的
-  // Current->A 那种）一律保留，只删真坏/真越界的。清理本身失败也不打断，交给后面签名校验兑底。
+  // 签名前先把 bundle 里"指向包外绝对路径"的软链固化成真实文件（不是删！）：PyInstaller 在
+  // 构建机上常把 _internal/Python 这类必需运行库打成指向构建机本地的软链，codesign --deep 一遇
+  // 越界软链就报 "invalid destination for symbolic link in bundle" 直接失败。之前用 rm 删虽然让
+  // 签名过了，却把引擎运行必需的库一起删了 → 客户机 "no such file" 启动即崩退 node。正确做法是
+  // 把软链换成它指向的真实文件副本：包自包含、签名能过、客户机也找得到。包内相对软链
+  // （framework 的 Current->A 那种）原样保留；只有真失效（目标不存在）的才删。失败也不打断，交给签名校验兑底。
   try {
     execFileSync(
       'bash',
@@ -36,10 +38,11 @@ exports.default = async function (context) {
         [
           'APP="$1"',
           'find "$APP" -type l | while IFS= read -r l; do',
-          '  if [ ! -e "$l" ]; then rm -f "$l"; continue; fi',
-          '  t=$(readlink "$l")',
-          '  case "$t" in',
-          '    /*) case "$t" in "$APP"/*) : ;; *) rm -f "$l" ;; esac ;;',
+          '  rp=$(realpath "$l" 2>/dev/null)',
+          '  if [ -z "$rp" ] || [ ! -e "$rp" ]; then rm -f "$l"; continue; fi',
+          '  case "$rp" in',
+          '    "$APP"/*) : ;;',
+          '    *) if [ -d "$rp" ]; then rm -f "$l"; cp -R "$rp" "$l"; else rm -f "$l"; cp -p "$rp" "$l"; fi ;;',
           '  esac',
           'done',
         ].join('\n'),
@@ -49,7 +52,7 @@ exports.default = async function (context) {
       { stdio: 'inherit' },
     )
   } catch (e) {
-    console.log('[afterPack] 软链清理跳过（不影响后续签名校验）：' + String(e).slice(0, 120))
+    console.log('[afterPack] 软链固化跳过（不影响后续签名校验）：' + String(e).slice(0, 120))
   }
   execFileSync('codesign', ['--force', '--deep', '--sign', '-', '--timestamp=none', appPath], { stdio: 'inherit' })
   try {

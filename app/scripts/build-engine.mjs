@@ -26,8 +26,12 @@ import {
   cpSync,
   readdirSync,
   writeFileSync,
+  lstatSync,
+  statSync,
+  unlinkSync,
+  realpathSync,
 } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -47,6 +51,68 @@ function run(cmd, args, opts = {}) {
     console.error(`命令失败（exit ${r.status}）：${cmd} ${args.join(' ')}`)
     process.exit(r.status || 1)
   }
+}
+
+/**
+ * 把引擎产物里「指向包外（构建机绝对路径）的软链」固化成真实文件。
+ *
+ * 为什么必须做：mac 上 PyInstaller onedir 常把 `_internal/Python`（引擎必需的 Python
+ * 运行库）等打成一根指向构建机本地 Python 的软链，而不是真实文件。构建机上那条路径
+ * 存在，selfcheck 能过；可一旦装到客户机，那条路径不存在 → 引擎 dlopen 失败、启动即
+ * 崩（exit 255）→ 软件静默降级 node 基础引擎（人物/瑕疵全 0）。把软链换成真实文件后，
+ * 包自包含、客户机找得到库，codesign --deep 也不会再报「越界软链」。
+ *
+ * 规则：包内相对软链（framework 的 Current->3.x 那种）原样保留；只处理解析后落在
+ * 本目录之外的软链（复制真实目标进来）；已失效软链（目标不存在）删除。仅 mac 需要。
+ */
+function dereferenceExternalLinks(root) {
+  if (platform !== 'mac') return
+  let resolvedRoot
+  try {
+    resolvedRoot = realpathSync(root)
+  } catch {
+    return
+  }
+  let materialized = 0
+  let dropped = 0
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name)
+      let st
+      try {
+        st = lstatSync(p)
+      } catch {
+        continue
+      }
+      if (st.isSymbolicLink()) {
+        let target
+        try {
+          target = realpathSync(p)
+        } catch {
+          try {
+            unlinkSync(p)
+            dropped++
+          } catch {
+            /* ignore */
+          }
+          continue
+        }
+        if (target === resolvedRoot || target.startsWith(resolvedRoot + sep)) continue
+        try {
+          const tstat = statSync(target)
+          unlinkSync(p)
+          cpSync(target, p, tstat.isDirectory() ? { recursive: true } : {})
+          materialized++
+        } catch (e) {
+          console.warn(`  解引用软链失败 ${p} -> ${target}: ${String((e && e.message) || e)}`)
+        }
+      } else if (st.isDirectory()) {
+        walk(p)
+      }
+    }
+  }
+  walk(root)
+  console.log(`固化包外软链：替换为真实文件 ${materialized} 个，删除失效软链 ${dropped} 个`)
 }
 
 function findPython() {
@@ -124,6 +190,9 @@ console.log(`复制 ${distEngine}/* → ${outDir}`)
 for (const item of readdirSync(distEngine)) {
   cpSync(join(distEngine, item), join(outDir, item), { recursive: true })
 }
+// 关键：把 PyInstaller 留下的「指向构建机」软链固化成真实文件，否则客户机找不到
+// _internal/Python 会启动即崩（exit 255）→ 静默降级 node。详见函数注释。
+dereferenceExternalLinks(outDir)
 
 // 5) 附带 models/（外部权重目录，用户放 ONNX 即提精度，无需重新打包）
 const outModels = join(outDir, 'models')
