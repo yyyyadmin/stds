@@ -4,6 +4,7 @@
 import { cpus } from 'os'
 import { execFile } from 'child_process'
 import { join } from 'path'
+import { app } from 'electron'
 import { PythonEnginePool, type EngineCapabilities } from './python'
 import { NodeEngine } from './node'
 import { logError } from '../logger'
@@ -114,8 +115,11 @@ export class EngineManager {
           this.status.message = '自带引擎启动失败（' + String(e).slice(0, 120) + '），尝试系统 Python'
         }
       }
-      // 优先级 2：系统 Python + 仓库 ai-engine 源码
-      const pythonPath = await PythonEnginePool.findPython()
+      // 优先级 2：系统 Python + 仓库 ai-engine 源码（仅开发环境）
+      // 正式版绝不探测系统 python3：macOS 上一调用 python3 就会弹「安装命令行开发者工具」框，
+      // 吓到客户；而正式版自带引擎，这条"系统 Python + 仓库源码"的兜底路在生产里本就走不到
+      // （打包资源里没有 ai-engine/main.py）。所以 app.isPackaged 时直接给 null，跳过探测。
+      const pythonPath = app.isPackaged ? null : await PythonEnginePool.findPython()
       const engineDir = PythonEnginePool.findEngineDir()
       if (pythonPath && engineDir) {
         try {
