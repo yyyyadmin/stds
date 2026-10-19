@@ -126,6 +126,7 @@ export const CH = {
   listByIds: 'images:list-by-ids', // 差量刷新：只重拉受影响 id 的精简记录（不含 details），并按当前分类视图判定去留
   categoryCounts: 'images:counts',
   perfHint: 'perf:hint', // 机器性能探测（核数/内存/GPU 合成）：低配自动精简的依据
+  setUiZoom: 'app:set-ui-zoom', // 界面缩放：渲染层算好实际倍率，交给主进程 setZoomFactor 整屏等比例缩放
   moveImages: 'images:move',
   restoreImages: 'images:restore', // 撤回移动：按快照还原分类与标签
   reorderImages: 'images:reorder', // 手动拖拽排序：按传入 id 顺序写入 sort_order
@@ -188,7 +189,8 @@ export const CH = {
   E_exportProgress: 'evt:export-progress',
   E_thumbsReady: 'evt:thumbs-ready',
   E_authChanged: 'evt:auth-changed',
-  E_aiReviewProgress: 'evt:ai-review-progress'
+  E_aiReviewProgress: 'evt:ai-review-progress',
+  E_engineStatus: 'evt:engine-status'
 } as const
 
 /** 软件更新（check_update.php，后台按 platform 返回对应平台安装包：windows=Windows，mac=macOS Intel，arm=macOS Apple 芯片） */
@@ -278,6 +280,8 @@ export interface RendererApi {
   categoryCounts(): Promise<Record<string, number>>
   /** 机器性能探测（第二档 A1）：窗口出来后调一次，结合 perfMode 决定是否进精简模式 */
   perfHint(): Promise<PerfHint>
+  /** 界面缩放（见 AppSettings.uiScale）：传实际倍率（1=100%、0.85=85%），主进程对窗口 setZoomFactor */
+  setUiZoom(factor: number): Promise<void>
   moveImages(req: MoveRequest): Promise<void>
   /** 撤回移动：把移动前的整批快照（分类/标签/categoryBy）原样还原 */
   restoreImages(snapshots: ImageRecord[]): Promise<void>
@@ -353,4 +357,5 @@ export interface RendererApi {
   onThumbsReady(cb: (count: number) => void): () => void
   onAuthChanged(cb: (state: AuthState, consume?: ConsumeResult) => void): () => void
   onAiReviewProgress(cb: (p: AiReviewProgress) => void): () => void
+  onEngineStatus(cb: (s: EngineStatus) => void): () => void
 }

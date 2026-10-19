@@ -585,7 +585,7 @@ export default function TopBar(): JSX.Element {
               (running
                 ? 'AI 引擎正在实时处理照片…'
                 : s.engineBusy || s.engineType === 'none'
-                  ? 'AI 引擎启动中…'
+                  ? 'AI 引擎初始化中…'
                   : 'AI 引擎已就绪（后台运行，详见设置）')
         }
       >
@@ -607,7 +607,7 @@ export default function TopBar(): JSX.Element {
         )}
         {/* 徽章只说状态：「AI 引擎」四个字靠鼠标提示讲（提示里本来就有），窄屏不必再让位 */}
         <span>
-          {s.engineType === 'node' ? '引擎异常' : s.engineType === 'none' ? '启动中' : s.engineBusy ? '启动中' : '运行中'}
+          {s.engineType === 'node' ? '引擎异常' : s.engineType === 'none' ? '初始化中' : s.engineBusy ? '初始化中' : '运行中'}
         </span>
       </span>
 

@@ -644,6 +644,12 @@ export interface AppSettings {
    * 老库没这个键时为 undefined（视为没看过），跟 dupGuideSeen 一样不进 DEFAULT_SETTINGS。
    */
   onboardGuideSeen?: boolean
+  /**
+   * 界面缩放（整屏等比例放大缩小，浏览器 Ctrl+/Ctrl- 同款机制）。
+   * 不设=auto：按窗口宽度自动选档（小屏笔记本字大图小→缩一档，4K 大屏→保持 100%）；
+   * 也可手动钉死 80%/85%/90%/100%。仅存偏好，不进 DEFAULT_SETTINGS。
+   */
+  uiScale?: 'auto' | '80%' | '85%' | '90%' | '100%'
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {

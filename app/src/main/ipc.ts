@@ -66,6 +66,9 @@ export function registerIpc(win: BrowserWindow): void {
   const send = (ch: string, ...args: unknown[]) => {
     if (!win.isDestroyed()) win.webContents.send(ch, ...args)
   }
+  // 引擎状态实时推送：握手完成（none→python/node）那一刻主动发给界面，顶栏徒章即时刷新，
+  // 不必等用户打开设置才拉到（修慢机器上旧轮询 40 秒放弃导致徒章长期卡“初始化中”的问题）。
+  engineManager.onStatusChange((st) => send(CH.E_engineStatus, st))
   let importCancelRequested = false
 
   // 事件桥接
@@ -158,6 +161,14 @@ export function registerIpc(win: BrowserWindow): void {
       memGB: Math.round((os.totalmem() / 2 ** 30) * 10) / 10,
       gpuSoftware: String(st['gpu_compositing'] ?? 'unknown') !== 'enabled'
     }
+  })
+
+  // 界面缩放（见 AppSettings.uiScale）：倍率由渲染层算好（自动档要看窗口宽度，那是渲染层才知道的事），
+  // 主进程只负责 setZoomFactor。用 Chromium 整页缩放而不是 CSS zoom：弹层定位、框选、
+  // 拖拽那些按坐标算的代码不用改——缩放后坐标体系仍是统一的 CSS px。
+  ipcMain.handle(CH.setUiZoom, (_e, factor: number) => {
+    const f = Math.min(2, Math.max(0.5, Number(factor) || 1))
+    if (!win.isDestroyed()) win.webContents.setZoomFactor(f)
   })
 
   // 移动（逻辑/物理），9.3

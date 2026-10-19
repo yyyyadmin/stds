@@ -177,6 +177,7 @@ class RpcWorker {
 
 export class PythonEnginePool {
   private workers: RpcWorker[] = []
+  private booting = new Set<RpcWorker>()
   private rr = 0
   readonly events = new EventEmitter()
   started = false
@@ -251,7 +252,7 @@ export class PythonEnginePool {
     if (this.started && this.workers.length) {
       return this.workers[0].capabilities || {}
     }
-    // 快速探测：先起 1 个进程拿 capabilities
+    // 1 号工人：起一个进程，就绪后【直接留用】——不再“探测完杀掉再重启”（省一整次冷启动：Python 加载 + 读模型）。
     const probe = new RpcWorker(this.pythonPath, this.engineDir, this.device, this.bundled)
     const caps = await new Promise<EngineCapabilities>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error('engine startup timeout (30s)')), 30000)
@@ -268,19 +269,37 @@ export class PythonEnginePool {
         reject(e)
       })
     })
-    probe.stop()
-    // 重新拉起 probe 作为工作进程（保持连接存活）
-    await probe.start()
+    probe.events.on('log', (m: string, lv: string) => this.events.emit('log', m, lv))
     this.workers = [probe]
+    this.started = true
+    // 其余工人【后台并行补齐】，不阻塞返回：此刻 1 号已能 detect，引擎状态立刻变“运行中”，
+    // 慢机器不必等全部工人冷启动完才能用（工人只影响并发吞吐，不影响单张判定）。
+    this.spawnWorkersInBackground()
+    return caps
+  }
+
+  /** 后台并行拉起剩余工人：就绪一个挂进池子一个；单个起不来只少一个工人，继不挂进池就不会被 detect 碰到，绝不拖垮已可用的引擎。 */
+  private spawnWorkersInBackground(): void {
     const n = Math.max(1, this.size)
-    for (let i = 1; i < n; i++) {
+    for (let i = this.workers.length; i < n; i++) {
       const w = new RpcWorker(this.pythonPath, this.engineDir, this.device, this.bundled)
       w.events.on('log', (m: string, lv: string) => this.events.emit('log', m, lv))
-      await w.start()
-      this.workers.push(w)
+      this.booting.add(w)
+      w.events.once('ready', () => {
+        this.booting.delete(w)
+        if (this.started) {
+          this.workers.push(w)
+        } else {
+          w.stop() // 池子已停（如切换引擎/退出），这个刚就绪的工人别留成孤儿
+        }
+      })
+      w.events.once('dead', () => {
+        this.booting.delete(w)
+      })
+      void w.start().catch(() => {
+        this.booting.delete(w)
+      })
     }
-    this.started = true
-    return caps
   }
 
   private pick(): RpcWorker {
@@ -306,7 +325,9 @@ export class PythonEnginePool {
 
   stop(): void {
     this.workers.forEach((w) => w.stop())
+    this.booting.forEach((w) => w.stop()) // 连后台正在冷启动的工人一起收，避免孤儿进程
     this.workers = []
+    this.booting.clear()
     this.started = false
   }
 }

@@ -25,6 +25,7 @@ const api: RendererApi = {
   listByIds: (category: CategoryKey, ids: number[]) => ipcRenderer.invoke(CH.listByIds, { category, ids }),
   categoryCounts: () => ipcRenderer.invoke(CH.categoryCounts),
   perfHint: () => ipcRenderer.invoke(CH.perfHint),
+  setUiZoom: (factor: number) => ipcRenderer.invoke(CH.setUiZoom, factor),
   moveImages: (req: MoveRequest) => ipcRenderer.invoke(CH.moveImages, req),
   restoreImages: (snapshots: ImageRecord[]) => ipcRenderer.invoke(CH.restoreImages, snapshots),
   reorderImages: (ids: number[]) => ipcRenderer.invoke(CH.reorderImages, ids),
@@ -81,6 +82,7 @@ const api: RendererApi = {
   onExportProgress: (cb) => sub(CH.E_exportProgress, cb),
   onThumbsReady: (cb) => sub<number>(CH.E_thumbsReady, cb),
   onAiReviewProgress: (cb) => sub(CH.E_aiReviewProgress, cb),
+  onEngineStatus: (cb) => sub(CH.E_engineStatus, cb),
   onAuthChanged: (cb) => {
     const listener = (_e: IpcRendererEvent, state: AuthState, consume?: ConsumeResult) => cb(state, consume)
     ipcRenderer.on(CH.E_authChanged, listener)

@@ -1,7 +1,7 @@
 /**
  * 引擎管理器：按设置选择 Python 完整引擎 / Node 降级引擎，统一 detect 接口
  */
-import { cpus } from 'os'
+import { cpus, totalmem } from 'os'
 import { execFile } from 'child_process'
 import { join } from 'path'
 import { app } from 'electron'
@@ -17,6 +17,18 @@ const execFileAsync = (cmd: string, args: string[]): Promise<{ code: number; err
     )
   })
 
+/**
+ * 工人进程数：CPU 和内存双重约束，取更保守的那个，上限 6。
+ * 每个工人是同一引擎的独立进程，各吃一大份内存（mediapipe/OpenCV/模型）；只看核数会在
+ * 8GB 这类小内存机器上开满 6 个、把内存打爆→硬盘当内存→越起越慢。这里按约每 2.5GB 内存
+ * 才多开一个（1 个兜底），让慢机器少开工人也更快就绪，且不影响单张判定（工人只影响并发吞吐）。
+ */
+function planWorkers(): number {
+  const byCpu = cpus().length - 1
+  const byMem = Math.floor(totalmem() / (2.5 * 1024 * 1024 * 1024))
+  return Math.max(1, Math.min(6, Math.min(byCpu, byMem)))
+}
+
 export interface EngineStatus {
   type: 'python' | 'node' | 'none'
   device: string
@@ -30,7 +42,35 @@ export interface EngineStatus {
 export class EngineManager {
   private python: PythonEnginePool | null = null
   private node: NodeEngine | null = null
-  private status: EngineStatus = { type: 'none', device: 'cpu', workers: 0, pythonPath: null, engineDir: null, capabilities: {}, message: '未初始化' }
+  private _status: EngineStatus = { type: 'none', device: 'cpu', workers: 0, pythonPath: null, engineDir: null, capabilities: {}, message: '未初始化' }
+  private statusListeners = new Set<(s: EngineStatus) => void>()
+
+  /**
+   * 状态“赋值即广播”：引擎从“未就绪”握手成 python/node 的那一刻，主进程据此把状态
+   * 实时推给渲染层（顶栏徒章/设置自动刷新），不再依赖界面轮询或用户打开设置才拉一次。
+   * 注意：`this.status.message = ...`（原地改字段）不触发广播——那是初始化过程中的过渡态，本就不该惊动界面。
+   */
+  private get status(): EngineStatus {
+    return this._status
+  }
+  private set status(s: EngineStatus) {
+    this._status = s
+    for (const cb of this.statusListeners) {
+      try {
+        cb(s)
+      } catch {
+        /* 单个监听器异常绝不能拖垮引擎初始化链路 */
+      }
+    }
+  }
+
+  /** 订阅引擎状态变化，返回取消订阅函数（registerIpc 用它把状态转发给渲染层） */
+  onStatusChange(cb: (s: EngineStatus) => void): () => void {
+    this.statusListeners.add(cb)
+    return () => {
+      this.statusListeners.delete(cb)
+    }
+  }
 
   getStatus(): EngineStatus {
     return this.status
@@ -70,7 +110,7 @@ export class EngineManager {
       const bundled = PythonEnginePool.findBundledEngine()
       if (bundled) {
         try {
-          const workers = Math.max(1, Math.min(6, cpus().length - 1))
+          const workers = planWorkers()
           this.python = new PythonEnginePool(bundled.exe, bundled.dir, devicePreference, workers, true)
           const caps = await this.python.start()
           const device = this.python.getDevice()
@@ -92,13 +132,14 @@ export class EngineManager {
             this.retriedBundled = true
             await this.resignBundledMac(bundled.exe, bundled.dir)
             try {
-              this.python = new PythonEnginePool(bundled.exe, bundled.dir, devicePreference, Math.max(1, Math.min(6, cpus().length - 1)), true)
+              const retryWorkers = planWorkers()
+              this.python = new PythonEnginePool(bundled.exe, bundled.dir, devicePreference, retryWorkers, true)
               const caps = await this.python.start()
               const device = this.python.getDevice()
               this.status = {
                 type: 'python',
                 device,
-                workers: Math.max(1, Math.min(6, cpus().length - 1)),
+                workers: retryWorkers,
                 pythonPath: bundled.exe,
                 engineDir: bundled.dir,
                 capabilities: caps,
@@ -123,7 +164,7 @@ export class EngineManager {
       const engineDir = PythonEnginePool.findEngineDir()
       if (pythonPath && engineDir) {
         try {
-          const workers = Math.max(1, Math.min(6, cpus().length - 1))
+          const workers = planWorkers()
           this.python = new PythonEnginePool(pythonPath, engineDir, devicePreference, workers)
           const caps = await this.python.start()
           const device = this.python.getDevice()

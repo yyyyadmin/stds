@@ -8,6 +8,8 @@
  */
 import { useEffect, useState } from 'react'
 import { useStore } from '../store'
+import { effectiveUiScale } from '../uiScale'
+import type { UiScaleSetting } from '../uiScale'
 import { DEFAULT_TIER_NAMES } from '../../../shared/types'
 import type { EngineStatus } from '../../../main/engine'
 import type { UpdateInfo } from '../../../shared/ipc'
@@ -93,6 +95,23 @@ export default function SettingsDialog(): JSX.Element {
                 <option value="lean">精简（好机器也追求更跟手）</option>
               </select>
             </label>
+            {/* 界面缩放：整屏等比例缩（文字/按钮/标签/格子一起缩，比例不变）。
+                小屏笔记本上“字大图小标签挤不下”的兼容开关；4K 大屏自动保持 100% 不动 */}
+            <label className="flex items-center gap-2 text-fg2 min-w-0 mb-2" title="整个界面等比例放大缩小：文字、按钮、标签、图片格子一起缩，比例不变。自动档按窗口宽度选：小屏笔记本缩到 85~90%，大屏保持 100%">
+              <span className="whitespace-nowrap">界面缩放</span>
+              <select className="input flex-1 min-w-0 truncate" value={settings.uiScale ?? 'auto'}
+                onChange={(e) => void saveSettings({ uiScale: e.target.value as UiScaleSetting })}>
+                <option value="auto">自动（按屏幕大小）</option>
+                <option value="80%">80%</option>
+                <option value="85%">85%</option>
+                <option value="90%">90%</option>
+                <option value="100%">100%（原始大小）</option>
+              </select>
+            </label>
+            <div className="text-xs text-fg3 mb-2">
+              当前实际缩放：约 {Math.round(effectiveUiScale(settings.uiScale, window.innerWidth) * 100)}%
+              {!settings.uiScale || settings.uiScale === 'auto' ? '（自动档：窗口越窄缩得越多，拖动/最大化窗口会重新选档）' : '（已手动钉死，不再随窗口变化）'}
+            </div>
             {/* 本机档位常驻展示（与下拉选项无关）：用户要的是“知道自己的电脑是什么级别”，
                 哪怕手动选了全特效/精简，探测结论也照实说。层级靠排版：小字浅色fg3，
                 只有结论那一个词着色 */}
@@ -113,10 +132,10 @@ export default function SettingsDialog(): JSX.Element {
                   {/* 用户 10-18 拍板：只留“当前引擎”这一整行，下面那行 message 解释与降级长文说明全取消——
                       引擎状态顶栏徽章已会直接报“运行中/引擎异常”，设置里不再重复铺文字。 */}
                   <div>
-                    当前引擎：<b className={engine.type === 'python' ? 'text-good' : 'text-warn'}>
+                    当前引擎：<b className={engine.type === 'python' ? 'text-good' : engine.type === 'node' ? 'text-warn' : 'text-fg'}>
                       {engine.type === 'python'
                         ? (engine.pythonPath && /screener-engine/.test(engine.pythonPath) ? '自带完整 AI 引擎（12 维）' : 'Python 完整 AI 引擎')
-                        : engine.type === 'node' ? 'Node 基础引擎（降级模式）' : '未就绪'}
+                        : engine.type === 'node' ? 'Node 基础引擎（降级模式）' : '系统检测环境加载中'}
                     </b> · 设备：<b className="text-fg">{engine.device}</b> · 并行进程：<b className="text-fg">{engine.workers}</b>
                   </div>
                 </>

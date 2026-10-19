@@ -52,6 +52,24 @@ export default function App(): JSX.Element {
     void bootstrap()
   }, [bootstrap])
 
+  // 自动档界面缩放：窗口拖动/最大化/进全屏后按新宽度重选档（防抖 300ms，拖窗口过程中不反复缩）。
+  // 手动钉死档（80%~100%）时不插手，尊重用户在设置里的选择。
+  useEffect(() => {
+    let timer: number | undefined
+    const onResize = (): void => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        const st = useStore.getState()
+        if (!st.settings.uiScale || st.settings.uiScale === 'auto') st.applyUiScale()
+      }, 300)
+    }
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.clearTimeout(timer)
+      window.removeEventListener('resize', onResize)
+    }
+  }, [])
+
   // 全局快捷键
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {

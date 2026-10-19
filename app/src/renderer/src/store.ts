@@ -8,6 +8,7 @@ import type { AppSettings, CategoryKey, ImageRecord, DimensionKey, PerfHint, Tie
 import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, CAT_FLAWS, QC_MANUAL_DIMENSIONS, DIMENSION_LABELS, isBadDim, isStructuralDim, isTrashLike, NEUTRAL_DIMENSIONS, PERSON_DIMS, guessMidDim, flawLevel, SUPPORTED_EXTS, tierOfCat, DEFAULT_TIER_NAMES } from '../../shared/types'
 import type { AiReviewProgress, AuthState, BootstrapInfo, ConsumeResult, MoveRequest, PlanInfo, UpdateInfo } from '../../shared/ipc'
 import { isVip } from '../../shared/membership'
+import { effectiveUiScale } from './uiScale'
 import type { ScanProgress } from '../../main/services/scanner'
 import type { ExportProgress } from '../../main/services/exporter'
 
@@ -375,6 +376,8 @@ interface StoreState {
   bootstrap(): Promise<void>
   setTheme(t: 'light' | 'dark'): Promise<void>
   toggleTheme(): Promise<void>
+  /** 界面缩放：按 settings.uiScale（auto 看窗口宽度）算倍率，交给主进程整页缩放；启动、改设置、窗口变化时重apply */
+  applyUiScale(): void
   openLogin(): void
   closeLogin(): void
   openMember(): void
@@ -546,14 +549,15 @@ function startStalePoll(): void {
 }
 
 /*
- * 顶栏徽章的引擎真类型轮询（用户 10-18）：主进程引擎初始化是异步的，bootstrap 那一刻常报 none，
- * 徽章不能拿 none 冒充“运行中”。每 2 秒轻询一次 engineStatus，握手出真结果（python/node）即停，
- * 最多 20 次防死循环。降级成 node 的机器从此常显“引擎异常”，不靠瞬时 toast 提醒。
+ * 顶栏徽章的引擎真类型轮询（兼容兑底）：主进程引擎初始化是异步的，bootstrap 那一刻常报 none，
+ * 徽章不能拿 none 冒充“运行中”。每 2 秒轻询一次 engineStatus，握手出真结果（python/node）即停。
+ * 主进程已改为就绪时主动推送（onEngineStatus），本轮询仅作“漏推”时的兑底；上限抬到 150 次
+ * （约 5 分钟），避免慢机器（如 M1 首次加载模型+自愈重签）超 40 秒就提前放弃、徽章卡在“初始化中”。
  */
 let engineTypePollTimer: ReturnType<typeof setTimeout> | null = null
 let engineTypePollTries = 0
 function startEngineTypePoll(): void {
-  if (engineTypePollTimer || engineTypePollTries >= 20) return
+  if (engineTypePollTimer || engineTypePollTries >= 150) return
   engineTypePollTimer = setTimeout(() => {
     engineTypePollTimer = null
     void window.api
@@ -788,11 +792,15 @@ export const useStore = create<StoreState>((set, get) => ({
     })
     await get().openCategory(null)
     get().bindEvents()
+    // 界面缩放：启动就按存的档位（或自动档按当前窗口宽）apply 一次，重启后效果不丢
+    get().applyUiScale()
     // 拉一次旧引擎过期信息并起轮询（等引擎握手报出签名后横幅才能数得准）：开发版+正式版都需要
     void get().refreshStale()
     startStalePoll()
     // 引擎握手是异步的，bootstrap 那一下常拿到 none：轻轮询到真类型为止，徽章才能如实显“运行中/引擎异常”
     startEngineTypePoll()
+    // 实时订阅主进程推送：引擎就绪瞬间即刷新徽章，慢机器也不必等轮询/开设置（轮询仅作兑底备份）
+    window.api.onEngineStatus((st) => useStore.setState({ engineType: st.type }))
     // 启动后静默检查更新（错开 2.5s 不拖慢首屏），有新版自动弹窗
     setTimeout(() => void get().checkUpdateSilent(), 2500)
     // 新手指导：这台电脑第一次用才自动弹（已看过 / 正在弹都不重复触发）。
@@ -842,6 +850,12 @@ export const useStore = create<StoreState>((set, get) => ({
   async toggleTheme() {
     const next = get().settings.theme === 'dark' ? 'light' : 'dark'
     await get().setTheme(next)
+  },
+  applyUiScale() {
+    // innerWidth 在缩放生效后是“有效 CSS px”：自动档据此选档；已钉在某个档时
+    // 宽度变化只在跨过阈值才换档，不会无限自缩（1440 屏缩到 0.85 后宽度变 1694 → 仍停 0.85）
+    const f = effectiveUiScale(get().settings.uiScale, window.innerWidth)
+    void window.api.setUiZoom(f)
   },
   openLogin() {
     set({ showLogin: true })
@@ -1786,6 +1800,8 @@ export const useStore = create<StoreState>((set, get) => ({
       set({ perfLean: lean })
       applyPerfLean(lean)
     }
+    // 界面缩放改了：落盘后立即重apply，设置里拨下拉马上看到效果
+    if (patch.uiScale !== undefined) get().applyUiScale()
     if (reclassify) {
       await window.api.reclassify()
       await get().refreshImages()
