@@ -1,18 +1,18 @@
 #!/bin/bash
-# 筛片大师 · Mac 一键修复工具
+# 万象筛图 · Mac 一键修复工具
 # 用途：清除系统对未签名软件的拦截标记，解决"已损坏，无法打开"/"来自身份不明的开发者"提示。
-# 用法：先把 筛片大师 拖进「应用程序」文件夹，再双击本文件即可，全程不需要懂终端。
+# 用法：先把 万象筛图 拖进「应用程序」文件夹，再双击本文件即可，全程不需要懂终端。
 
-APP="/Applications/筛片大师.app"
+APP="/Applications/万象筛图.app"
 
 echo "==============================================="
-echo "  筛片大师 · 一键修复"
+echo "  万象筛图 · 一键修复"
 echo "==============================================="
 echo ""
 
 if [ ! -d "$APP" ]; then
-  echo "没有在「应用程序」文件夹里找到 筛片大师。"
-  echo "请先：打开下载好的 DMG → 把 筛片大师 图标拖到右边的 Applications 文件夹 → 再回来双击本文件。"
+  echo "没有在「应用程序」文件夹里找到 万象筛图。"
+  echo "请先：打开下载好的 DMG → 把 万象筛图 图标拖到右边的 Applications 文件夹 → 再回来双击本文件。"
   echo ""
   read -p "按回车键关闭窗口..."
   exit 1
@@ -32,7 +32,7 @@ echo "正在补签内置 AI 引擎（Apple 芯片必需，不签则引擎启动�
 codesign --force --deep --sign - --timestamp=none "$APP" 2>/dev/null || sudo codesign --force --deep --sign - --timestamp=none "$APP"
 if codesign --verify --deep --strict "$APP" 2>/dev/null; then
   echo ""
-  echo "✅ 修复完成！现在打开「启动台」或「应用程序」文件夹，双击 筛片大师 即可正常使用。"
+  echo "✅ 修复完成！现在打开「启动台」或「应用程序」文件夹，双击 万象筛图 即可正常使用。"
 else
   echo ""
   echo "⚠️ 拦截标记已清除，但签名补了一半没成功。仍然可以先打开软件试试；"

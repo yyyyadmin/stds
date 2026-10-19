@@ -1,4 +1,4 @@
-; 筛片大师 —— Windows 安装 / 卸载自定义脚本（electron-builder 自动 include 本文件）
+; 万象筛图 —— Windows 安装 / 卸载自定义脚本（electron-builder 自动 include 本文件）
 ;
 ; 要解决的事：用户在另一台机器上装过又卸掉，回来发现磁盘上还留着日志、照片缓存、
 ; AI 模型缓存、Electron 缓存+数据。装新版本时这些旧缓存会被直接复用，

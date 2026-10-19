@@ -167,7 +167,7 @@ export default function LoginDialog(): JSX.Element | null {
           <div className="pointer-events-none absolute -bottom-20 -left-10 h-44 w-44 rounded-full bg-warn/10 blur-3xl" />
 
           <div className="relative">
-            <div className="text-[26px] font-bold leading-none tracking-wide text-fg">筛片大师</div>
+            <div className="text-[26px] font-bold leading-none tracking-wide text-fg">万象筛图</div>
             <div className="mt-3 text-[13px] leading-relaxed text-fg2">摄影批量筛图 · 本地 AI 引擎</div>
           </div>
 

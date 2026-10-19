@@ -158,7 +158,7 @@ if (!gotLock) {
       center: true,
       minWidth: 1024,
       minHeight: 680,
-      title: '筛片大师',
+      title: '万象筛图',
       icon: winIcon,
       backgroundColor: '#f5f6f8',
       autoHideMenuBar: true,

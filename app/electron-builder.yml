@@ -1,7 +1,7 @@
 # electron-builder 双平台打包配置（第十三章：Windows NSIS + macOS DMG）
 appId: com.screener.master
-productName: 筛片大师
-copyright: Copyright © 2026 筛片大师团队
+productName: 万象筛图
+copyright: Copyright © 2026 万象筛图团队
 
 directories:
   output: release
@@ -56,7 +56,7 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: 筛片大师
+  shortcutName: 万象筛图
   installerLanguages: [zh_CN, en_US]
   deleteAppDataOnUninstall: false
 

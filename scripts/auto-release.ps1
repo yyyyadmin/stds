@@ -1,9 +1,9 @@
 ﻿#Requires -Version 5.1
 <#
- 筛片大师 · 一键发布脚本
+ 万象筛图 · 一键发布脚本
  流程：提交本地改动 → 版本号自动 +1（patch）→ 更新 app/package.json 与 lock
        → git commit + tag → 推送 GitHub → 自动触发三平台安装包云构建
- 用法：双击桌面「一键发布筛片大师」快捷方式
+ 用法：双击桌面「一键发布万象筛图」快捷方式
        或命令行：powershell -ExecutionPolicy Bypass -File auto-release.ps1 [-DryRun]
        -DryRun 只显示将要发布的版本号，不做任何改动
 #>
@@ -29,7 +29,7 @@ try {
   # 仓库根 = 本脚本所在 scripts 目录的上一级
   $repoRoot = Split-Path -Parent $PSScriptRoot
   Set-Location $repoRoot
-  Say '=== 筛片大师 · 一键发布 ===' 'Cyan'
+  Say '=== 万象筛图 · 一键发布 ===' 'Cyan'
   Say "仓库：$repoRoot"
 
   # ---------- 1. 有改动先提交 ----------
