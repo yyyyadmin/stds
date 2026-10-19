@@ -228,7 +228,7 @@ function buildSteps(tierNames: string[]): Step[] {
         { term: '批量', text: <>按住 Ctrl 点选多张，或 <Key>Ctrl</Key>+<Key>A</Key> 全选当前相册，底部会浮出批量栏，一次移动、改判、加标签。</> },
         { term: '反悔', text: <>移动过照片后顶栏「↩ 撤回」会变亮，可以连着多退几步。<Key>Delete</Key> 丢进废弃库（在废弃库里按则是还原）。</> },
       ],
-      note: <>视图布局按 <Key>1</Key> <Key>2</Key> <Key>3</Key> 切网格 / 列表 / 瀑布流，网格下按住 <Key>Ctrl</Key> 滚轮能缩放缩略图。</>,
+      note: <>网格布局就是一行铺满的缩略图（软件唯一布局）；一行摆几张，用顶栏「一行 N 张」按钮直接选，也能按住 <Key>Ctrl</Key> 滚轮缩放；双击任意小图看大图。</>,
     },
     {
       tour: 'export',

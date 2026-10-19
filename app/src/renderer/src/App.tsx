@@ -43,7 +43,6 @@ export default function App(): JSX.Element {
   const tagBusy = useStore((s) => s.tagBusy)
   const toast = useStore((s) => s.toast)
   const dismissToast = useStore((s) => s.dismissToast)
-  const setViewMode = useStore((s) => s.setViewMode)
   const stepPreview = useStore((s) => s.stepPreview)
   const closePreview = useStore((s) => s.closePreview)
   const [dragOver, setDragOver] = useState(false)
@@ -86,9 +85,7 @@ export default function App(): JSX.Element {
       // 新手指导亮着时不响应快捷键（别一边看带路一边把页面切走）；但“暂停、我自己试试”时不屏蔽
       const dialogOpen = showExport || showSettings || showLogin || showMember || showContactQr || showUpdate || showFailedImages || (showOnboarding && !onboardingPaused)
       if (!previewId && !dialogOpen) {
-        if (e.key === '1') void setViewMode('grid')
-        if (e.key === '2') void setViewMode('list')
-        if (e.key === '3') void setViewMode('masonry')
+        // 1/2/3 切视图已下线（用户 10-19 拍板：布局只留网格，列表/瀑布流入口去掉）
         // 4 = 看大图：不再是第四种布局，直接开与双击小图同一个放大弹窗
         if (e.key === '4') useStore.getState().openLargePreview()
         if (e.key === 'Delete') {
@@ -114,14 +111,11 @@ export default function App(): JSX.Element {
           e.preventDefault()
           stepPreview(1)
         }
-        if (e.key === '1') void setViewMode('grid')
-        if (e.key === '2') void setViewMode('list')
-        if (e.key === '3') void setViewMode('masonry')
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [previewId, showExport, showSettings, showLogin, showMember, showContactQr, showUpdate, showFailedImages, showOnboarding, onboardingPaused, tagManagerIds, closeTagManager, setViewMode, stepPreview, closePreview])
+  }, [previewId, showExport, showSettings, showLogin, showMember, showContactQr, showUpdate, showFailedImages, showOnboarding, onboardingPaused, tagManagerIds, closeTagManager, stepPreview, closePreview])
 
   // toast 自动消失：移动类即时反馈 1 秒自收（调用方传 duration），其余默认 6 秒供读完错误信息
   useEffect(() => {

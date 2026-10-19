@@ -1,5 +1,5 @@
 /**
- * 多视图（9.2）：网格(格子最小 160px，列数自适应并把整行铺满) / 列表(80px) / 瀑布流(保留比例)
+ * 多视图（9.2）：网格(一行 3~7 张可调、整行铺满，默认按屏幕大小自适应) / 列表(80px) / 瀑布流(保留比例)
  * 缩略图带 AI 标签名（不显示置信度数字）；单击只选中这一张 / Ctrl 加选 / Shift 连选 / 双击放大预览
  * （以前还有第四种「大图」布局，与双击小图弹出的放大弹窗功能重叠，已下线：顶栏「大图」直接开那个弹窗）
  */
@@ -16,16 +16,12 @@ import { ALL_TAG_DIMENSIONS, CAT_LIBRARY, CAT_REVIEW, CAT_FLAWS, CAT_TRASH, CAT_
 import { dimTagColor } from './Sidebar'
 
 /**
- * 网格 Ctrl+滚轮缩放的上下限（现在是「一格最小宽」，实际格子会再撑大一点铺满整行）。
- * 上限 610 是按窗口宽度反推的：主区实宽≈2040 CSS px
- * （2560 屏 − 侧栏 224 − 滚动条与内边距），auto-fill 下“一行三张”最多能放到 672 一格，
- * 610 留了余量（再往上就变成一行两张，没意义了）；以前卡在 360，最多只能放到一行五张。
- * 清晰度已与主进程同步提档：importer.ts 的 THUMB_MAX 已从 640 提到 960，3:2 横片短边
- * 640px，610 格子在 100% 系统缩放下约 1:1；125% 缩放还差约 1.2 倍（610×1.25≈763 物理
- * px），要再清只能继续提 THUMB_MAX（代价是磁盘，一万张 960 档约 270~310MB）。
+ * 网格缩放按「一行几张」计（2026-10-19 用户拍板，替代旧的格子像素值 100~610 滑块）：
+ * 列数状态在全局 store（gridCols，3~7，localStorage 持久化，默认按屏幕自适应，
+ * 旧 gridSize 像素值自动换算迁移）；入口是顶栏视图组旁的「一行 N 张」按钮 + Ctrl+滚轮按列步进，
+ * 都不悬浮压在图上（第一版飘在网格左上角会盖住第一张图，已挪走）。
+ * 格子大小 = 画廊宽 ÷ 列数，整行铺满；列数变少格子变大时 ThumbImg 自动改用大档缩略图（960）。
  */
-const GRID_MIN = 100
-const GRID_MAX = 610
 /** 网格间距，对应容器 className 的 gap-3（Tailwind 0.75rem = 12px）。改样式必须同步这里：
  *  GridView 靠它反推「一格真实宽度」，算错就会选错缩略图档，小屏笔记本上格子会发糊。 */
 const GRID_GAP = 12
@@ -424,7 +420,7 @@ function makeStackDragImage(ids: number[]): HTMLElement {
 
 function ThumbBase({ img, cellPx, index, onClick, onDoubleClick, dragIds }: {
   img: ImageRecord
-  /** 一格的实际 CSS 宽（不是滑块值，见 GridView 里对 cellPx 的解释），只用来决定取哪档缩略图 */
+  /** 一格的实际 CSS 宽（画廊宽÷列数，见 GridView 里对 cellPx 的解释），只用来决定取哪档缩略图 */
   cellPx: number
   index: number
   onClick: (index: number, e: React.MouseEvent) => void
@@ -504,7 +500,7 @@ const Thumb = memo(ThumbBase)
  */
 function GridView(props: {
   images: ImageRecord[]
-  size: number
+  cols: number
   click: (index: number, e: React.MouseEvent) => void
   dbl: (img: ImageRecord) => void
   dragIds: number[]
@@ -522,28 +518,26 @@ function GridView(props: {
   const cur = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
 
   /**
-   * 一格的实际宽度：容器宽 − 间距，再除以当行列数（与 CSS auto-fill 同一套算法）。
-   * 为什么不能直接把滑块的 size 交给 ThumbImg 判档：minmax(size,1fr) 会把每行剩下的
-   * 零头摊给当行各列，实际格子比 size 大 0~22%。拿 size 判就低估了需求，格子物理边长
-   * 超过小档短边时图片被放大显示——小屏笔记本 + 150%/200% 系统缩放下网格发糊的成因之一
+   * 一格的实际宽度：容器宽 − 间距，再除以列数（列数钉死，格子把整行均分铺满）。
+   * 交给 ThumbImg 判档的必须是这个实际宽度：格子物理边长一旦超过小档短边，
+   * 图片就会被拉伸显示而发糊——小屏笔记本 + 150%/200% 系统缩放下网格发糊的成因之一
    * （另一半成因是小档按长边定尺寸，见 shared/types.ts 双档注释）。
    * 用公式算而不量 DOM：读写交替会触发重排，而这里每次窗口变化都要算。
    */
-  const [cellPx, setCellPx] = useState(props.size)
+  const [cellPx, setCellPx] = useState((window.innerWidth - 300) / props.cols)
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
     const measure = (): void => {
       const w = el.clientWidth
-      if (w <= 0) return // 隐藏状态下量到 0，算出的列数是负数，不如保持上一次的值
-      const cols = Math.max(1, Math.floor((w + GRID_GAP) / (props.size + GRID_GAP)))
-      setCellPx((w - GRID_GAP * (cols - 1)) / cols)
+      if (w <= 0) return // 隐藏状态下量到 0，不如保持上一次的值
+      setCellPx((w - GRID_GAP * (props.cols - 1)) / props.cols)
     }
     measure()
     const ro = new ResizeObserver(measure)
     ro.observe(el)
     return () => ro.disconnect()
-  }, [props.size])
+  }, [props.cols])
 
   const computeSelection = (x0: number, y0: number, x1: number, y1: number): void => {
     const minX = Math.min(x0, x1)
@@ -622,13 +616,10 @@ function GridView(props: {
     <div
       ref={containerRef}
       className="grid gap-3"
-      /* minmax(size, 1fr)：size 是「一格最小宽」而不是固定宽——先按能塞下几列，
-         再把行剩下的零头均摊给这几列，所以每行必定正好铺满整宽，不会再出现
-         “每行张数不同 → 左右留白一会在这一会在那”。以前列宽钉死 + justify-center
-         就是把那块零头居中，才看着边距忽宽忽窄。
-         必须用 auto-fill 而不是 auto-fit：auto-fit 会折叠空列，库里只剩三张图时
-         会被拉成三块大饼。 */
-      style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${props.size}px, 1fr))` }}
+      /* 列数钉死 repeat(N, 1fr)：格子均分整行、永远一行 N 张——窗口拉大拉小变的是
+         格子大小而不是张数（用户 10-19 拍板：一行几个由客户定，不随屏幕偷偷多塞）。
+         显式 N 列不受图片张数影响，库里只剩三张图时也不会被拉成三块大饼。 */
+      style={{ gridTemplateColumns: `repeat(${props.cols}, 1fr)` }}
       onMouseDown={onMouseDown}
     >
       {props.images.map((img, i) => (
@@ -858,15 +849,12 @@ export default function ImageView(): JSX.Element {
   const click = (index: number, e: React.MouseEvent): void => handleClickSelect(index, e)
   const dbl = (img: ImageRecord): void => openPreview(img.id)
 
-  // Ctrl + 滚轮缩放网格缩略图尺寸（GRID_MIN–GRID_MAX），列数仍 auto-fill 自适应；记住上次缩放。
-  // 上下限的推导（窗口宽度、缩略图短边与糊不糊的关系）见文件开头 GRID_MIN / GRID_MAX 的注释。
+  // Ctrl+滚轮按「一行几张」一格一档调（向上滚=图变大=列数减一），与顶栏「一行 N 张」按钮
+  // 共用 store 里的同一个设置（gridCols，选过就记住，从没选过按屏幕自适应）。
   // 监听器用 callback ref 绑定：网格容器会在切到重复叠卡视图/空库引导等分支时卸载重挂，
   // 若只在 useEffect([viewMode]) 里绑一次，重挂后节点是新的而 effect 不重跑，
   // 导致“Ctrl+滚轮大多时候没反应、偶尔又可以”。callback ref 每次挂载/卸载自动重绑/清理。
-  const [gridSize, setGridSize] = useState<number>(() => {
-    const v = Number(localStorage.getItem('gridSize'))
-    return Number.isFinite(v) && v >= GRID_MIN && v <= GRID_MAX ? v : 160
-  })
+  const gridCols = useStore((st) => st.gridCols)
   const wheelCleanup = useRef<(() => void) | null>(null)
   const bindGridWheel = useCallback((el: HTMLDivElement | null): void => {
     wheelCleanup.current?.()
@@ -875,11 +863,8 @@ export default function ImageView(): JSX.Element {
     const onWheel = (e: WheelEvent): void => {
       if (!e.ctrlKey) return
       e.preventDefault()
-      setGridSize((prev) => {
-        const next = Math.min(GRID_MAX, Math.max(GRID_MIN, prev + (e.deltaY < 0 ? 20 : -20)))
-        localStorage.setItem('gridSize', String(next))
-        return next
-      })
+      const st = useStore.getState()
+      st.setGridCols(st.gridCols + (e.deltaY < 0 ? -1 : 1))
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     wheelCleanup.current = () => el.removeEventListener('wheel', onWheel)
@@ -973,7 +958,7 @@ export default function ImageView(): JSX.Element {
           className="gallery-scroll flex-1 min-h-0 overflow-auto p-3 fade-in"
         >
           <BusyBanner />
-          <GridView images={sorted} size={gridSize} click={click} dbl={dbl} dragIds={dragIds} />
+          <GridView images={sorted} cols={gridCols} click={click} dbl={dbl} dragIds={dragIds} />
         </div>
       </div>
     )

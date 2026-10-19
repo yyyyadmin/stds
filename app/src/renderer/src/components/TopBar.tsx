@@ -5,65 +5,63 @@
  * 宽度适配（笔记本上曾经把按钮挤成“一行一个字”，原因见下）：中文可以在任意字间断行，
  * 一旦子项允许收缩，按钮就会被压到一列宽。所以：所有项 shrink-0 不许压、整行 flex-wrap 允许换行、
  * 按钮族在 index.css 里统一 whitespace-nowrap；再以 1760px（自定义断点 3xl）为界分两档：
- * 宽屏按原样铺开，窄屏把撤回/清空图库/大图收进「⋯ 更多」、视图只留图标、搜索与排序框变窄。
+ * 宽屏按原样铺开，窄屏把撤回/清空图库收进「⋯ 更多」、搜索与排序框变窄。
+ * 视图切换组/大图按钮已下线（用户 10-19 拍板：布局只留网格），腾出的位置给「一行 N 张」列数切换。
  */
 import { useEffect, useRef, useState } from 'react'
-import { useStore, filterByQuery } from '../store'
+import { useStore, filterByQuery, GRID_COLS_MIN, GRID_COLS_MAX } from '../store'
 import type { SortKey } from '../store'
 import { membershipName, isVip } from '../../../shared/membership'
-
-/** 三种主区布局。以前的第四种「大图」与双击小图的放大弹窗功能重叠，已合并到右边那个按钮。
- *  icon 给窄屏（<1760）用：整组只留图标不放文字，能省 80px 左右。用内联 SVG 而不是 ▦☰ 这类字符——
- *  符号字符在部分 Windows 中文字体里会缺字变成方框。 */
-const VIEWS: Array<{ m: 'grid' | 'list' | 'masonry'; label: string; key: string; icon: JSX.Element }> = [
-  {
-    m: 'grid',
-    label: '网格',
-    key: '1',
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-        <rect x="3" y="3" width="7" height="7" rx="1" />
-        <rect x="14" y="3" width="7" height="7" rx="1" />
-        <rect x="3" y="14" width="7" height="7" rx="1" />
-        <rect x="14" y="14" width="7" height="7" rx="1" />
-      </svg>
-    )
-  },
-  {
-    m: 'list',
-    label: '列表',
-    key: '2',
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
-        <line x1="8" y1="6" x2="21" y2="6" />
-        <line x1="8" y1="12" x2="21" y2="12" />
-        <line x1="8" y1="18" x2="21" y2="18" />
-        <line x1="3.5" y1="6" x2="3.5" y2="6" />
-        <line x1="3.5" y1="12" x2="3.5" y2="12" />
-        <line x1="3.5" y1="18" x2="3.5" y2="18" />
-      </svg>
-    )
-  },
-  {
-    m: 'masonry',
-    label: '瀑布流',
-    key: '3',
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-        <rect x="3" y="3" width="7" height="10" rx="1" />
-        <rect x="14" y="3" width="7" height="6" rx="1" />
-        <rect x="3" y="16" width="7" height="5" rx="1" />
-        <rect x="14" y="12" width="7" height="9" rx="1" />
-      </svg>
-    )
-  }
-]
 
 /** 把剩余秒数格式化为“预计还需 ~X”文案 */
 function fmtRemain(sec: number): string {
   if (!isFinite(sec) || sec <= 0) return '即将完成…'
   if (sec < 60) return `预计还需 ~${Math.ceil(sec)} 秒`
   return `预计还需 ~${Math.round(sec / 60)} 分钟`
+}
+
+/**
+ * 顶栏的「一行 N 张」网格列数切换（用户 10-19 拍板）：很多客户不会 Ctrl+滚轮，
+ * 给个看得见按得动的入口。第一版做成悬浮在网格左上角，但会盖住第一张图——改铆进顶栏，
+ * 并顺势下线了视图切换组（只留网格），位置正好让给它。平时只显当前档，点开才列 3~7 可选。
+ * 与 Ctrl+滚轮共用 store.gridCols，互不打架。
+ */
+function GridColsPicker(): JSX.Element {
+  const cols = useStore((s) => s.gridCols)
+  const setCols = useStore((s) => s.setGridCols)
+  const [open, setOpen] = useState(false)
+  const options: number[] = []
+  for (let n = GRID_COLS_MIN; n <= GRID_COLS_MAX; n++) options.push(n)
+  return (
+    <div className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title="一行显示几张图（也可以按住 Ctrl 滚动鼠标滚轮缩放）"
+        className={'inline-flex items-center gap-1 px-2 py-1 text-xs border border-line rounded-md transition-colors ' + (open ? 'bg-line text-fg' : 'bg-panel2 hover:bg-line text-gray-400')}
+      >
+        一行 {cols} 张
+        <span className="text-[10px] leading-none text-fg3">{open ? '▴' : '▾'}</span>
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 top-full z-50 mt-1 min-w-[100px] rounded-lg border border-line bg-panel py-1 shadow-lg">
+            {options.map((n) => (
+              <button
+                key={n}
+                type="button"
+                onClick={() => { setCols(n); setOpen(false) }}
+                className={'block w-full px-3 py-1.5 text-left text-xs hover:bg-panel2 ' + (n === cols ? 'text-brand font-medium' : 'text-fg2')}
+              >
+                一行 {n} 张
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  )
 }
 
 export default function TopBar(): JSX.Element {
@@ -170,13 +168,7 @@ export default function TopBar(): JSX.Element {
       cls: 'btn-danger text-xs'
     }
   ]
-  // 「看大图」大屏仍摆在视图组旁边（老用户肌肉记忆），窄屏只出现在「⋯ 更多」里
-  const largeView = {
-    label: '大图',
-    title: '看大图（快捷键 4）：从当前选中的第一张开始，没选中就从列表第一张；← → 翻页，跟双击小图是同一个窗口',
-    disabled: !s.images.length,
-    run: (): void => s.openLargePreview()
-  }
+  // 「看大图」按钮已下线（用户 10-19 拍板）：双击小图、快捷键 4 都能开同一个放大窗，不丢功能
 
   return (
     <header className="shrink-0 bg-panel border-b border-line px-3 py-2 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-sm">
@@ -378,9 +370,10 @@ export default function TopBar(): JSX.Element {
             {isMember ? (
               <>
                 AI 复审
-                {/* 窄屏不再把「今日剩 N 张」摊在按钮上（顶栏宽度不够）：数字挪进鼠标悬停提示 */}
+                {/* 「今日额度剩 N 张」全尺寸都显（用户 10-19 拍板：平板/小屏也得看到额度）：
+                    视图切换组下线后顶栏宽了很多，窄屏也摆得下 */}
                 {remaining != null && (
-                  <span className="hidden 3xl:inline ml-0.5 font-normal text-fg3 tabular-nums">· 今日额度剩 {remaining} 张</span>
+                  <span className="ml-0.5 font-normal text-fg3 tabular-nums whitespace-nowrap">· 今日额度剩 {remaining} 张</span>
                 )}
               </>
             ) : (
@@ -431,14 +424,14 @@ export default function TopBar(): JSX.Element {
       <div className="relative shrink-0 3xl:hidden" ref={moreRef}>
         <button
           className={'btn text-xs ' + (moreOpen ? 'bg-line' : '')}
-          title="更多操作：撤回 / 清空图库 / 看大图"
+          title="更多操作：撤回 / 清空图库"
           onClick={() => setMoreOpen((v) => !v)}
         >
           ⋯ 更多
         </button>
         {moreOpen && (
           <div className="absolute right-0 top-full mt-1 z-40 w-64 rounded-md border border-line bg-panel shadow-xl py-1">
-            {[...secondary, { key: 'large', label: largeView.label, title: largeView.title, disabled: largeView.disabled, run: largeView.run }].map((a) => (
+            {[...secondary].map((a) => (
               <button
                 key={a.key}
                 className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
@@ -516,34 +509,9 @@ export default function TopBar(): JSX.Element {
         <option value="time">最新在前</option>
       </select>
 
-      <div className="flex items-center shrink-0 border border-line rounded-md overflow-hidden">
-        {VIEWS.map((v) => (
-          <button
-            key={v.m}
-            className={
-              'inline-flex items-center px-2 py-1 text-xs border-r border-line last:border-r-0 transition-colors ' +
-              (s.viewMode === v.m ? 'bg-brand text-white' : 'bg-panel2 hover:bg-line text-gray-400')
-            }
-            onClick={() => void s.setViewMode(v.m)}
-            title={`${v.label}视图（快捷键 ${v.key}）`}
-          >
-            <span className="hidden 3xl:inline">{v.label}</span>
-            <span className="3xl:hidden">{v.icon}</span>
-          </button>
-        ))}
-      </div>
-
-      {/* 「大图」不再是一种布局，而是一个动作：直接打开与双击小图完全相同的放大弹窗。
-          两套“大图”各带一套操作太难记，而且原大图视图里的图不如弹窗清楚（弹窗会加载原图）。
-          仍放在视图组旁边，保留老用户“右上角切大图”的肌肉记忆（快捷键 4 也照旧）。 */}
-      <button
-        className="hidden 3xl:inline-block shrink-0 px-2 py-1 text-xs bg-panel2 hover:bg-line text-gray-400 border border-line rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-panel2"
-        onClick={largeView.run}
-        disabled={largeView.disabled}
-        title={largeView.title}
-      >
-        {largeView.label}
-      </button>
+      {/* 视图切换组已下线（用户 10-19 拍板：布局只留网格，列表/瀑布流/大图按钮都去掉），
+          腾出的位置给「一行 N 张」列数切换 */}
+      <GridColsPicker />
 
       <button
         className="btn-primary shrink-0 inline-flex items-center gap-1.5 disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-brand"

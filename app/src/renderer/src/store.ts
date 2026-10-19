@@ -281,8 +281,28 @@ function catLabel(cat: CategoryKey, customs: Array<{ id: number; name: string }>
   return DIMENSION_LABELS[s as keyof typeof DIMENSION_LABELS] || s
 }
 
-/** 现存的主区布局（读回的老设置里可能出现已下线的 'large'，靠它白名单过滤） */
-const VIEW_MODES: string[] = ['grid', 'list', 'masonry']
+/**
+ * 网格一行列数（2026-10-19 用户拍板，替代旧的格子像素滑块 gridSize 100~610）：
+ * 客户的心智模型就是“一行几张”，顶栏视图组旁的「一行 N 张」按钮 + Ctrl+滚轮按列步进，
+ * 两入口共用这一个设置（localStorage 持久化）；都不悬浮压在图上。
+ * 清晰度无忧：列数变少格子变大时 ThumbImg 选档逻辑自动改用大档缩略图（960）。
+ */
+export const GRID_COLS_MIN = 3
+export const GRID_COLS_MAX = 7
+function resolveGridCols(): number {
+  const v = Number(localStorage.getItem('gridCols'))
+  if (Number.isFinite(v) && v >= GRID_COLS_MIN && v <= GRID_COLS_MAX) return v
+  const old = Number(localStorage.getItem('gridSize'))
+  if (Number.isFinite(old) && old >= 100 && old <= 610) {
+    // 老版本存的是格子像素：换算成最接近的列数，不把客户调好的习惯清零（12=网格间距 gap-3）
+    const est = Math.round((window.innerWidth - 260) / (old + 12))
+    return Math.max(GRID_COLS_MIN, Math.min(GRID_COLS_MAX, est))
+  }
+  // 从没选过：按屏幕自适应（innerWidth 是界面缩放后的有效宽，与 uiScale 同一口径）——
+  // 笔记本 4 列、中等屏 5 列、2K/4K 大屏 6 列，装机第一眼就“图不小”
+  const w = window.innerWidth
+  return w < 1700 ? 4 : w < 2100 ? 5 : 6
+}
 
 interface StoreState {
   ready: boolean
@@ -298,6 +318,8 @@ interface StoreState {
   activeCategory: CategoryKey | null
   images: ImageRecord[]
   viewMode: 'grid' | 'list' | 'masonry'
+  /** 网格一行列数（3~7，顶栏按钮与 Ctrl+滚轮共用；见 GRID_COLS_MIN 注释） */
+  gridCols: number
   sortKey: SortKey
   /** 文件名搜索词：只显示当前相册里匹配的图片，切相册自动清空 */
   query: string
@@ -410,6 +432,7 @@ interface StoreState {
   /** 视图层排序完成后同步展示序（内容未变时不重 set，避免渲染循环） */
   setDisplayIds(ids: number[]): void
   setViewMode(m: 'grid' | 'list' | 'masonry'): Promise<void>
+  setGridCols(n: number): void
   handleClickSelect(index: number, e: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }): void
   /** 网格空白处橡皮筋框选：把选中集整体设为框到的这批 id（additive=叠加到已有选中，否则全新选中） */
   marqueeSelect(ids: number[], additive?: boolean): void
@@ -703,6 +726,7 @@ export const useStore = create<StoreState>((set, get) => ({
   activeCategory: null,
   images: [],
   viewMode: 'grid',
+  gridCols: resolveGridCols(),
   // 默认「默认顺序」（用户 10-15 拍板）：顶栏那个下拉框没人动过就永远停在默认序，重启也回到它。
   // 上一版默认 'time'（最新在前）是替用户做了主——他每次打开看到的是按导入时间重排过的列表，
   // 下拉框却写着「默认顺序」，两者对不上就像排序坏了。人工在下拉里改的选择不落盘，关掉软件即作废。
@@ -762,9 +786,9 @@ export const useStore = create<StoreState>((set, get) => ({
       counts: info.counts,
       customCategories: info.customCategories,
       scanProgress: info.progress?.total != null || info.progress?.running ? info.progress : info.progress,
-      // 设置是从库里读回来的，可能带着老版本的 viewMode='large'（独立大图视图已下线，
-      // 见 openLargePreview）：不兜一下主区三个分支都匹配不上，什么都不渲染，看着像图全没了
-      viewMode: VIEW_MODES.includes(info.settings.viewMode) ? info.settings.viewMode : 'grid',
+      // 布局入口已精简（用户 10-19 拍板：只留网格）：库里老设置可能存着 list/masonry/large，
+      // 不再尊重——统一钉回 grid，免得老用户升级后看着“没了入口却切不走”的怪状态
+      viewMode: 'grid',
       isDev: info.isDev,
       engineType: info.engine.type,
       toast: info.engine.type === 'node' ? { msg: info.engine.message, kind: 'info' } : null
@@ -1153,6 +1177,12 @@ export const useStore = create<StoreState>((set, get) => ({
   async setViewMode(m) {
     set({ viewMode: m })
     await window.api.saveSettings({ viewMode: m })
+  },
+
+  setGridCols(n) {
+    const v = Math.max(GRID_COLS_MIN, Math.min(GRID_COLS_MAX, Math.round(n)))
+    localStorage.setItem('gridCols', String(v))
+    set({ gridCols: v })
   },
 
   handleClickSelect(index, e) {
