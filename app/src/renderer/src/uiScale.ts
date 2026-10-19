@@ -22,25 +22,31 @@ export function uiScaleFactorOf(v: Exclude<UiScaleSetting, 'auto'>): number {
 }
 
 /**
- * 自动档分档：以 4K 台式机上验证过的观感为 100% 基准，窗口越窄缩得越多。
- * 阈值取自实测的两台机器：Mac M1 笔记本全屏 1440（嫌字大图小）、Windows 台式 4K 全屏 2560（正好）。
- * 拖动窗口/进全屏会自动重新选档（App.tsx 里防抖监听 resize）。
+ * 自动档判定的基准宽度：用屏幕物理分辨率 window.screen.width，而不是窗口 innerWidth。
  *
- * 注意：传进来的宽度是**缩放生效后的有效宽度**（zoom 后 innerWidth 会变），所以这里选的
- * 是"固定点"——每个档自己的有效宽度必须落在同一档的区间里，否则会在两档间来回弹：
- *  - <1600 → 0.85：有效宽 = 原宽/0.85 ∈ [原宽, 1.176×原宽)，原宽<1360 时有效宽<1600 自洽；
- *    原宽 1360~1600 会被推到 0.9 档，再验证 0.9 自洽（1511~1778 落在 [1600,2000)）；
- *  - [1600,2000) → 0.9：有效宽 ∈ [1778, 2222)，其中 [2000,2222) 会升 1.0 档，1.0 不再变——
- *    即 1800~2000 宽的窗口最终稳定在 100%，相当于"窗口够宽就不缩"，行为合理；
- *  - ≥2000 → 1.0：有效宽=原宽，永远自洽。
+ * 【为什么不能用 innerWidth（曾经的 bug）】：setZoomFactor 会改变 innerWidth（缩放后有效宽度
+ * = 原宽 ÷ 倍率），而自动档又拿这个宽度去选倍率——形成自我反馈环。物理宽约 1360~1440 的窗口
+ * （Mac M1 就卡在这）会 0.85→0.9→0.85 来回跳：0.85 档算出有效宽 1600 落进 0.9 区，0.9 档又算出
+ * 1511 落回 0.85 区，软件一打开界面就一会儿大一会儿小地抖。
+ * screen.width 是显示器 DIP 分辨率，不受网页缩放影响，拿它当基准这个反馈环就断了。
+ * 窗口拖到另一块屏时 screen.width 会变，resize 监听据此重新选档（仍不会再自激）。
  */
-export function autoUiScaleFactor(cssWidth: number): number {
-  if (cssWidth < 1600) return 0.85
-  if (cssWidth < 2000) return 0.9
+export function autoScaleBaseWidth(): number {
+  return typeof window !== 'undefined' ? window.screen.width : 1920
+}
+
+/**
+ * 自动档分档：以 4K 台式机上验证过的观感为 100% 基准，屏幕越小缩得越多。
+ * 阈值取自实测两台机器的屏幕物理分辨率：Mac M1 笔记本屏 1440（嫌字大图小）、
+ * Windows 台式 4K 常用逻辑分辨率 2560（正好）。
+ */
+export function autoUiScaleFactor(screenWidth: number): number {
+  if (screenWidth < 1600) return 0.85
+  if (screenWidth < 2000) return 0.9
   return 1
 }
 
-/** 当前设置对应的倍率：auto 按当前（有效）窗口宽度算，手动档钉死 */
-export function effectiveUiScale(v: UiScaleSetting | undefined, cssWidth: number): number {
-  return !v || v === 'auto' ? autoUiScaleFactor(cssWidth) : uiScaleFactorOf(v)
+/** 当前设置对应的倍率：auto 按屏幕物理分辨率算，手动档钉死 */
+export function effectiveUiScale(v: UiScaleSetting | undefined): number {
+  return !v || v === 'auto' ? autoUiScaleFactor(autoScaleBaseWidth()) : uiScaleFactorOf(v)
 }

@@ -97,7 +97,7 @@ export default function SettingsDialog(): JSX.Element {
             </label>
             {/* 界面缩放：整屏等比例缩（文字/按钮/标签/格子一起缩，比例不变）。
                 小屏笔记本上“字大图小标签挤不下”的兼容开关；4K 大屏自动保持 100% 不动 */}
-            <label className="flex items-center gap-2 text-fg2 min-w-0 mb-2" title="整个界面等比例放大缩小：文字、按钮、标签、图片格子一起缩，比例不变。自动档按窗口宽度选：小屏笔记本缩到 85~90%，大屏保持 100%">
+            <label className="flex items-center gap-2 text-fg2 min-w-0 mb-2" title="整个界面等比例放大缩小：文字、按钮、标签、图片格子一起缩，比例不变。自动档按屏幕分辨率选：小屏笔记本缩到 85~90%，大屏保持 100%">
               <span className="whitespace-nowrap">界面缩放</span>
               <select className="input flex-1 min-w-0 truncate" value={settings.uiScale ?? 'auto'}
                 onChange={(e) => void saveSettings({ uiScale: e.target.value as UiScaleSetting })}>
@@ -109,8 +109,8 @@ export default function SettingsDialog(): JSX.Element {
               </select>
             </label>
             <div className="text-xs text-fg3 mb-2">
-              当前实际缩放：约 {Math.round(effectiveUiScale(settings.uiScale, window.innerWidth) * 100)}%
-              {!settings.uiScale || settings.uiScale === 'auto' ? '（自动档：窗口越窄缩得越多，拖动/最大化窗口会重新选档）' : '（已手动钉死，不再随窗口变化）'}
+              当前实际缩放：约 {Math.round(effectiveUiScale(settings.uiScale) * 100)}%
+              {!settings.uiScale || settings.uiScale === 'auto' ? '（自动档：屏幕越小缩得越多，按屏幕分辨率定，拖窗口不会反复变）' : '（已手动钉死，不再随屏幕变化）'}
             </div>
             {/* 本机档位常驻展示（与下拉选项无关）：用户要的是“知道自己的电脑是什么级别”，
                 哪怕手动选了全特效/精简，探测结论也照实说。层级靠排版：小字浅色fg3，

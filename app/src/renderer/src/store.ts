@@ -547,6 +547,10 @@ function applyTheme(t: 'light' | 'dark'): void {
 /** 启动更新检查只跑一次（bootstrap 可能因 HMR/重渲染重入） */
 let updateChecked = false
 
+/** 上一次真正 apply 给窗口的缩放倍率：倍率没变就重复调 setZoomFactor 会再触发一次 resize，
+ *  拿它兼住“无变化不重复缩”，配合 screen.width 基准彻底断开缩放自激环 */
+let appliedUiFactor: number | null = null
+
 /*
  * 旧引擎重扫横幅：引擎初始化是启动时的异步过程（mediapipe 加载需数秒），
  * 首帧 staleInfo 常拿不到签名（ready=false）。未就绪时轻量轮询几次直到 ready，就绪后即停，
@@ -876,9 +880,11 @@ export const useStore = create<StoreState>((set, get) => ({
     await get().setTheme(next)
   },
   applyUiScale() {
-    // innerWidth 在缩放生效后是“有效 CSS px”：自动档据此选档；已钉在某个档时
-    // 宽度变化只在跨过阈值才换档，不会无限自缩（1440 屏缩到 0.85 后宽度变 1694 → 仍停 0.85）
-    const f = effectiveUiScale(get().settings.uiScale, window.innerWidth)
+    // 自动档基准用屏幕物理分辨率（screen.width，不受缩放影响），不用会被缩放改变的 innerWidth——
+    // 后者会形成“缩放→改宽→重选档→再缩放”的自激环，Mac 笔记本上表现为界面一开就忽大忽小地抖。
+    const f = effectiveUiScale(get().settings.uiScale)
+    if (appliedUiFactor === f) return // 倍率没变：不重复下发，避免多余 resize 回环
+    appliedUiFactor = f
     void window.api.setUiZoom(f)
   },
   openLogin() {
