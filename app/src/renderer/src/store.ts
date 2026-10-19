@@ -299,9 +299,9 @@ function resolveGridCols(): number {
     return Math.max(GRID_COLS_MIN, Math.min(GRID_COLS_MAX, est))
   }
   // 从没选过：按屏幕自适应（innerWidth 是界面缩放后的有效宽，与 uiScale 同一口径）——
-  // 笔记本 4 列、中等屏 5 列、2K/4K 大屏 6 列，装机第一眼就“图不小”
+  // 笔记本/中等屏 5 列、2K/4K 大屏 6 列（用户 10-19 把笔记本档从 4 调到 5），装机第一眼就“图不小”
   const w = window.innerWidth
-  return w < 1700 ? 4 : w < 2100 ? 5 : 6
+  return w < 2100 ? 5 : 6
 }
 
 interface StoreState {
