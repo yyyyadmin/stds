@@ -31,6 +31,30 @@ _BLINK_FULL = 0.85  # eyeBlink 高于此满分（真实全闭 p95≈0.86）
 # 真闭眼必然两信号同时说闭（走下面的双信号互证分支），不受本规则影响；故收紧不违反“低头/侧看
 # 只要眼睛真闭仍算闭眼”的口径。_CONFLICT_CAP 已废弃，保留仅为兼容历史 reason 文案。
 _CONFLICT_CAP = 0.82
+# v2.0.106（用户实测 7G1A7955 大笑闭眼 / CHEN1083 举杯闭眼 后修正）：冲突归零分支有个反例——
+# 大笑挤眼、举杯抿眼这类【真闭眼】里，eyeBlink 反而欠读（卡在 _BLINK_ZERO 下边界 0.49~0.52），
+# 于是 EAR 说闭死、blink 说睁 → 走冲突分支被清零，把真闭眼漏判。判据：当“说闭”的一方是 EAR
+# 且原始 ear 低于 _EAR_DECISIVE 时，眼睑在几何上已几乎贴死（比 _EAR_FULL 全闭标定 0.06 还低），
+# 这是妆容/低头/虚焦都造不出的硬证据，blink 卡在低边界只是欠读、不足以反证“睁”，故【豁免归零】。
+_EAR_DECISIVE = 0.04
+# v2.0.107（用户实测 7G1A8242/CHEN0143 低头含羞、CHEN9976 低头看戒指 后修正）：_EAR_DECISIVE 升级为
+# 闭眼判定的【总闸】——不只在冲突分支里当豁免线。理由：EAR 是“上下眼皮贴没贴死”的直接几何量，
+# ear≥0.04 说明眼里还留着一条缝，那就是“往下看/含羞/侧脸”而非“闭眼”（婚礼摆拍里低头看戒指、看捧花、
+# 含羞低头是大量造型，用户明确：这类不该算闭眼缺陷）。而 eyeBlink 对【低头】方向并不鲁棒——低头把
+# 上眼皮压得很低，eyeBlink 会虚高（实测 9976 低头看戒指 blink=0.86 却明显是睁眼往下看），故 blink 高
+# 不能翻 EAR“有缝”的案。真实分布校准（全库双信号互证 11 张）：低头 FP 8 张（8242/0143/8037/1058/9802/
+# 9806/9843/9976）驱动眼 ear 全≥0.04 → 被本闸拿掉；真闭眼 3 张（8030 喝茶/1094 掩口/9842 ear0.039）
+# 驱动眼 ear 全<0.04 → 保留。单信号/启发式路径里 ear≥0.04 却靠 blink 判闭的（0043 ear0.485、9524 ear0.166
+# 等“眼明明睁着”的）同样被本闸纠正。仅当 EAR 量不到（None，侧脸/虚焦）时才退回 blink 兜底判闭。
+# 这不违反“低头时若眼睛真闭仍算闭眼”——真闭时眼皮贴死、ear<0.04，本闸放行。
+# v2.0.105（用户实测 CHEN1020 后修正）：启发式（看纹理）只在 MediaPipe 量不到眼睛的脸上兜底，
+# 而兜底脸多是合影/婚宴里【又小又虚又暗的背景人】。工作图恒定缩到最长边 1280，眼 ROI 高≈0.18×脸高；
+# 当眼区高度低于此像素下限时，那块眼睛只有几个像素，"闭眼=一条低对比横线"与"看不清的黑/虚糊块"
+# 在纹理上根本无法区分——此时启发式没有可靠证据，应【弃权】而不是硬给 0.75 把整张图拖进闭眼待确认。
+# 真实分布校准（全库 44 张闭眼、其中 7 张走启发式）：判对的两张（7G1A7427 躺姿闭眼、7G1A9900 拥吻闭眼）
+# 眼区高分别 95、18px；判错的 4 张（CHEN1020/0606/1085/9841 均为虚焦/侧背/贴顶的背景小脸）眼区高仅 7~14px。
+# 取 15 干净切开（≥15 保留、<15 弃权），且此门控只作用于无 mp 的兜底路径，绝不触碰 mp 判定的真闭眼。
+_HEUR_MIN_EYE_H = 15
 
 
 def _clip01(v):
@@ -79,8 +103,17 @@ def _mp_closed_prob(face):
         if p_ear is not None and p_blink is not None:
             if min(p_ear, p_blink) >= 0.5:  # 双信号互证：真实全闭，叠加拉满
                 pe = min(1.0, pe + 0.30 * min(p_ear, p_blink))
-            elif pe >= 0.85 and min(p_ear, p_blink) < 0.15:  # 两信号打架：一个说闭死一个说睁 → 无可靠证据，不算闭眼
-                pe = 0.0
+            elif pe >= 0.85 and min(p_ear, p_blink) < 0.15:  # 两信号打架：一个说闭死一个说睁
+                # v2.0.106 例外：闭证据来自 EAR 且耳高已低到眼睑贴死（< _EAR_DECISIVE），
+                # blink 卡在低边界只是大笑/举杯时的欠读，不足以反证“睁”，保留 EAR 的闭眼判定。
+                if ear is not None and ear < _EAR_DECISIVE and p_ear >= p_blink:
+                    pass
+                else:
+                    pe = 0.0
+        # v2.0.107 总闸：EAR 可测且眼里还留着缝（ear≥_EAR_DECISIVE）→ 眼睑没贴死，是“往下看/含羞/侧脸”
+        # 而非闭眼，blink 再高（低头虚高）也不能翻案，本眼不计闭。仅 EAR 贴死(<0.04)或量不到(None)才可能判闭。
+        if ear is not None and ear >= _EAR_DECISIVE:
+            pe = 0.0
         best = pe if best is None else max(best, pe)
         diag.append("%s(ear=%s blink=%s)" % (
             "L" if blink_key.endswith("Left") else "R",
@@ -177,6 +210,10 @@ class EyesAnalyzer:
                 continue
             for roi in eye_rois(face, bgr):
                 side, x, y, w, h, _, _ = roi
+                # 眼睛区域太小（背景虚焦/侧背/贴顶小脸）→ 纹理无法分辨睁闭，启发式弃权（不计入本脸闭眼证据）。
+                if h < _HEUR_MIN_EYE_H:
+                    parts.append("%s:skip(h=%d)" % (side, h))
+                    continue
                 patch = bgr[y:y + h, x:x + w]
                 prob = self._ocec_prob(patch) if self.ocec.available else None
                 if prob is None:
