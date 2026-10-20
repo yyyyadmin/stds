@@ -2,8 +2,9 @@
  * 导出模块（第六章）
  * - 废弃库自动排除（任何模式）；待确认默认排除（可勾选包含）
  * - 模式：include 包含式 / exclude 排除式 / library 交付库 / all 全部（废弃库除外）
- * - 交付库档位（D4 用户规则）：library 模式统一落 交付库/<档位名>/ 二级子目录，
- *   不再按人数主分类分 folder；包含/排除式勾选档位子类目时同口径
+ * - 交付库档位：library 模式自动创建以 folderName（默认“交付库”）命名的外层文件夹：
+ *   flat 模式落 targetDir/<folderName>/；subdirs 模式落 targetDir/<folderName>/<档位名>/；
+ *   包含/排除式勾选档位子类目时保持原有 交付库/<档位名>/ 二级子目录逻辑
  * - 选项：目标目录、格式转换（sharp）、按分类建子文件夹、保留原名、重名处理、物理移动
  * - 进度事件 + 取消
  */
@@ -44,7 +45,12 @@ export interface ExportOptions {
   tiers?: import('../../shared/types').TierKey[]
   /** 仅 library 模式：flat = 合并到一个目录，subdirs = 按档位建子目录 */
   tierLayout?: 'flat' | 'subdirs'
-  /** 仅 library + flat：输出文件夹名（默认“交付库”） */
+  /**
+   * 只导“能交付”的图（精简模式人物分类的逐行小导出）：瑕疵片 / 待确认 / 废片全部跳过，
+   * 与交付库闸门 isDeliverable 同一口径。include 模式配合维度分类使用。
+   */
+  deliverableOnly?: boolean
+  /** 仅 library 模式：外层文件夹名（flat 和 subdirs 都用，默认"交付库"） */
   folderName?: string
 }
 
@@ -77,6 +83,8 @@ class Exporter extends EventEmitter {
       // 待确认的图必须一并导出，否则导出数会小于侧栏徽章数（“数量对不上”）。
       if (!opts.includeReview && opts.mode !== 'include' && r.category === CAT_REVIEW) continue
       const tags = this.parseTags(r)
+      // 精简模式人物分类小导出：只放行交付库口径的图（有瑕疵/停待确认的一律不出）
+      if (opts.deliverableOnly && !isDeliverable(r.category, tags)) continue
       const mk = (cat: CategoryKey) => out.push({ id: r.id, path: r.path, category: cat, filename: r.filename, tier: r.tier, fileSize: r.file_size || 0 })
       switch (opts.mode) {
         case 'library':
@@ -161,7 +169,14 @@ class Exporter extends EventEmitter {
     const list = this.buildList(opts)
     if (!list.length) throw new Error('没有符合条件的图片可导出')
     if (!opts.targetDir) throw new Error('请选择目标目录')
-    mkdirSync(opts.targetDir, { recursive: true })
+    // 自动包裹一层交付文件夹：library 模式下必须有（Mac 用户反馈“选桌面→图片全撒桌面上”的根因）
+    // folderName 默认"交付库"，用户可改成"1020交付库"等；flat 模式落 targetDir/folderName/，
+    // subdirs 模式落 targetDir/folderName/<档位>/。
+    const effectiveDir = opts.mode === 'library'
+      ? join(opts.targetDir, opts.folderName || '交付库')
+      : opts.targetDir
+    mkdirSync(effectiveDir, { recursive: true })
+    const runOpts = effectiveDir !== opts.targetDir ? { ...opts, targetDir: effectiveDir } : opts
     this.running = true
     this.cancelRequested = false
     const progress: ExportProgress = { running: true, done: 0, total: list.length, current: '' }
@@ -175,7 +190,7 @@ class Exporter extends EventEmitter {
         progress.current = item.filename
         this.emit('progress', { ...progress })
         try {
-          await this.exportOne(item, opts, usedNames)
+          await this.exportOne(item, runOpts, usedNames)
           success++
         } catch (e) {
           if ((e as Error).message === 'conflict-skip') skipped++
@@ -187,7 +202,7 @@ class Exporter extends EventEmitter {
     } finally {
       this.running = false
       progress.running = false
-      progress.finished = { success, skipped, failed, target: opts.targetDir }
+      progress.finished = { success, skipped, failed, target: effectiveDir }
       this.emit('progress', { ...progress })
     }
     return progress.finished
@@ -200,16 +215,21 @@ class Exporter extends EventEmitter {
   ): Promise<void> {
     let dir = opts.targetDir
     if (opts.subfolders) {
-      // 目录落点（D4 用户规则）：档位相关的一律是 交付库/<档位名>/ 二级——
-      // library 模式的图（tier 列驱动）和 include 模式直接勾选的档位子类目都走这一条；
-      // 其余分类保持一层目录不变
-      const tierN = tierOfCat(item.category)
-      if (tierN) {
-        // 勾选的就是档位：categoryLabel 只会给出档位名，一级得手动补上“交付库”
-        dir = join(dir, this.categoryLabel(CAT_LIBRARY), this.tierDirName(tierN))
+      // 目录落点：
+      // - library + subdirs：外层文件夹已由 run() 用 folderName 套好，这里只加档位子目录
+      // - include/exclude 模式勾选档位子类目：需要"交付库"作为父目录（因为没套过 folderName）
+      // - 其余分类保持一层目录
+      if (opts.mode === 'library' && item.category === CAT_LIBRARY) {
+        // library 模式外层已由 folderName 套好，这里只加档位子目录；tier 为 null 的旧图直接落在外层
+        if (item.tier) dir = join(dir, this.tierDirName(item.tier))
       } else {
-        dir = join(dir, this.categoryLabel(item.category))
-        if (item.category === CAT_LIBRARY && item.tier) dir = join(dir, this.tierDirName(item.tier))
+        const tierN = tierOfCat(item.category)
+        if (tierN) {
+          dir = join(dir, this.categoryLabel(CAT_LIBRARY), this.tierDirName(tierN))
+        } else {
+          dir = join(dir, this.categoryLabel(item.category))
+          if (item.category === CAT_LIBRARY && item.tier) dir = join(dir, this.tierDirName(item.tier))
+        }
       }
       mkdirSync(dir, { recursive: true })
     }

@@ -4,12 +4,18 @@
  * - library 模式专属：档位勾选 + 目录结构（合并 or 按档位建子目录）+ 可编辑文件夹名
  * - 底部导出按钮绿色强调
  * - 去掉冗余说明文字，界面干净
+ *
+ * 精简模式（settings.uiMode==='slim'）：交付库不再分档，也不按分类勾选——
+ *   只留「仅交付库 / 全部文件」两项，档位勾选、目录结构、三档统计、包含待确认全部不渲染；
+ *   待确认的拦截弹窗也跳过（那一栏本来就交给 AI 自动复审）。
+ * 带预设打开（侧栏人物分类行的小「导出」）：导出方式锁死为勾选分类，范围就是预设那一行，
+ *   且只导能交付的图（deliverableOnly，瑕疵片/待确认/废片自动跳过）。
  */
 import { useEffect, useMemo, useState } from 'react'
 import { useStore } from '../store'
 import type { ExportOptions } from '../../../main/services/exporter'
 import {
-  BAD_DIMENSIONS,
+  UI_BAD_DIMENSIONS,
   CAT_LIBRARY,
   CAT_REVIEW,
   CAT_TRASH,
@@ -30,7 +36,8 @@ const MODES: { key: ExportOptions['mode']; label: string }[] = [
 ]
 
 export default function ExportDialog(): JSX.Element {
-  const close = (): void => useStore.setState({ showExport: false })
+  // 关闭同时清预设：否则下次从顶栏/交付库打开导出，会莫名地继续锁在上一次的人物分类上
+  const close = (): void => useStore.setState({ showExport: false, exportPreset: null })
   const counts = useStore((s) => s.counts)
   const openCategory = useStore((s) => s.openCategory)
   const customCategories = useStore((s) => s.customCategories)
@@ -38,10 +45,14 @@ export default function ExportDialog(): JSX.Element {
   const exportProgress = useStore((s) => s.exportProgress)
   const runExport = useStore((s) => s.runExport)
   const cancelExport = useStore((s) => s.cancelExport)
+  const preset = useStore((s) => s.exportPreset)
+  const slim = useStore((s) => s.settings.uiMode === 'slim')
   const tierNames = settings.tierNames?.length === 3 ? settings.tierNames : DEFAULT_TIER_NAMES
+  /** 精简没有分档也没有分类表，导出方式只留两个口径 */
+  const modes = slim ? MODES.filter((m) => m.key === 'library' || m.key === 'all') : MODES
 
-  const [mode, setMode] = useState<ExportOptions['mode']>('library')
-  const [cats, setCats] = useState<Set<CategoryKey>>(new Set())
+  const [mode, setMode] = useState<ExportOptions['mode']>(preset ? 'include' : 'library')
+  const [cats, setCats] = useState<Set<CategoryKey>>(() => new Set(preset?.categories ?? []))
   const [includeReview, setIncludeReview] = useState(false)
   const [targetDir, setTargetDir] = useState(settings.lastExportDir || '')
   const [format, setFormat] = useState<ExportOptions['format']>('original')
@@ -51,13 +62,17 @@ export default function ExportDialog(): JSX.Element {
   // 档位控制
   const [selectedTiers, setSelectedTiers] = useState<Set<TierKey>>(new Set([1, 2, 3]))
   const [tierLayout, setTierLayout] = useState<'flat' | 'subdirs'>('flat')
-  const [folderName, setFolderName] = useState('交付库')
+  const [folderName, setFolderName] = useState(() => {
+    const d = new Date()
+    return `${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}交付库`
+  })
 
   // 导出前提醒（用户 2026-10-15 定）：点「导出交付」时若「待确认」还有没审核的照片，先弹一句警告——
   // 这些照片不在交付库里、本次导出默认不带它们，其中可能存在可交付的优质照片；待确认空了就不打扰。
   // 两个入口（顶栏按钮 + 侧栏交付库「导出」小字）都走本弹窗，拦在这里一处管住。
   const reviewPending = counts[CAT_REVIEW] || 0
-  const [guard, setGuard] = useState(() => reviewPending > 0)
+  // 精简模式不拦：那一栏就是交给 AI 自动复审的；带预设的小导出更不该被别栏卡住
+  const [guard, setGuard] = useState(() => reviewPending > 0 && !slim && !preset)
 
   const opts: ExportOptions = useMemo(() => ({
     mode,
@@ -69,10 +84,12 @@ export default function ExportDialog(): JSX.Element {
     keepNames,
     physicalMove,
     conflict,
+    // 人物分类行的小导出：只导这一栏能交付的图（与交付库闸门同一口径）
+    deliverableOnly: !!preset || undefined,
     tiers: mode === 'library' ? [...selectedTiers].sort() : undefined,
     tierLayout: mode === 'library' ? tierLayout : undefined,
-    folderName: mode === 'library' && tierLayout === 'flat' ? folderName : undefined
-  }), [mode, cats, includeReview, targetDir, format, tierLayout, keepNames, physicalMove, conflict, selectedTiers, folderName])
+    folderName: mode === 'library' ? folderName : undefined
+  }), [mode, cats, includeReview, targetDir, format, tierLayout, keepNames, physicalMove, conflict, selectedTiers, folderName, preset])
 
   const [preview, setPreview] = useState<{ will: number; total: number; byTier: Record<1 | 2 | 3, number>; sizeMB: number | null } | null>(null)
   useEffect(() => {
@@ -82,7 +99,7 @@ export default function ExportDialog(): JSX.Element {
 
   const running = exportProgress?.running
   const pct = exportProgress && exportProgress.total > 0 ? Math.round((exportProgress.done / exportProgress.total) * 100) : 0
-  const tiersEmpty = mode === 'library' && selectedTiers.size === 0
+  const tiersEmpty = !slim && mode === 'library' && selectedTiers.size === 0
   const canRun = !!targetDir && !running && !tiersEmpty && (preview?.will ?? 0) > 0
 
   const toggleCat = (c: CategoryKey): void => {
@@ -134,27 +151,37 @@ export default function ExportDialog(): JSX.Element {
         </div>
 
         <div className="px-6 py-5 space-y-5 text-sm">
-          {/* 导出方式 */}
-          <div>
-            <div className="text-fg3 text-xs mb-2">导出方式</div>
-            <div className="grid grid-cols-4 gap-1.5">
-              {MODES.map((m) => (
-                <button
-                  key={m.key}
-                  className={
-                    'px-3 py-2 rounded-md border text-center text-[13px] transition-colors ' +
-                    (mode === m.key ? 'border-brand bg-brand/10 text-brand font-semibold' : 'border-line bg-panel2 text-fg3 hover:text-fg2')
-                  }
-                  onClick={() => setMode(m.key)}
-                >
-                  {m.label}
-                </button>
-              ))}
+          {/* 导出方式：带预设（人物分类行的小导出）时锁死范围，不再给选 */}
+          {preset ? (
+            <div>
+              <div className="text-fg3 text-xs mb-2">导出范围</div>
+              <div className="rounded-lg bg-panel2 border border-line px-4 py-2.5 text-[13px] text-fg2">
+                <b className="text-fg">{preset.label}</b>
+                <span className="text-fg3"> · 只导这一栏能交付的照片（瑕疵片、待确认自动跳过）</span>
+              </div>
             </div>
-          </div>
+          ) : (
+            <div>
+              <div className="text-fg3 text-xs mb-2">导出方式</div>
+              <div className={'grid gap-1.5 ' + (modes.length === 2 ? 'grid-cols-2' : 'grid-cols-4')}>
+                {modes.map((m) => (
+                  <button
+                    key={m.key}
+                    className={
+                      'px-3 py-2 rounded-md border text-center text-[13px] transition-colors ' +
+                      (mode === m.key ? 'border-brand bg-brand/10 text-brand font-semibold' : 'border-line bg-panel2 text-fg3 hover:text-fg2')
+                    }
+                    onClick={() => setMode(m.key)}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
-          {/* 仅交付库：档位控制区 */}
-          {mode === 'library' && (
+          {/* 仅交付库：档位控制区（精简模式不分档，整块不渲染） */}
+          {mode === 'library' && !slim && (
             <div className="space-y-3 rounded-lg bg-panel2/40 p-4">
               <div>
                 <div className="text-fg3 text-xs mb-1.5">导出档位</div>
@@ -183,31 +210,30 @@ export default function ExportDialog(): JSX.Element {
                   </label>
                 </div>
               </div>
-              {tierLayout === 'flat' && (
-                <div>
-                  <div className="text-fg3 text-xs mb-1.5">文件夹名称</div>
-                  <input
-                    className="input w-48 text-[13px]"
-                    value={folderName}
-                    onChange={(e) => setFolderName(e.target.value)}
-                    placeholder="交付库"
-                  />
-                </div>
-              )}
               {tierLayout === 'subdirs' && (
                 <div className="text-xs text-fg3">
                   将创建 {selectedTiers.size} 个子目录：{[...selectedTiers].sort().map((t) => `${tierNames[t - 1]}(${counts[`tier:${t}`] || 0})`).join(' / ')}
                 </div>
               )}
+              {/* 文件夹名称：两种布局都显示——flat 是包有文件的目录名，subdirs 是外层父目录名 */}
+              <div>
+                <div className="text-fg3 text-xs mb-1.5">文件夹名称</div>
+                <input
+                  className="input w-48 text-[13px]"
+                  value={folderName}
+                  onChange={(e) => setFolderName(e.target.value)}
+                  placeholder="1020交付库"
+                />
+              </div>
             </div>
           )}
 
-          {/* 包含/排除式：分类勾选 */}
-          {(mode === 'include' || mode === 'exclude') && (
+          {/* 包含/排除式：分类勾选（带预设时范围已锁死，不出选择表） */}
+          {(mode === 'include' || mode === 'exclude') && !preset && (
             <div>
               <div className="text-fg3 text-xs mb-1.5">{mode === 'include' ? '勾选要导出的分类' : '勾选要排除的分类'}</div>
               <div className="grid grid-cols-3 gap-1 text-[13px]">
-                {BAD_DIMENSIONS.map((d) => (
+                {UI_BAD_DIMENSIONS.map((d) => (
                   <label key={d} className="flex items-center gap-1.5 text-fg2 cursor-pointer">
                     <input type="checkbox" checked={cats.has(d)} onChange={() => toggleCat(d)} />
                     {DIMENSION_LABELS[d]} <span className="text-fg3 tabular-nums">({counts[d] || 0})</span>
@@ -246,11 +272,13 @@ export default function ExportDialog(): JSX.Element {
             </div>
           )}
 
-          {/* 待确认开关 */}
-          <label className="flex items-center gap-2 text-fg3 cursor-pointer text-xs">
-            <input type="checkbox" checked={includeReview} onChange={(e) => setIncludeReview(e.target.checked)} />
-            包含"待确认"（{counts[CAT_REVIEW] || 0} 张）
-          </label>
+          {/* 待确认开关：精简模式不提供（那一栏交给 AI 自动复审，不靠导出顺手带走） */}
+          {!slim && (
+            <label className="flex items-center gap-2 text-fg3 cursor-pointer text-xs">
+              <input type="checkbox" checked={includeReview} onChange={(e) => setIncludeReview(e.target.checked)} />
+              包含"待确认"（{counts[CAT_REVIEW] || 0} 张）
+            </label>
+          )}
 
           {/* 实时统计（交付清单） */}
           <div className="rounded-lg bg-panel2 border border-line px-4 py-2.5 text-fg2 leading-relaxed">
@@ -258,7 +286,7 @@ export default function ExportDialog(): JSX.Element {
             {preview?.sizeMB != null && preview.sizeMB > 0 && (
               <span className="text-fg3"> · 约 {preview.sizeMB >= 1024 ? (preview.sizeMB / 1024).toFixed(1) + ' GB' : preview.sizeMB.toFixed(1) + ' MB'}</span>
             )}
-            {mode === 'library' && preview && (
+            {mode === 'library' && preview && !slim && (
               <span className="text-fg3"> · 优质 {preview.byTier[1]} / 良好 {preview.byTier[2]} / 一般 {preview.byTier[3]}</span>
             )}
             <span className="text-fg3">（共 {preview?.total ?? 0} 张可导出）</span>
