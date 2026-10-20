@@ -264,6 +264,17 @@ body {
   animation: sheen 2.2s ease-in-out infinite;
   pointer-events: none;
 }
+/* 窗口最小化/完全遮蔽时暂停所有无限循环动画（省 GPU/CPU，Mac 不发烫）
+   通过 visibilitychange 在 <html> 上切换 .app-hidden 类实现（App.tsx） */
+.app-hidden .engine-live,
+.app-hidden .engine-glow,
+.app-hidden .engine-ready-glow,
+.app-hidden .engine-busy-glow,
+.app-hidden .engine-sheen::after,
+.app-hidden .engine-eq > i,
+.app-hidden .btn-nudge {
+  animation-play-state: paused !important;
+}
 /* ===== 新手指导（聚光灯带路）===== */
 /* 手指戳动：只动位移，方向旋转交给内层 span，否则 animation 的 transform 会把旋转覆盖掉 */
 @keyframes tourPoint {

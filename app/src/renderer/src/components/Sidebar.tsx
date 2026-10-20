@@ -7,6 +7,10 @@
  * 层级只靠排版（标题 13px 粗体 fg 不可点、行 13px fg2、着色词 10px），
  * tooltip 全部写成一句客户话（禁“置信/阈值/样本”等内部术语，保留操作效果说明）。
  * 每行行首是图形 + 颜色双编码（见 SidebarIcons）。支持把图片拖到分类移动（9.3），拖到档位行改档。
+ *
+ * 精简模式（settings.uiMode==='slim'）：只留 全部文件 / 交付库 / 待确认 / 瑕疵片 + 人物分类一组。
+ * 交付库三档子行、重复照片、黑白照、瑕疵入口、废片、自定义分类全部不渲染；
+ * 人物分类每行带一枚小「导出」，只导该栏里能交的图（见 openExportFor + exporter.deliverableOnly）。
  */
 import { createContext, useContext, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -16,13 +20,14 @@ import TutorialCenter from './TutorialCenter'
 import AiReviewTag from './AiReviewTag'
 import { useStore } from '../store'
 import {
-  BAD_DIMENSIONS,
+  UI_BAD_DIMENSIONS,
   CAT_LIBRARY,
   CAT_FLAWS,
   CAT_REVIEW,
   CAT_TRASH,
   DIMENSION_LABELS,
   NEUTRAL_DIMENSIONS,
+  PERSON_DIMS,
   DEFAULT_TIER_NAMES,
   DUP_GROUP_KEY,
   isBadDim,
@@ -39,7 +44,8 @@ const BAD_DOT_COLORS: Record<string, string> = {
   blur: '#8b55f6', // 画面模糊 · 紫罗兰
   exposure: '#eab308', // 曝光异常 · 黄
   half_head: '#14b8a6', // 半截头 · 青
-  duplicate: '#6366f1' // 重复照片 · 蓝紫
+  duplicate: '#6366f1', // 重复照片 · 蓝紫
+  manual_flaw: '#f97316' // 泛化「瑕疵」（仅精简模式人工标记，不进侧栏）
 }
 
 /** 中性维度统一配色（蓝） */
@@ -133,13 +139,14 @@ function HelpTip(props: { title: string; text: string }): JSX.Element {
  */
 function Group(props: {
   title: string
-  status: keyof typeof GROUP_STATUS
+  /** 不传就不显示右侧着色词：精简模式的人物分类横跨三栏归属，说“照常导出”是错的 */
+  status?: keyof typeof GROUP_STATUS
   tip: string
   hint?: string
   action?: ReactNode
   children: ReactNode
 }): JSX.Element {
-  const s = GROUP_STATUS[props.status]
+  const s = props.status ? GROUP_STATUS[props.status] : null
   return (
     <section className="mt-4 border-t border-line/70 pt-2">
       <div className="px-5 flex items-center gap-2">
@@ -149,7 +156,7 @@ function Group(props: {
           </span>
           {props.hint && <HelpTip title={props.title} text={props.hint} />}
         </span>
-        <span className={'shrink-0 text-[10px] font-medium ' + s.cls}>{s.text}</span>
+        {s && <span className={'shrink-0 text-[10px] font-medium ' + s.cls}>{s.text}</span>}
         {props.action}
       </div>
       <div className="mt-1">{props.children}</div>
@@ -249,7 +256,7 @@ function Row(props: {
               e.stopPropagation()
               props.onExport?.()
             }}
-            title="导出交付库照片"
+            title="导出这一栏里能交付的照片"
           >
             「导出」
           </button>
@@ -301,6 +308,9 @@ function Row(props: {
 
 export default function Sidebar(): JSX.Element {
   const counts = useStore((s) => s.counts)
+  /** 精简模式（设置里可切）：侧栏只留 全部文件 + 三栏 + 人物分类，其余入口整组不渲染 */
+  const slim = useStore((s) => s.settings.uiMode === 'slim')
+  const openExportFor = useStore((s) => s.openExportFor)
   const tierNames = useStore((s) => s.settings.tierNames) ?? DEFAULT_TIER_NAMES
   const customCategories = useStore((s) => s.customCategories)
   const addCustomCategory = useStore((s) => s.addCustomCategory)
@@ -352,7 +362,9 @@ export default function Sidebar(): JSX.Element {
   return (
     <DropCtx.Provider value={dropCat}>
       <aside
-        className="w-56 shrink-0 bg-panel border-r border-line flex flex-col overflow-y-auto pt-2 pb-3 text-[13px]"
+        className="w-56 shrink-0 bg-panel border-r border-line flex flex-col pt-2 text-[13px]"
+      >
+      <div className="flex-1 overflow-y-auto min-h-0 pb-3"
         onDragOver={(e) => {
           if (!e.dataTransfer.types.includes('application/x-image-ids')) return
           const hit = hitRow(e.clientX, e.clientY)
@@ -395,37 +407,76 @@ export default function Sidebar(): JSX.Element {
           <span className="text-[15px] font-bold text-fg tracking-widest whitespace-nowrap">筛选结果</span>
           <HelpTip
             title="筛选结果"
-            text={`AI 筛选结论按交付去向分栏，一张照片只进其中一栏。
+            text={
+              slim
+                ? `AI 筛选结论按交付去向分栏，一张照片只进其中一栏。
+
+· 交付库：无缺陷，默认全量导出。
+· 待确认：判定存疑，由 AI 复审自动处理，复核完自动归位。
+· 瑕疵片：判出缺陷（包括画质存疑），默认不导出。
+
+归属冲突时的优先序：废弃库 → 瑕疵片 → 待确认 → 交付库，三栏互不重叠。`
+                : `AI 筛选结论按交付去向分栏，一张照片只进其中一栏。
 
 · 交付库：无缺陷，默认全量导出；下设优质 / 良好 / 一般三档，仅按清晰度排序。
 · 待确认：判定存疑、需人工拍板，暂不导出。
 · 瑕疵片：判出缺陷，默认不导出。
 · 重复照片：连拍冗余，按组统计。
 
-归属冲突时的优先序：废弃库 → 瑕疵片 → 重复照片 → 待确认 → 交付库。交付库、待确认、瑕疵片三栏互不重叠，重复照片按组计，不能与张数相加。`}
+归属冲突时的优先序：废弃库 → 瑕疵片 → 重复照片 → 待确认 → 交付库。交付库、待确认、瑕疵片三栏互不重叠，重复照片按组计，不能与张数相加。`
+            }
           />
         </span>
         <span className="flex-1 border-t border-fg/20"></span>
       </div>
-            <Row emphasis="status" label="交付库" cat={CAT_LIBRARY} count={counts[CAT_LIBRARY]} icon="library" tone="text-good" color={lit(counts[CAT_LIBRARY], '#22c55e')} noDrop onExport={counts[CAT_LIBRARY] ? () => void useStore.setState({ showExport: true }) : undefined} tip="无缺陷照片，默认全量导出；不可直接拖入，请拖至下方档位" tour="library" />
-      {/* 档位三子行：行首「└──」层级连接符 + 外层 ml-2 缩进，跟父行文字拉开一档；
-          点开=只看该档，拖入=改档（不移动归属、不清标签） */}
-      {([1, 2, 3] as TierKey[]).map((t) => (
-        <div key={t} className="ml-2">
-          <Row connector="└──" label={tierNames[t - 1] || String(t)} cat={`tier:${t}`} count={counts[`tier:${t}`]} tip={`${tierTips[t]}；点击仅看该档，拖入可改档`} />
-        </div>
-      ))}
-      <Row emphasis="status" tone="text-warn" label="待确认" cat={CAT_REVIEW} count={counts[CAT_REVIEW]} icon="review" color={lit(counts[CAT_REVIEW], '#eab308')} after={<AiReviewTag scope="review" />} tip="AI 判定存疑、需人工拍板，暂不导出" tour="review" />
-      <Row emphasis="status" label="瑕疵片" cat={CAT_FLAWS} count={counts[CAT_FLAWS]} icon="face_ugly" color={lit(counts[CAT_FLAWS], '#ef4444')} noDrop after={<AiReviewTag scope="flaws" />} tip="AI 判出缺陷，默认不导出；确认为误判后删除标签即放行" />
+            <Row emphasis="status" label="交付库" cat={CAT_LIBRARY} count={counts[CAT_LIBRARY]} icon="library" tone="text-good" color={lit(counts[CAT_LIBRARY], '#22c55e')} noDrop onExport={counts[CAT_LIBRARY] ? () => void useStore.setState({ showExport: true, exportPreset: null }) : undefined} tip={slim ? '无缺陷照片，默认全量导出' : '无缺陷照片，默认全量导出；不可直接拖入，请拖至下方档位'} tour="library" />
+      {/* 档位三子行（仅正常模式）：行首「└──」层级连接符 + 外层 ml-2 缩进，跟父行文字拉开一档；
+          点开=只看该档，拖入=改档（不移动归属、不清标签）。精简模式交付库不分档，整段不渲染 */}
+      {!slim &&
+        ([1, 2, 3] as TierKey[]).map((t) => (
+          <div key={t} className="ml-2">
+            <Row connector="└──" label={tierNames[t - 1] || String(t)} cat={`tier:${t}`} count={counts[`tier:${t}`]} tip={`${tierTips[t]}；点击仅看该档，拖入可改档`} />
+          </div>
+        ))}
+      <Row emphasis="status" tone="text-warn" label="待确认" cat={CAT_REVIEW} count={counts[CAT_REVIEW]} icon="review" color={lit(counts[CAT_REVIEW], '#eab308')} after={<AiReviewTag scope="review" />} tip={slim ? '判定存疑，由 AI 复审自动处理；复核完自动归位，不导出' : 'AI 判定存疑、需人工拍板，暂不导出'} tour="review" />
+      <Row emphasis="status" label="瑕疵片" cat={CAT_FLAWS} count={counts[CAT_FLAWS]} icon="face_ugly" color={lit(counts[CAT_FLAWS], '#ef4444')} noDrop after={<AiReviewTag scope="flaws" />} tip={slim ? '判出缺陷的照片，默认不导出；选中后点「移入交付库」即可放行' : 'AI 判出缺陷，默认不导出；确认为误判后删除标签即放行'} />
       {/* 重复照片（v2.0.93 反选模）：一组重复/连拍照，干净的那几张现在会跟着代表帧一起自动进交付库、正常导出；
           这一行只当"入口"，按组统计（用户 2026-10-15：“实际 2 组、左边只显 1”），点进去逐组反选、快速删不要的。
           旧行靠"重复多余"张数亮圆点；拆闸后那一档恒为 0，改按组数亮（有组待处理就亮）。 */}
-      <Row emphasis="status" label="重复照片" cat="duplicate" count={counts[DUP_GROUP_KEY]} unit="组" icon="duplicate" color={lit(counts[DUP_GROUP_KEY], BAD_DOT_COLORS.duplicate)} noDrop tip="按组统计，不与张数相加；组里干净的那几张会自动进交付库，点进去可反选删除不要的" />
+      {/* 重复照片（仅正常模式） */}
+      {!slim && (
+        <Row emphasis="status" label="重复照片" cat="duplicate" count={counts[DUP_GROUP_KEY]} unit="组" icon="duplicate" color={lit(counts[DUP_GROUP_KEY], BAD_DOT_COLORS.duplicate)} noDrop tip="按组统计，不与张数相加；组里干净的那几张会自动进交付库，点进去可反选删除不要的" />
+      )}
       </section>
 
       {/* 人物在前、瑕疵在后（用户 10-13 指定）：先按人/影调找图是高频动线，
           瑕疵是复核场景才逐类看；瑕疵行的数字是“带该缺陷的张数”，
           一图两种缺陷会进两行，所以行间数字不加和 */}
+      {/* 类型组：精简模式换成「人物分类」四行（每行自带一个只导可交付图的小「导出」），
+          黑白照属于影调维度，精简下不进侧栏 */}
+      {slim ? (
+        <Group
+          title="人物分类"
+          tip="按画面人数归类；行尾「导出」只导这一栏能交的照片"
+          hint={`按照片的客观内容按人数归类，一张照片只归其中一栏，不代表照片好坏。
+
+· 每行末尾的「导出」只导这一栏里能交付的照片：瑕疵片、待确认自动跳过。
+· 点进分类照样能看到该栏全部照片（包括瑕疵的），导出才按上面的规矩筛。`}
+        >
+          {NEUTRAL_DIMENSIONS.filter((d) => PERSON_DIMS.includes(d)).map((d) => (
+            <Row
+              key={d}
+              label={DIMENSION_LABELS[d]}
+              cat={d}
+              count={counts[d]}
+              icon={d}
+              color={lit(counts[d], NEUTRAL_DOT_COLOR)}
+              tip={`${DIMENSION_LABELS[d]}：按内容归类；行尾「导出」只导能交的`}
+              onExport={counts[d] ? () => openExportFor([d], DIMENSION_LABELS[d]) : undefined}
+            />
+          ))}
+        </Group>
+      ) : (
       <Group
         title="类型"
         status="normal"
@@ -442,7 +493,11 @@ export default function Sidebar(): JSX.Element {
           />
         ))}
       </Group>
+      )}
 
+      {/* 瑕疵 / 废片 / 自定义分类：仅正常模式（精简下保留图上的瑕疵标签，但不再给入口） */}
+      {!slim && (
+        <>
       <Group
         title="瑕疵"
         status="bad"
@@ -453,7 +508,7 @@ export default function Sidebar(): JSX.Element {
 
 因此各行数字相加会大于「瑕疵片」总数。确认为误判时，删除该缺陷标签即可恢复导出。`}
       >
-        {BAD_DIMENSIONS.map((d) => (
+        {UI_BAD_DIMENSIONS.map((d) => (
           <Row key={d} label={DIMENSION_LABELS[d]} cat={d} count={counts[d]} icon={d} color={lit(counts[d], BAD_DOT_COLORS[d] ?? '#ef4444')} tip={`${DIMENSION_LABELS[d]}：含该缺陷的照片`} />
         ))}
       </Group>
@@ -513,9 +568,12 @@ export default function Sidebar(): JSX.Element {
           />
         ))}
       </Group>
-      {/* 底部教程入口两枚：教程中心是文档（左边页签切七章），新手指导是可重放的分步引导
-          （首次启动自动弹一次，看完就不再打扰，这里随时能重看） */}
-      <div className="mx-3 mt-4 flex flex-col gap-2">
+        </>
+      )}
+      </div>
+      {/* 底部教程入口固定在侧栏底端（不随内容滚动）：精简模式尤其重要——内容少、留白多，
+          不钉底的话按钮会被 flex-1 擑到看不见 */}
+      <div className="mx-3 py-3 flex flex-col gap-2 border-t border-line">
         <button
           onClick={() => setShowTutorial(true)}
           data-tour="tutorial"

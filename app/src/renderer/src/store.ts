@@ -5,7 +5,7 @@
  */
 import { create } from 'zustand'
 import type { AppSettings, CategoryKey, ImageRecord, DimensionKey, PerfHint, TierKey, AiReviewSuggestion, AiReviewScope } from '../../shared/types'
-import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, CAT_FLAWS, QC_MANUAL_DIMENSIONS, DIMENSION_LABELS, isBadDim, isStructuralDim, isTrashLike, NEUTRAL_DIMENSIONS, PERSON_DIMS, guessMidDim, flawLevel, SUPPORTED_EXTS, tierOfCat, DEFAULT_TIER_NAMES } from '../../shared/types'
+import { CAT_LIBRARY, CAT_REVIEW, CAT_TRASH, CAT_DUP_TRASH, CAT_FLAWS, MANUAL_FLAW_DIM, QC_MANUAL_DIMENSIONS, DIMENSION_LABELS, isBadDim, isStructuralDim, isTrashLike, NEUTRAL_DIMENSIONS, PERSON_DIMS, guessMidDim, flawLevel, SUPPORTED_EXTS, tierOfCat, DEFAULT_TIER_NAMES } from '../../shared/types'
 import type { AiReviewProgress, AuthState, BootstrapInfo, ConsumeResult, MoveRequest, PlanInfo, UpdateInfo } from '../../shared/ipc'
 import { isVip } from '../../shared/membership'
 import { effectiveUiScale } from './uiScale'
@@ -67,6 +67,9 @@ export interface UndoSnapshot {
  * 移动到维度分类只补目标标签（其它维度证据保留），移入废弃库保留全部标签作为废弃原因。
  */
 function isStatusCat(cat: CategoryKey): boolean {
+  // 瑕疵片是虚桶（由高置信瑕疵标签派生）：精简模式「移入瑕疵片」靠写标签实现，
+  // 绝不能走“人工担保清瑕疵标签”那条路，否则刚写进去的瑕疵立马被清掉
+  if (cat === CAT_FLAWS) return false
   // 档位子视图（D4）：拖到档位只是改档（主进程 tier 分支不碰标签），不该触发“人工担保清瑕疵标签”
   if (tierOfCat(cat)) return false
   // 结构维度（重复/连拍 v2.0.67）也不是状态分类：它是个“逐组选留哪张”的并集视图。
@@ -271,6 +274,7 @@ function catLabel(cat: CategoryKey, customs: Array<{ id: number; name: string }>
   const tierN = tierOfCat(cat)
   if (tierN) return `交付库/${(tierNames ?? DEFAULT_TIER_NAMES)[tierN - 1] || String(tierN)}`
   if (cat === CAT_LIBRARY) return '交付库'
+  if (cat === CAT_FLAWS) return '瑕疵片'
   if (cat === CAT_REVIEW) return '待确认'
   if (cat === CAT_TRASH) return '废弃库'
   const s = cat as string
@@ -354,6 +358,8 @@ interface StoreState {
   undoSnapshots: UndoSnapshot[]
   exportProgress: ExportProgress | null
   showExport: boolean
+  /** 导出预设（精简模式人物分类的逐行小导出）：非空时面板锁定这一分类、只导可交付的图 */
+  exportPreset: { categories: CategoryKey[]; label: string } | null
   showSettings: boolean
   showLogin: boolean
   showMember: boolean
@@ -433,7 +439,7 @@ interface StoreState {
   setDisplayIds(ids: number[]): void
   setViewMode(m: 'grid' | 'list' | 'masonry'): Promise<void>
   setGridCols(n: number): void
-  handleClickSelect(index: number, e: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }): void
+  handleClickSelect(index: number, e: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }, clickedId?: number): void
   /** 网格空白处橡皮筋框选：把选中集整体设为框到的这批 id（additive=叠加到已有选中，否则全新选中） */
   marqueeSelect(ids: number[], additive?: boolean): void
   toggleSelect(id: number): void
@@ -497,8 +503,8 @@ interface StoreState {
   confirmAiReview(id: number): Promise<boolean>
   /** 结案收尾：这张已没中/高瑕疵却还停在待确认时，按人数标签归位搬走（走 moveIds，可逐张撤回） */
   homeIfCleanParked(id: number): Promise<boolean>
-  /** 批量采纳当前待确认库里所有带建议的图，返回成功采纳张数 */
-  adoptAllReviewSuggestions(): Promise<number>
+  /** 批量采纳某一栏（默认取本轮作用域）所有带建议的图，返回成功采纳张数 */
+  adoptAllReviewSuggestions(scope?: AiReviewScope): Promise<number>
   rescanAll(): Promise<void>
   /** 拉取引擎签名过期信息（开发版横幅用） */
   refreshStale(): Promise<void>
@@ -507,6 +513,12 @@ interface StoreState {
   clearLibraryAll(): Promise<void>
   clearCacheAll(): Promise<void>
   saveSettings(patch: Partial<AppSettings>, reclassify?: boolean): Promise<void>
+  /** 切换使用模式：normal=现状；slim=精简交付（开自动复审，待确认由 AI 自动归位） */
+  setUiMode(mode: 'normal' | 'slim'): Promise<void>
+  /** 带预设打开导出面板（人物分类行的小导出）：锁定分类、只导可交付 */
+  openExportFor(cats: CategoryKey[], label: string): void
+  /** 精简模式 AI 复审结束后的自动收尾：采纳建议（scope 指定哪一栏）；forceHome=把待确认里画质存疑的归入瑕疵片 */
+  settleSlimAiReview(forceHome: boolean, scope?: AiReviewScope): Promise<void>
   addCustomCategory(name: string): Promise<void>
   removeCustomCategory(id: number): Promise<void>
   pushUndo(ids: number[], toCat: CategoryKey): void
@@ -550,6 +562,8 @@ let updateChecked = false
 /** 上一次真正 apply 给窗口的缩放倍率：倍率没变就重复调 setZoomFactor 会再触发一次 resize，
  *  拿它兼住“无变化不重复缩”，配合 screen.width 基准彻底断开缩放自激环 */
 let appliedUiFactor: number | null = null
+/** 精简模式自动收尾防重入：复审收尾期间又收到同轮完成事件时不重复采纳 */
+let slimSettleBusy = false
 
 /*
  * 旧引擎重扫横幅：引擎初始化是启动时的异步过程（mediapipe 加载需数秒），
@@ -757,6 +771,7 @@ export const useStore = create<StoreState>((set, get) => ({
   undoSnapshots: [],
   exportProgress: null,
   showExport: false,
+  exportPreset: null,
   showSettings: false,
   showLogin: false,
   showMember: false,
@@ -906,6 +921,37 @@ export const useStore = create<StoreState>((set, get) => ({
     set({ showContactQr: false })
   },
 
+  async setUiMode(mode) {
+    const patch: Partial<AppSettings> = { uiMode: mode }
+    // 精简模式 = 待确认自动过云端：已授权就顺手把复审开关打开。
+    // 没授权先弹授权窗——同意那一下会落 consent+enabled（见 agreeAiReviewConsent）；
+    // 这里不提前写 enabled，否则用户点不同意会留下一个“开关是开的却永远不会跑”的假状态。
+    if (mode === 'slim' && get().settings.aiReviewConsent) patch.aiReviewEnabled = true
+    await get().saveSettings(patch)
+    if (mode !== 'slim') return
+    // 精简后侧栏有些入口不再渲染：视图若正停在（档位 / 黑白照 / 瑕疵维度 / 重复 / 自定义 / 废弃库）上，
+    // 就成了“图还在、入口没了”的悬空页，统一挪回「全部文件」
+    const cat = get().activeCategory
+    const stillVisible =
+      cat === null || cat === CAT_LIBRARY || cat === CAT_REVIEW || cat === CAT_FLAWS || (PERSON_DIMS as string[]).includes(cat)
+    if (!stillVisible) void get().openCategory(null)
+    if (!get().settings.aiReviewConsent) {
+      set({ showAiReviewConsent: true })
+      return
+    }
+    const { auth, aiReview, counts } = get()
+    if (isVip(auth.user) && (counts[CAT_REVIEW] ?? 0) > 0 && !aiReview?.running) {
+      set({ toast: { msg: '精简模式：待确认将由 AI 复审自动处理，复核完自动归位', kind: 'info', duration: 2600 } })
+      void get().startAiReview('review')
+    } else if (!isVip(auth.user) && (counts[CAT_REVIEW] ?? 0) > 0) {
+      set({ toast: { msg: '精简模式已开启；AI 复审为会员功能，待确认需开通会员后自动处理', kind: 'info', duration: 3200 } })
+    }
+  },
+
+  openExportFor(cats, label) {
+    set({ exportPreset: { categories: cats, label }, showExport: true })
+  },
+
   toggleAiReview() {
     const { settings } = get()
     const next = !settings.aiReviewEnabled
@@ -1014,7 +1060,11 @@ export const useStore = create<StoreState>((set, get) => ({
               // 才起；待确认是否真的有照片由主进程服务自己判（空则 reason:'empty' 不跑）。
               const { auth, settings, aiReview } = get()
               const isMember = isVip(auth.user)
-              if (isMember && settings.aiReviewEnabled && settings.aiReviewConsent && !aiReview?.running) {
+              // 精简模式：待确认必须自动过一遍云端（用户 10-20 定），即使普通模式的复审开关没开；
+              // 会员与授权仍是硬门槛，缺一条就保持待确认原样，绝不假装处理。
+              // 只在“真正跑完一轮筛选”后起（realRoundEnd）：标签/移动的收尾事件不得再触发复审。
+              const wantReview = !!settings.aiReviewEnabled || settings.uiMode === 'slim'
+              if (realRoundEnd && isMember && wantReview && settings.aiReviewConsent && !aiReview?.running) {
                 void get().startAiReview()
               }
             })()
@@ -1095,6 +1145,16 @@ export const useStore = create<StoreState>((set, get) => ({
             set({ aiReviewSettling: true })
             await get().refreshImages()
             set({ aiReviewSettling: false })
+          }
+          // 精简模式：复审一结束就自动采纳并归位，不再要人点「全部采纳」（用户 10-20 定）。
+          // done=完整跑完，才允许把画质存疑的强行归瑕疵片；stopped/error 只采纳已生成的建议。
+          // 瑕疵片也要收尾（用户 10-20 补充）：只采纳本栏结论，不做“把待确认画质存疑图归位”那步，
+          // 否则在瑕疵片跑一次复审会偷偷改动另一栏。
+          if (get().settings.uiMode === 'slim') {
+            const sc = p.scope ?? 'review'
+            if (p.phase === 'done' || p.phase === 'stopped' || p.phase === 'error') {
+              void get().settleSlimAiReview(p.phase === 'done' && sc === 'review', sc)
+            }
           }
         }
       })
@@ -1191,17 +1251,20 @@ export const useStore = create<StoreState>((set, get) => ({
     set({ gridCols: v })
   },
 
-  handleClickSelect(index, e) {
+  handleClickSelect(index, e, clickedId) {
     const { images, selection, anchorIndex, displayIds } = get()
     // index 是“当前展示序”的下标（视图层按时间/置信度/文件名重排过），必须经 displayIds
     // 映射回 id；直接用 images[index] 会在非默认排序下选错图（选中样式“消失”）。
-    const order = displayIds.length === images.length ? displayIds : images.map((i) => i.id)
-    const id = order[index]
+    // 视图能直接给出被点图片的 id（clickedId）时优先用它：带文件名筛选时 displayIds 比 images 短，
+    // 以前“长度不等就退回库里顺序”会让点击索引错位，点 A 实际选中 B（用户 10-20 实测）。
+    const order = displayIds.length ? displayIds : images.map((i) => i.id)
+    const id = clickedId ?? order[index]
     if (id == null) return
     // 标准文件管理器语义（用户 10-18 拍板“单击为选中”，教程里写的“单击选中/Ctrl 加选”也以此为准）：
     // 普通单击 = 只选中这一张（替掉旧的）；Ctrl/Cmd 单击 = 加选/取消这一张（多选不动其他）；
-    // Shift = 从锚点连选到这一张。旧行为是“每次点击都 toggle”，点已选中的图会把它取消、
-    // 选中的第一张却永远消不掉，和双击放大混在一起时尤其拧巴。
+    // Shift = 从锚点连选到这一张。
+    // 精简模式例外（用户 10-20）：精简里批量动作只有“移入交付库/瑕疵片”，一张张按 Ctrl 太费手——
+    // 普通单击直接加选/再点取消，连点几张就是多选；标准模式仍是文件管理器口径。
     const sel = new Set(selection)
     if (e.shiftKey && anchorIndex >= 0) {
       const [a, b] = [Math.min(anchorIndex, index), Math.max(anchorIndex, index)]
@@ -1209,7 +1272,8 @@ export const useStore = create<StoreState>((set, get) => ({
       set({ selection: sel })
       return
     }
-    if (e.ctrlKey || e.metaKey) {
+    const slim = get().settings.uiMode === 'slim'
+    if (e.ctrlKey || e.metaKey || slim) {
       if (sel.has(id)) sel.delete(id)
       else sel.add(id)
     } else {
@@ -1636,10 +1700,13 @@ export const useStore = create<StoreState>((set, get) => ({
     //  - flaws：非废弃 ∩ 高置信瑕疵且没停在拍板位（采纳掉标后即自动离开瑕疵片）
     const fl = flawLevel(img.tags || {})
     const scope = sug.scope ?? 'review'
+    // 瑕疵片里也有主分类停在待确认的图（精简模式「移入瑕疵片」只写 manual_flaw，可能没人数归属），
+    // 它们同样是本栏成员；只认 category !== review 会让这批图复审完永远采纳不了，白白烧额度。
+    const manualFlaw = !!img.tags?.[MANUAL_FLAW_DIM] && img.tags[MANUAL_FLAW_DIM]!.level !== 'low'
     const stillValid = isTrashLike(img.category)
       ? false
       : scope === 'flaws'
-        ? fl === 'high' && img.category !== CAT_REVIEW
+        ? fl === 'high' && (img.category !== CAT_REVIEW || manualFlaw)
         : img.category === CAT_REVIEW || fl === 'mid'
     if (!stillValid) return false
     for (const key of Object.keys(sug.flaws) as (keyof typeof sug.flaws)[]) {
@@ -1707,8 +1774,8 @@ export const useStore = create<StoreState>((set, get) => ({
    * 按钮叫“全部采纳”（用户 10-15 定）：批量做完的事就是逐张“采纳这张”的同一个动作，
    * 名字不一致会让人怀疑“点下去是不是等于没采纳”。
    */
-  async adoptAllReviewSuggestions() {
-    const scope = get().aiReview?.scope ?? 'review'
+  async adoptAllReviewSuggestions(scopeOverride) {
+    const scope = scopeOverride ?? get().aiReview?.scope ?? 'review'
     const cat: CategoryKey = scope === 'flaws' ? CAT_FLAWS : CAT_REVIEW
     const reviewImgs = await window.api.listImages({ category: cat })
     const candidates = reviewImgs.filter((i) => hasAiReviewAction(i) && !isTrashLike(i.category)).map((i) => i.id)
@@ -1741,6 +1808,60 @@ export const useStore = create<StoreState>((set, get) => ({
       })
     }
     return n
+  },
+
+  /**
+   * 精简模式的复审收尾（用户 10-20 定）：不再让人点「全部采纳」。
+   * 1) 先把本轮作用域（待确认 / 瑕疵片）内所有建议按逐张采纳通道写回（等价人工点「全部采纳」，可逐条撤销）；
+   * 2) forceHome=true（待确认栏完整跑完）时，把仍卡在待确认的画质存疑图按精简口径确认成瑕疵：
+   *    中置信「画面模糊/曝光异常」提为高置信，再按人数归位 → 自动进瑕疵片，待确认因此清空；
+   * 3) 没有人数归属或复审没成功的极少数图留在原栏，不硬塞。
+   * 中途停止/报错只做第 1 步，避免把没判过的图当成坏片。
+   * 瑕疵片只做第 1 步：它不需要（也不应该）去动另一栏的图，采纳完该离开的会自行离开。
+   */
+  async settleSlimAiReview(forceHome, scope = 'review') {
+    if (get().settings.uiMode !== 'slim') return
+    if (slimSettleBusy) return
+    slimSettleBusy = true
+    try {
+      await get().adoptAllReviewSuggestions(scope)
+      if (!forceHome || scope !== 'review') return
+      const left = await window.api.listImages({ category: CAT_REVIEW })
+      const moveGroups = new Map<CategoryKey, number[]>()
+      for (const img of left) {
+        if (isTrashLike(img.category)) continue
+        // 云端不判画质：带中置信模糊/曝光的，按精简模式口径直接确认成瑕疵（提为高置信）
+        const spots = aiReviewBlindSpots(img).filter((d) => img.tags[d]?.level === 'mid')
+        let fresh = img
+        for (const d of spots) {
+          const rec = await window.api.correctImage({ imageId: img.id, action: 'correct', origDim: d, origConfidence: img.tags[d]?.confidence ?? null })
+          if (rec) fresh = rec
+        }
+        const person = (visiblePersonOf(fresh) ?? fresh.ai_review?.person) as CategoryKey | undefined
+        if (!person || fresh.category === person) continue
+        const batch = moveGroups.get(person) ?? []
+        batch.push(img.id)
+        moveGroups.set(person, batch)
+      }
+      for (const [person, ids] of moveGroups) await get().moveIds(ids, person)
+      await get().refreshImages()
+      await get().refreshCounts()
+      const remain = (await window.api.listImages({ category: CAT_REVIEW })).length
+      if (left.length) {
+        const moved = left.length - remain
+        set({
+          toast: {
+            msg: moved
+              ? `精简模式：已自动归位 ${moved} 张${remain ? `，待确认还剩 ${remain} 张` : '，待确认已清空'}`
+              : `精简模式：待确认还剩 ${remain} 张（缺人数归属，暂不归位）`,
+            kind: 'info',
+            duration: 3200
+          }
+        })
+      }
+    } finally {
+      slimSettleBusy = false
+    }
   },
   async rescanAll() {
     const { auth } = get()

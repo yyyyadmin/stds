@@ -1,5 +1,6 @@
 /**
  * 设置对话框（简化版）
+ * - 使用模式：标准 / 精简两选一（与顶栏左上角的切换同一份设置；精简只留三栏交付口径，待确认交给 AI 自动复审）
  * - 环境检测：AI 引擎状态 / 设备偏好 / 重新筛选
  * - 交付库档位目录名：三档子文件夹名可自定义
  * - 判定线：v7 阈值锁定后由代码基线表统一标定，本对话框不再有阈值/力度/自学习控件（tuneNow 等通道已撤，学习逻辑留在 services/tuner.ts 供离线标定参考）
@@ -18,6 +19,9 @@ export default function SettingsDialog(): JSX.Element {
   const close = (): void => useStore.setState({ showSettings: false })
   const settings = useStore((s) => s.settings)
   const saveSettings = useStore((s) => s.saveSettings)
+  const setUiMode = useStore((s) => s.setUiMode)
+  /** 老设置文件没有这个字段，一律当正常模式 */
+  const uiMode = settings.uiMode ?? 'normal'
   const rescanAll = useStore((s) => s.rescanAll)
   const appVersion = useStore((s) => s.appVersion)
   const perfHint = useStore((s) => s.perfHint)
@@ -58,6 +62,41 @@ export default function SettingsDialog(): JSX.Element {
         </div>
 
         <div className="p-5 space-y-5 text-sm">
+          {/* 使用模式（用户 2026-10-20 定）：标准=现状一字不改；精简=只留三栏交付口径，
+              待确认交给 AI 自动复审并自动归位。顶栏左上角有同一开关，设置里是同一份值 */}
+          <section>
+            <h3 className="text-fg2 font-bold mb-2">使用模式</h3>
+            <div className="rounded-md bg-panel2 border border-line p-3 space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  className={
+                    'px-3 py-2.5 rounded-md border text-center transition-colors ' +
+                    (uiMode === 'normal' ? 'border-brand bg-brand/10 text-brand' : 'border-line bg-panel text-fg3 hover:text-fg2')
+                  }
+                  onClick={() => void setUiMode('normal')}
+                >
+                  <div className="text-[13px] font-semibold">标准模式</div>
+                  <div className="text-[11px] mt-0.5 opacity-80">全部入口，交付库分三档</div>
+                </button>
+                <button
+                  className={
+                    'px-3 py-2.5 rounded-md border text-center transition-colors ' +
+                    (uiMode === 'slim' ? 'border-brand bg-brand/10 text-brand' : 'border-line bg-panel text-fg3 hover:text-fg2')
+                  }
+                  onClick={() => void setUiMode('slim')}
+                >
+                  <div className="text-[13px] font-semibold">精简模式</div>
+                  <div className="text-[11px] mt-0.5 opacity-80">只留三栏，待确认自动处理</div>
+                </button>
+              </div>
+              <p className="text-xs text-fg3 leading-relaxed">
+                {uiMode === 'slim'
+                  ? '精简模式：侧栏只留 交付库 / 待确认 / 瑕疵片 和人物分类，交付库不分档，模糊、曝光拿不准的图直接算瑕疵片。筛选跑完会自动发起 AI 复审，复核完自动写回并归位——这会消耗每日复核额度（会员功能）；没开通会员或未授权时，待确认保持原样不动。'
+                  : '标准模式：入口和功能与现在完全一样。切到精简模式后，侧栏只留 交付库 / 待确认 / 瑕疵片 和人物分类，交付库不再分三档，待确认交给 AI 自动复审。'}
+              </p>
+            </div>
+          </section>
+
           {/* 环境检测 */}
           <section>
             <h3 className="text-fg2 font-bold mb-2">环境检测</h3>
@@ -158,7 +197,9 @@ export default function SettingsDialog(): JSX.Element {
 
           {/* 交付库档位目录名（D4）：侧栏三行子档与导出二级子目录共用这几个名字，
               改完立即可见（无需重筛）；导出时按 交付库/优质|良好|一般/ 分 folder。
-              v3：档位的依据已从“离瑕疵线多远”换成引擎实测清晰度，无需重跑引擎即可重算 */}
+              v3：档位的依据已从“离瑕疵线多远”换成引擎实测清晰度，无需重跑引擎即可重算。
+              精简模式不分档、导出也不建档位子目录，这一节没有意义，整节不渲染（教程文案同步，用户 10-20） */}
+          {uiMode !== 'slim' && (
           <section>
             <h3 className="text-fg2 font-bold mb-2">交付库档位目录名</h3>
             <div className="rounded-md bg-panel2 border border-line p-3 space-y-2">
@@ -189,6 +230,7 @@ export default function SettingsDialog(): JSX.Element {
               <p className="text-xs text-fg3">三档按引擎实测的<b>画面清晰度</b>（细节量 + 高频占比）排队，侧栏与导出子目录共用这几个名字（如改成 精修/初修/直出）。它只告诉你先看哪批，<b>不影响哪张照片被拦下来</b>；拿不到清晰度实测的老图一律先归中间档，不擅自抬也不擅自压。</p>
             </div>
           </section>
+          )}
 
           {/* 版本更新 */}
           <section>

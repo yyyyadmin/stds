@@ -69,6 +69,15 @@ export default function App(): JSX.Element {
     }
   }, [])
 
+  // 窗口最小化/遮蔽时暂停 CSS 动画和定时器，节省 GPU/CPU（Mac 笔记本不再发烫）
+  useEffect(() => {
+    const onVis = (): void => {
+      document.documentElement.classList.toggle('app-hidden', document.visibilityState === 'hidden')
+    }
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [])
+
   // 全局快捷键
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -100,6 +109,9 @@ export default function App(): JSX.Element {
           e.preventDefault()
           useStore.getState().selectAll()
         }
+        // 多选后想一次性清空，手会直接去按 Esc（底部「取消」按钮的提示也写着“Esc 也可”）。
+        // 只清选中，不动视图；大图打开时的 Esc 归下面的 previewId 分支关预览。
+        if (e.key === 'Escape') useStore.getState().selectNone()
       }
       if (previewId) {
         if (e.key === 'Escape') closePreview()

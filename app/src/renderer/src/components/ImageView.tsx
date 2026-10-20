@@ -12,7 +12,7 @@ import { TrashView } from './TrashView'
 import AiReviewBar from './AiReviewBar'
 import { toSrc, ThumbImg } from './imageSrc'
 import type { ImageRecord, DimensionKey } from '../../../shared/types'
-import { ALL_TAG_DIMENSIONS, CAT_LIBRARY, CAT_REVIEW, CAT_FLAWS, CAT_TRASH, CAT_DUP_TRASH, DIMENSION_LABELS, QC_MANUAL_DIMENSIONS, isLibraryBucket, isDupRedundant, flawLevel, DEFAULT_TIER_NAMES, PERSON_DIMS } from '../../../shared/types'
+import { ALL_TAG_DIMENSIONS, BAD_DIMENSIONS, CAT_LIBRARY, CAT_REVIEW, CAT_FLAWS, CAT_TRASH, CAT_DUP_TRASH, DIMENSION_LABELS, MANUAL_FLAW_DIM, QC_MANUAL_DIMENSIONS, isLibraryBucket, isDupRedundant, flawLevel, DEFAULT_TIER_NAMES, PERSON_DIMS } from '../../../shared/types'
 import { dimTagColor } from './Sidebar'
 
 /**
@@ -167,8 +167,12 @@ function BusyBanner(): JSX.Element | null {
  * 橙色实底：与左下角维度芯片（彩色描边浅底款）的视觉语言完全不同，拉开区分度。
  * stopPropagation 避免误触单击选中 / 双击放大 / 拖拽排序。
  */
-function TagBtn({ img, variant = 'hover' }: { img: ImageRecord; variant?: 'hover' | 'plain' }): JSX.Element {
+function TagBtn({ img, variant = 'hover' }: { img: ImageRecord; variant?: 'hover' | 'plain' }): JSX.Element | null {
   const openTagManager = useStore((s) => s.openTagManager)
+  // 精简模式取消标签管理（用户 2026-10-20）：卡片上不再出现这枚橙按钮，
+  // 改为底部工具栏/大图里的「移入交付库 / 移入瑕疵片」两个直接动作
+  const slim = useStore((s) => s.settings.uiMode === 'slim')
+  if (slim) return null
   return (
     <button
       className={
@@ -202,7 +206,10 @@ function TagBtn({ img, variant = 'hover' }: { img: ImageRecord; variant?: 'hover
  */
 function ManualFlag({ img }: { img: ImageRecord }): JSX.Element | null {
   const openReviewPanel = useStore((s) => s.openReviewPanel)
-  if (!needsManualReview(img)) return null
+  // 精简模式不再催人定画质（用户 2026-10-20 定）：模糊/曝光拿不准的由自动复审直接归入瑕疵片，
+  // 红标留在这里只会催一件已经办完的事
+  const slim = useStore((s) => s.settings.uiMode === 'slim')
+  if (slim || !needsManualReview(img)) return null
   const flaws = flawLevel(img.tags || {}) === 'high'
   return (
     <span
@@ -238,9 +245,10 @@ function isDupRepParked(img: ImageRecord): boolean {
   return img.category === CAT_REVIEW && !!img.dupGroup && !isDupRedundant(img.tags)
 }
 
-/** 左上角是否已被一枚贴角红标占住（人工复审 或 重复组代表帧）：选中点/检测中需往下让一格，不叠在一起 */
-function hasCornerFlag(img: ImageRecord): boolean {
-  return needsManualReview(img) || isDupRepParked(img)
+/** 左上角是否已被一枚贴角红标占住（人工复审 或 重复组代表帧）：选中点/检测中需往下让一格，不叠在一起。
+ *  精简模式不画人工复审标（见 ManualFlag），这里也不能再为它让位 */
+function hasCornerFlag(img: ImageRecord, slim: boolean): boolean {
+  return (!slim && needsManualReview(img)) || isDupRepParked(img)
 }
 
 /**
@@ -250,7 +258,9 @@ function hasCornerFlag(img: ImageRecord): boolean {
  * 若这张同时要人工复审（画质没过），让位给 ManualFlag，不叠两枚（UI 铁律：同一位置只留一处）。
  */
 function DupParkFlag({ img }: { img: ImageRecord }): JSX.Element | null {
-  if (needsManualReview(img) || !isDupRepParked(img)) return null
+  const slim = useStore((s) => s.settings.uiMode === 'slim')
+  // 精简模式下人工复审标不画了，这枚不必再让位
+  if ((!slim && needsManualReview(img)) || !isDupRepParked(img)) return null
   return (
     <span
       className="absolute left-0 top-0 z-20 flex items-center justify-center rounded-br-[12px] bg-bad px-3.5 py-1.5 text-xs font-bold leading-none text-white shadow-[0_1px_4px_rgba(0,0,0,0.7)]"
@@ -269,14 +279,24 @@ function DupParkFlag({ img }: { img: ImageRecord }): JSX.Element | null {
  * 容器本身 pointer-events-none（点击要透到图上），只有 +N 这一枚要回来才能接住悬停。
  */
 function TagChips({ img }: { img: ImageRecord }): JSX.Element | null {
+  // Hook 必须在早退分支之前无条件调用（卡片/列表会大量复用这个组件）
+  const slim = useStore((s) => s.settings.uiMode === 'slim')
+  const [morePos, setMorePos] = useState<{ left: number; bottom: number; maxW: number } | null>(null)
   const entries = Object.entries(img.tags || {}).filter(([, t]) => t && t.level !== 'low')
+  // 精简模式：瑕疵不逐项点名，统一收成一枚橙签（人物分类仍单独一枚）
+  if (slim) {
+    return (
+      <div className="absolute left-1 bottom-1 right-2 flex flex-wrap gap-1 pointer-events-none">
+        <SlimTags img={img} />
+      </div>
+    )
+  }
   if (!entries.length) return null
   // 已转人工定画质的卡片：模糊/曝光顶最前且保持原色，AI 定过的几项压淡；其余卡片仍按人物标签第一
   const manual = needsManualReview(img)
   const sorted = manual ? sortManualQcFirst(entries) : sortTagsPersonFirst(entries)
   const fadedOf = (dim: string): boolean => manual && !(QC_MANUAL_DIMENSIONS as string[]).includes(dim)
   const hidden = sorted.length > 3 ? sorted.slice(3) : []
-  const [morePos, setMorePos] = useState<{ left: number; bottom: number; maxW: number } | null>(null)
   return (
     <div className="absolute left-1 bottom-1 right-16 flex flex-wrap gap-1 pointer-events-none">
       {sorted.slice(0, 3).map(([dim]) => (
@@ -313,9 +333,35 @@ function TagChips({ img }: { img: ImageRecord }): JSX.Element | null {
   )
 }
 
+/**
+ * 精简模式的卡片标签（用户 2026-10-20 定）：所有瑕疵收成一枚橙签「瑕疵」，不再逐项列
+ * 闭眼/模糊/曝光/半截头；人物分类照旧单独一枚（它回答“这是什么图”，不是“哪里坏了”）。
+ * 具体命中哪几项放在 title 里，鼠标停一下能看，不用为一行标签把卡片宽度占满。
+ */
+function SlimTags({ img }: { img: ImageRecord }): JSX.Element | null {
+  const person = PERSON_DIMS.find((d) => img.tags?.[d] && img.tags[d]!.level !== 'low')
+  const flaws = BAD_DIMENSIONS.filter((d) => d !== MANUAL_FLAW_DIM && img.tags?.[d] && img.tags[d]!.level !== 'low')
+  const manual = !!img.tags?.[MANUAL_FLAW_DIM] && img.tags[MANUAL_FLAW_DIM]!.level !== 'low'
+  if (!person && !flaws.length && !manual) return null
+  return (
+    <>
+      {person && <DimTag dim={person} />}
+      {(flaws.length > 0 || manual) && (
+        <span
+          className="inline-flex items-center px-1.5 py-0.5 rounded-[5px] text-[11px] leading-none font-bold text-white bg-orange-500 shadow-[0_1px_3px_rgba(0,0,0,0.65)]"
+          title={flaws.length ? `判出瑕疵：${flaws.map((d) => DIMENSION_LABELS[d]).join('、')}` : '已标记为瑕疵'}
+        >
+          瑕疵
+        </span>
+      )}
+    </>
+  )
+}
+
 function StatusRibbon({ img }: { img: ImageRecord }): JSX.Element | null {
   // 档位名订阅（D4）：Hook 必须在早退分支之前无条件调用
   const tierNamesSetting = useStore((s) => s.settings.tierNames)
+  const slim = useStore((s) => s.settings.uiMode === 'slim')
   if (img.status === 'pending') return <span className="chip bg-gray-600/80 text-gray-200 absolute right-1 top-1">待筛选</span>
   if (img.status === 'error') return <span className="chip bg-bad/90 text-white absolute right-1 top-1">检测失败</span>
   if (img.status === 'skip') return <span className="chip bg-gray-700/90 text-gray-300 absolute right-1 top-1">无法解码</span>
@@ -324,16 +370,29 @@ function StatusRibbon({ img }: { img: ImageRecord }): JSX.Element | null {
   // 主分类停在待确认 ∪ 中置信瑕疵 → 待确认；高置信瑕疵 → 瑕疵片；无瑕疵 → 交付
   const fl = flawLevel(img.tags)
   // 停在待确认的先报“待确认”：重复组“整组没一张能交”的代表帧带着高置信瑕疵也被停在这里拍板，
-  // 按旧顺序它会先被 fl==='high' 兜成“瑕疵”，与它在侧栏/视图里的实际归属不一致
-  if (img.category === CAT_REVIEW || fl === 'mid')
+  // 按旧顺序它会先被 fl==='high' 兜成“瑕疵”，与它在侧栏/视图里的实际归属不一致。
+  // 精简模式里用户亲手标进瑕疵片的（manual_flaw）不算待确认——它只归瑕疵片
+  const manualFlaw = !!img.tags?.[MANUAL_FLAW_DIM] && img.tags[MANUAL_FLAW_DIM]!.level !== 'low'
+  if (!manualFlaw && (img.category === CAT_REVIEW || fl === 'mid'))
     return <span className="chip bg-warn text-white absolute right-1 top-1">待确认</span>
-  if (fl === 'high')
+  if (fl === 'high') {
+    // 精简模式：左下角已有一枚统一的「瑕疵」橙签，右上角不再重复一次
+    if (slim) return null
     return <span className="chip bg-bad/90 text-white absolute right-1 top-1" title="判出缺陷的图：不进交付库、默认不导出">瑕疵</span>
+  }
   // v2.0.93 反转：干净重复冗余帧不再挂"重复照片"灰标——它和代表帧一样属交付库，走下面的档位角标。
   // （带中/高置信瑕疵的冗余帧已在上面被待确认/瑕疵兵分拦截；"同属哪组"靠【重复照片】行/分组视图体现。）
   // 交付角标走虚桶判定（传入 tags）：干净的人数图属交付库且正常导出；
   // D4：文案改用档位名（优质=绿、良好=蓝、一般=灰），无档位（尚未 backfill）时仍写“交付”
   if (isLibraryBucket(img.category, img.tags)) {
+    // 精简模式不分档：交付角标只写「交付」，不再出现优质/良好/一般（用户 2026-10-20）
+    if (slim) {
+      return (
+        <span className="chip text-xs px-2 text-white absolute right-1 top-1 shadow-[0_1px_3px_rgba(0,0,0,0.65)] bg-good" title="无缺陷，默认参与导出">
+          交付
+        </span>
+      )
+    }
     const names = tierNamesSetting ?? DEFAULT_TIER_NAMES
     const tier = img.tier
     const text = tier ? names[tier - 1] || String(tier) : '交付'
@@ -429,6 +488,7 @@ function ThumbBase({ img, cellPx, index, onClick, onDoubleClick, dragIds }: {
 }): JSX.Element {
   const selected = useStore((s) => s.selection.has(img.id))
   const scanCurrent = useStore((s) => (s.scanProgress?.running && s.scanProgress.phase === 'scanning' ? s.scanProgress.current : ''))
+  const slim = useStore((s) => s.settings.uiMode === 'slim')
   const isScanning = !!scanCurrent && img.filename === scanCurrent
   return (
     <div
@@ -469,10 +529,10 @@ function ThumbBase({ img, cellPx, index, onClick, onDoubleClick, dragIds }: {
       <DupParkFlag img={img} />
       {/* 左上角已被「人工复审」红底占住时，选中圆点/检测中往下让一格，不叠在一起（两者都是左对齐）*/}
       {selected && (
-        <span className={'absolute left-1 z-20 w-4 h-4 rounded-full bg-brand text-white text-[10px] flex items-center justify-center ' + (hasCornerFlag(img) ? 'top-[26px]' : 'top-1')}>✓</span>
+        <span className={'absolute left-1 z-20 w-4 h-4 rounded-full bg-brand text-white text-[10px] flex items-center justify-center ' + (hasCornerFlag(img, slim) ? 'top-[26px]' : 'top-1')}>✓</span>
       )}
       {isScanning && (
-        <span className={'absolute left-1 z-10 px-1.5 py-0.5 rounded bg-red-500 text-white text-[10px] font-bold animate-pulse shadow ' + (hasCornerFlag(img) ? 'top-[26px]' : 'top-1')}>检测中</span>
+        <span className={'absolute left-1 z-10 px-1.5 py-0.5 rounded bg-red-500 text-white text-[10px] font-bold animate-pulse shadow ' + (hasCornerFlag(img, slim) ? 'top-[26px]' : 'top-1')}>检测中</span>
       )}
       <StatusRibbon img={img} />
       <TagChips img={img} />
@@ -796,6 +856,8 @@ export default function ImageView(): JSX.Element {
   const openPreview = useStore((s) => s.openPreview)
   const selection = useStore((s) => s.selection)
   const scanProgress = useStore((s) => s.scanProgress)
+  // 精简模式不催人定画质（复审后自动归入瑕疵片），列表里的红字与“画质优先”排序一并下线
+  const slim = useStore((s) => s.settings.uiMode === 'slim')
 
   const sorted = useMemo(() => {
     // 先按文件名搜索过滤再排序：displayIds 是下面从 sorted 同步的，
@@ -846,8 +908,14 @@ export default function ImageView(): JSX.Element {
   useScrollAnchor(sorted, scrollRef, activeCategory ?? 'all')
 
   const dragIds = useMemo(() => [...selection], [selection])
-  const click = (index: number, e: React.MouseEvent): void => handleClickSelect(index, e)
-  const dbl = (img: ImageRecord): void => openPreview(img.id)
+  // 把被点中的 id 一并交给 store：带文件名筛选时展示序比图库全量短，只靠 index 映射会点错图
+  const click = (index: number, e: React.MouseEvent): void => handleClickSelect(index, e, sorted[index]?.id)
+  const dbl = (img: ImageRecord): void => {
+    // 精简模式单击改成“加选/取消”后，双击的第一下选中、第二下又取消，进大图前把它补回来，
+    // 否则关闭大图回到网格，刚看的那张是没选中的。
+    if (slim && !useStore.getState().selection.has(img.id)) useStore.getState().toggleSelect(img.id)
+    openPreview(img.id)
+  }
 
   // Ctrl+滚轮按「一行几张」一格一档调（向上滚=图变大=列数减一），与顶栏「一行 N 张」按钮
   // 共用 store 里的同一个设置（gridCols，选过就记住，从没选过按屏幕自适应）。
@@ -912,7 +980,7 @@ export default function ImageView(): JSX.Element {
           <div className="mt-5">
             <div className="text-xs font-medium text-fg3 mb-2">AI 检测维度（有问题的图会被拦在交付库外面）</div>
             <div className="flex flex-wrap gap-1.5">
-              {ALL_TAG_DIMENSIONS.map((d) => (
+              {ALL_TAG_DIMENSIONS.filter((d) => d !== MANUAL_FLAW_DIM).map((d) => (
                 <span key={d} className="px-2 py-0.5 rounded-full text-xs bg-bad/10 text-bad border border-bad/20">
                   {DIMENSION_LABELS[d]}
                 </span>
@@ -981,7 +1049,7 @@ export default function ImageView(): JSX.Element {
               <th className="sticky top-0 z-10 bg-canvas px-2 py-1.5 font-medium w-36">最高置信度</th>
               <th className="sticky top-0 z-10 bg-canvas px-2 py-1.5 font-medium w-28">分类</th>
               <th className="sticky top-0 z-10 bg-canvas px-2 py-1.5 font-medium w-20">状态</th>
-              <th className="sticky top-0 z-10 bg-canvas px-2 py-1.5 font-medium w-14">标签</th>
+              {!slim && <th className="sticky top-0 z-10 bg-canvas px-2 py-1.5 font-medium w-14">标签</th>}
             </tr>
           </thead>
           <tbody>
@@ -1004,19 +1072,24 @@ export default function ImageView(): JSX.Element {
                   </td>
                   <td className="border-b border-line/50 px-2 py-1 max-w-[280px] align-middle">
                     <div className="truncate font-mono text-fg2" title={img.path}>{img.filename}</div>
-                    {needsManualReview(img) && <div className="text-[11px] font-bold text-bad" title="本张已完成云端复核；画面模糊、曝光异常不在复核范围内，需人工裁定">待人工裁定画质</div>}
+                    {!slim && needsManualReview(img) && <div className="text-[11px] font-bold text-bad" title="本张已完成云端复核；画面模糊、曝光异常不在复核范围内，需人工裁定">待人工裁定画质</div>}
                     {isCurrent && <div className="text-[10px] text-red-500">正在检测…</div>}
                   </td>
                   <td className="border-b border-line/50 px-2 py-1 align-middle">
                     <div className="flex flex-wrap gap-1">
-                      {(() => {
-                        const manual = needsManualReview(img)
-                        const isQc = (d: string): boolean => (QC_MANUAL_DIMENSIONS as string[]).includes(d)
-                        return (manual ? sortManualQcFirst(tags) : sortTagsPersonFirst(tags)).map(([d]) => (
-                          <DimTag key={d} dim={d} faded={manual && !isQc(d)} />
-                        ))
-                      })()}
-                      {!tags.length && <span className="text-fg3">—</span>}
+                      {/* 精简模式与卡片同口径：瑕疵收成一枚橙签，不再逐项点名 */}
+                      {slim ? (
+                        <SlimTags img={img} />
+                      ) : (
+                        (() => {
+                          const manual = needsManualReview(img)
+                          const isQc = (d: string): boolean => (QC_MANUAL_DIMENSIONS as string[]).includes(d)
+                          return (manual ? sortManualQcFirst(tags) : sortTagsPersonFirst(tags)).map(([d]) => (
+                            <DimTag key={d} dim={d} faded={manual && !isQc(d)} />
+                          ))
+                        })()
+                      )}
+                      {!tags.length && !slim && <span className="text-fg3">—</span>}
                     </div>
                   </td>
                   <td className="border-b border-line/50 px-2 py-1 align-middle">
@@ -1036,9 +1109,12 @@ export default function ImageView(): JSX.Element {
                   <td className="border-b border-line/50 px-2 py-1 align-middle">
                     <StatusPill status={img.status} scanning={isCurrent} />
                   </td>
-                  <td className="border-b border-line/50 px-2 py-1 align-middle">
-                    <TagBtn img={img} variant="plain" />
-                  </td>
+                  {/* 精简模式取消了标签管理，按钮列整列不渲染（不留空列） */}
+                  {!slim && (
+                    <td className="border-b border-line/50 px-2 py-1 align-middle">
+                      <TagBtn img={img} variant="plain" />
+                    </td>
+                  )}
                 </tr>
               )
             })}
@@ -1109,6 +1185,7 @@ function MasonryThumb(props: { img: ImageRecord; index: number; onClick: (i: num
   const { img, index, onClick, onDoubleClick, dragIds } = props
   const selected = useStore((s) => s.selection.has(img.id))
   const scanCurrent = useStore((s) => (s.scanProgress?.running && s.scanProgress.phase === 'scanning' ? s.scanProgress.current : ''))
+  const slim = useStore((s) => s.settings.uiMode === 'slim')
   const isScanning = !!scanCurrent && img.filename === scanCurrent
   const ratio = img.width && img.height ? img.width / img.height : 1
   return (
@@ -1141,7 +1218,7 @@ function MasonryThumb(props: { img: ImageRecord; index: number; onClick: (i: num
       <ManualFlag img={img} />
       <DupParkFlag img={img} />
       {isScanning && (
-        <span className={'absolute left-1 z-10 px-1.5 py-0.5 rounded bg-red-500 text-white text-[10px] font-bold animate-pulse shadow ' + (hasCornerFlag(img) ? 'top-[26px]' : 'top-1')}>检测中</span>
+        <span className={'absolute left-1 z-10 px-1.5 py-0.5 rounded bg-red-500 text-white text-[10px] font-bold animate-pulse shadow ' + (hasCornerFlag(img, slim) ? 'top-[26px]' : 'top-1')}>检测中</span>
       )}
       <StatusRibbon img={img} />
       <TagChips img={img} />

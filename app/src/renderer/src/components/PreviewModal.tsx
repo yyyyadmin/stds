@@ -19,6 +19,7 @@ import {
   CAT_REVIEW,
   CAT_TRASH,
   DIMENSION_LABELS,
+  MANUAL_FLAW_DIM,
   isBadDim,
   type DimensionKey,
   type FaceInfo,
@@ -41,6 +42,9 @@ export default function PreviewModal(): JSX.Element | null {
   const stepPreview = useStore((s) => s.stepPreview)
   const openPreview = useStore((s) => s.openPreview)
   const settings = useStore((s) => s.settings)
+  // 精简模式（用户 2026-10-20）：取消标签管理（右栏不摆标签编辑器），
+  // 判定只留「移入瑕疵片 / 移入交付库」两个直接动作，底部拍摄参数照旧保留
+  const slim = settings.uiMode === 'slim'
   const selection = useStore((s) => s.selection)
   const toggleSelect = useStore((s) => s.toggleSelect)
   // 标记叠加开关提到全局 store：切换图片 / 关闭重开大图都保持上次选择（本次筛选全程记忆）
@@ -348,16 +352,30 @@ export default function PreviewModal(): JSX.Element | null {
           </button>
         </div>
 
-        {/* 右侧：当前判定 + 标签管理 + 判定工具 + 拍摄参数（370px，大字号）
+        {/* 右侧：当前判定 + 标签管理（标准模式） + 判定工具 + 拍摄参数（370px，大字号）
             背景一律用不透明主题面板：以前是 bg-black/60 半透黑玻璃，浅色主题下 TagEditor /
             JudgmentBar 这些用主题令牌的组件会白字压白底，整栏看不见 */}
         <aside className="w-[370px] shrink-0 overflow-y-auto rounded-lg bg-panel border border-line p-4 flex flex-col gap-7">
           {/* 当前判定：小标签 + 一个着色粗体结论词。以前是“文字+芯片”一行，芯片和
-              标签区的彩色芯片撞脸分不清主次；现在结论词就是本栏最大的字，层级靠排版成立 */}
+              标签区的彩色芯片撞脸分不清主次；现在结论词就是本栏最大的字，层级靠排版成立。
+              精简模式：所有瑕疵统一叫「瑕疵」，具体命中哪几项跟在后面小字列出 */}
           <div className="flex items-baseline gap-2 flex-wrap">
             <span className="text-xs text-fg3">当前判定</span>
             {primaryDim ? (
-              <span className="text-lg font-bold text-bad">{DIMENSION_LABELS[primaryDim]}</span>
+              slim ? (
+                <>
+                  <span className="text-lg font-bold text-orange-500">瑕疵</span>
+                  {primaryDim !== MANUAL_FLAW_DIM && (
+                    <span className="text-xs text-fg3">
+                      {BAD_DIMENSIONS.filter((d) => d !== MANUAL_FLAW_DIM && img.tags?.[d] && img.tags[d]!.level !== 'low')
+                        .map((d) => DIMENSION_LABELS[d])
+                        .join('、')}
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span className="text-lg font-bold text-bad">{DIMENSION_LABELS[primaryDim]}</span>
+              )
             ) : img.category === CAT_TRASH ? (
               <span className="text-lg font-bold text-fg3">废弃库</span>
             ) : img.category === CAT_REVIEW ? (
@@ -370,8 +388,9 @@ export default function PreviewModal(): JSX.Element | null {
 
           {/* 标签单页三区（当前/人物切换/点加），组件自带区标题不再另写说明；
               定位针锚点取“正在浏览的分类”而非图的主分类：并集视图里图可能主分类是待确认、
-              靠“闭眼”标签才在当前列表——用主分类当锚点会漏标 */}
-          <TagEditor imgs={[img]} anchorDim={anchorDimOfCategory(activeCategory) ?? primaryDim} size="lg" />
+              靠“闭眼”标签才在当前列表——用主分类当锚点会漏标。
+              精简模式不提供标签管理，这一整块不渲染 */}
+          {!slim && <TagEditor imgs={[img]} anchorDim={anchorDimOfCategory(activeCategory) ?? primaryDim} size="lg" />}
 
           {/* 判定操作工具栏：紧跟标签信息下方，2×2 大按钮 */}
           <div className="pt-3 border-t border-line flex flex-col gap-2">

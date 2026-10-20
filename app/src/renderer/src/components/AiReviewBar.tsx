@@ -24,6 +24,12 @@
  * 在小屏上整条占了近一行高；层级靠字号差与大数字拉开，不靠尺寸堆砌。
  *
  * 五态互斥：运行中 → 就地反馈 → 额度确认 → 结论待确认 → 空闲（含“全部已结案”与“仅剩人工裁定”）
+ *
+ * 精简模式（settings.uiMode==='slim'）：不给人确认入口——复审跑完由 store.settleSlimAiReview
+ * 自动采纳并归位；但「跑复审」这个动作要保留（用户 10-20：精简模式同样要能手动复审），
+ * 所以运行态、就地反馈与待确认 / 瑕疵片两页的「立即复审 / 再次AI复审」照常出现。
+ * 瑕疵片也要有（用户 10-20 补充）：人工移入的瑕疵只有云端能再核一遍，判完自动采纳，
+ * 云端否掉的瑕疵会撤销标签、图自动离开本栏。
  */
 import { useState } from 'react'
 import { useStore, hasAiReviewDiff, hasAiReviewAction, aiReviewShouldHome, needsManualReview } from '../store'
@@ -40,6 +46,7 @@ export default function AiReviewBar(): JSX.Element | null {
   const stopAiReview = useStore((s) => s.stopAiReview)
   const reopenSummary = useStore((s) => s.reopenAiReviewSummary)
   const feedback = useStore((s) => s.aiReviewFeedback)
+  const slim = useStore((s) => s.settings.uiMode === 'slim')
   const [confirmRerun, setConfirmRerun] = useState(false)
 
   // 只在待确认 / 瑕疵片两页出现，且本页作用域就是当前分类
@@ -92,6 +99,47 @@ export default function AiReviewBar(): JSX.Element | null {
       <div className={shell}>
         <span className="text-sm font-semibold text-orange-400">{feedback}</span>
         <button className="btn text-sm px-3.5 py-1.5 whitespace-nowrap" onClick={() => useStore.setState({ aiReviewFeedback: null })}>知道了</button>
+      </div>
+    )
+  }
+
+  // 精简模式（用户 10-20）：结果自动采纳归位，不弹确认面板；但复审入口要留下——
+  // 待确认 / 瑕疵片两页都显示本栏还剩多少张没判，点一下直接提交（不再走“重判前确认额度”那一屏）。
+  if (slim) {
+    if (!inScope.length) return null
+    const doneAll = unjudgedCount === 0
+    const slimFlaws = activeCategory === 'flaws'
+    return (
+      <div className={shell}>
+        <span className="text-sm text-fg2">
+          {doneAll ? (
+            <>本栏 <strong className="text-base font-bold text-fg tabular-nums">{judgedCount}</strong> 张已完成云端复核</>
+          ) : (
+            <>本栏 <strong className="text-base font-bold text-fg tabular-nums">{unjudgedCount}</strong> 张尚未复核</>
+          )}
+          <span className="text-xs text-fg3 ml-2.5">
+            {slimFlaws ? '复核完自动写回判定，云端否掉的瑕疵自动撤销' : '复核完自动写回判定并归位，不用逐张确认'}
+          </span>
+        </span>
+        {doneAll ? (
+          rerunnable > 0 && (
+            <button
+              className="btn-warn text-sm px-3.5 py-1.5 whitespace-nowrap"
+              onClick={() => void startAiReview(scope, true)}
+              title="再次 AI 复审：重判本栏尚未结案的照片（含判过没表态的），重新消耗今日额度；跑完自动归位"
+            >
+              再次AI复审
+            </button>
+          )
+        ) : (
+          <button
+            className="btn-primary text-sm px-3.5 py-1.5 whitespace-nowrap"
+            onClick={() => void startAiReview(scope)}
+            title="AI 复审（会员专属，计入每日额度）：复核本栏尚未判过的照片；跑完自动写回判定并归位"
+          >
+            立即复审
+          </button>
+        )}
       </div>
     )
   }

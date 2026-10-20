@@ -138,10 +138,128 @@ function Key({ children }: { children: ReactNode }): JSX.Element {
 }
 
 /**
+ * 精简模式的九步。锚点与标准版完全一致（界面还是同一套元素，只是侧栏少了入口），
+ * 文案只讲精简下真实存在的东西——没有三档、重复照片、瑕疵分类、废片、标签管理、采纳弹窗。
+ */
+function buildSlimSteps(): Step[] {
+  return [
+    {
+      tour: 'account',
+      prefer: 'below',
+      title: '第 1 步 · 先登录',
+      lead: <>右上角这一颗。没登录时它写着「登录 / 注册」，登录以后变成你的会员身份名。</>,
+      lines: [
+        { term: '新注册送 500 积分', text: '手机号或邮箱都行，收 6 位验证码、自定至少 6 位密码，填完自动登录。' },
+        { term: '只有「开始筛选」扣积分', text: '1 张照片 = 1 积分；导入、浏览、手动分类、导出都不收费。' },
+        { term: '会员才有的两件事', text: '筛选不扣积分；筛完的 AI 复审也不扣积分，只占每日复审额度。' },
+      ],
+      note: '想先逛逛也可以：登录框里有「暂不登录，先逛逛」，能先导入和浏览，但开始筛选要先登录。',
+    },
+    {
+      tour: 'import',
+      prefer: 'below',
+      title: '第 2 步 · 导入照片',
+      lead: <>顶栏左上角这颗按钮。把这次要筛的照片先放进软件。</>,
+      lines: [
+        { term: '点它选文件', text: '单张、多选，或者整个文件夹（勾选后连子文件夹一起收）。' },
+        { term: '也可以直接拖', text: '把照片或文件夹拖进窗口，松手就开始导入。' },
+        { term: '支持的格式', text: 'JPG、PNG、WEBP、TIFF、BMP、iPhone HEIC，以及佳能 CR2 / CR3、尼康 NEF、索尼 ARW、富士 RAF 等各家 RAW。' },
+      ],
+      note: '导入只建索引、生成缩略图，磁盘上的原始照片一个字节都不会被改，这一步不收费。',
+    },
+    {
+      tour: 'scan',
+      prefer: 'below',
+      title: '第 3 步 · 开始筛选',
+      lead: <>全流程唯一扣积分的一步，也是 AI 真正干活的一步。</>,
+      lines: [
+        { term: 'AI 逐张在看', text: '闭眼、画面模糊、曝光过亮过暗、半截头、表情崩坏、画面里有几个人、是不是黑白，另外给清晰度打分。' },
+        { term: '跑完会自动过一遍云端复审', text: '精简模式下，「待确认」里的图会被 AI 复审自动处理：判稳的直接归位到交付库或瑕疵片，不用你逐张拍板。' },
+        { term: '中途能停', text: '跑起来这颗按钮会变成「停止」；下次再点开始筛选会自己接着跑，筛过的不重跑、不重复扣分。' },
+      ],
+      note: 'AI 复审是会员功能，第一次要先同意「照片压缩后上传」。没开通会员也不影响筛选，只是待确认会保持原样，需要你自己处理。',
+    },
+    {
+      tour: 'review',
+      prefer: 'right',
+      title: '第 4 步 · 待确认：基本不用你操心',
+      lead: <>左侧栏「待确认」这一行，装的是 AI 拿不准该归哪类的照片。</>,
+      lines: [
+        { term: '精简模式下它会被自动清空', text: '云端复审核一遍后，判稳的归位；剩下犹豫、且是画面模糊或曝光异常的，直接算瑕疵片。' },
+        { term: '想自己拍板也很快', text: '点开这一栏，选中后底部只有两个动作：「✓ 移入交付库」「✗ 移入瑕疵片」。' },
+        { term: '没清空是正常的', text: '没开通会员、没同意上传、或者这张缺人数归属时，它会留在这里等你亲手处理——软件不会假装处理过。' },
+      ],
+    },
+    {
+      tour: 'library',
+      prefer: 'right',
+      title: '第 5 步 · 交付库：能交出去的',
+      lead: <>这一栏是 AI 认为能用、默认参与导出的照片。精简模式不再分优质 / 良好 / 一般三档。</>,
+      lines: [
+        { term: '整栏都能导', text: '没有档位要选，点顶栏「导出交付」选「仅交付库」就整栏打包。' },
+        { term: '放错了怎么改', text: '选中那张，点底部或大图右栏的「✗ 移入瑕疵片」即可；反过来在瑕疵片里点「✓ 移入交付库」就放行。' },
+        { term: '想按人数找图', text: '侧栏下面「人物分类」四行，每行末尾有个「导出」，只导这一栏里能交付的照片。' },
+      ],
+    },
+    {
+      tour: 'result',
+      prefer: 'right',
+      title: '第 6 步 · 这三栏加起来 ≈ 全部照片',
+      lead: <>「筛选结果」按交付去向分栏，一张照片只进其中一栏。</>,
+      lines: [
+        { term: '交付库 / 待确认 / 瑕疵片', text: '三种互不重复的去向，三栏数字相加就是全部照片。瑕疵片默认不导出。' },
+        { term: '最上面的「全部文件」', text: '整库总览，点它回到全局视图。' },
+        { term: '下面的「人物分类」', text: '按画面人数换个角度再看一遍，同一张图会在两边都出现，所以不能跟上面三栏相加。' },
+      ],
+      note: '精简模式没有交付库三档、重复照片、黑白照、瑕疵分类、废弃库和自定义分类。要用这些入口，去设置 → 使用模式切回「标准模式」，图库一张都不会动。',
+    },
+    {
+      tour: 'thumb',
+      prefer: 'below',
+      title: '第 7 步 · 改判要快，靠这几下',
+      lead: <>中间这片就是看图、改判的地方（现在亮着的是列表里的第一张）。</>,
+      lines: [
+        { term: '选片', text: <>精简模式单击就能多选：点一张加一张，再点一下取消，不用按 Ctrl；<Key>Ctrl</Key>+<Key>A</Key> 全选，<Key>Esc</Key> 清空选中。</> },
+        { term: '改判', text: '选中后底部只有两个动作；双击打开大图，右栏也是同样两个动作，拍摄参数在下面照旧能看。' },
+        { term: '批量', text: '选中一批后，两个动作对整批生效；也能整批拖到左侧「待确认」或某个人物分类行上。' },
+        { term: '反悔', text: <>移动过照片后顶栏「↩ 撤回」会变亮，可以连着多退几步。精简模式没有废弃库入口，所以别顺手按 <Key>Delete</Key>。</> },
+      ],
+      note: <>一行摆几张，用顶栏「一行 N 张」按钮直接选，也能按住 <Key>Ctrl</Key> 滚轮缩放；双击任意小图看大图。</>,
+    },
+    {
+      tour: 'export',
+      prefer: 'below',
+      title: '第 8 步 · 导出交付',
+      lead: <>确认完就出片，导出不收费。</>,
+      lines: [
+        { term: '选范围', text: '只有两种：「仅交付库」或「全部文件」。面板下方实时显示将导出多少张、大约多大。' },
+        { term: '默认原格式', text: 'RAW 还是 RAW，不压缩、不转格式；也可以统一转 JPG / PNG，或保留原文件名、重名自动加序号。' },
+        { term: '目录结构', text: '精简模式不按档位建子文件夹，全部平铺到一个文件夹里。' },
+      ],
+      note: '「待确认」里的照片不会被顺手带走，也不会拦着不让你导出。',
+    },
+    {
+      // 教程中心在侧栏最底部：卡片改放上方，手指朝下戳住它
+      tour: 'tutorial',
+      prefer: 'above',
+      title: '第 9 步 · 忘了就看这里',
+      lead: <>侧栏最底下这两枚按钮，一个给文档，一个给带路。</>,
+      lines: [
+        { term: '📖 教程中心', text: '七章完整文档；它会跟着当前模式讲——精简模式不会讲三档、重复照片这些找不到的入口。' },
+        { term: '🎓 新手指导', text: '就是你现在看到的这套手指指着走的带路；关掉之后随时能从这里重放。' },
+        { term: '问价、开通、充值', text: '教程中心左下角就是客服二维码，扫码找人。' },
+      ],
+      note: '点右下角「开始使用」或右上角 × 都能出去，你的照片一张都不会动。',
+    },
+  ]
+}
+
+/**
  * 九步。每步都锚在界面上真实存在的位置，文案只讲“这里是什么、你要做什么”。
  * 档位名从设置里读（用户可以自己改三档叫法），否则会出现引导跟侧栏各说一套。
  */
-function buildSteps(tierNames: string[]): Step[] {
+function buildSteps(tierNames: string[], slim: boolean): Step[] {
+  if (slim) return buildSlimSteps()
   const n1 = tierNames[0] || DEFAULT_TIER_NAMES[0]
   const n2 = tierNames[1] || DEFAULT_TIER_NAMES[1]
   const n3 = tierNames[2] || DEFAULT_TIER_NAMES[2]
@@ -264,6 +382,8 @@ export default function OnboardingGuide(): JSX.Element | null {
   const updateOpen = useStore((s) => s.showUpdate)
   const close = useStore((s) => s.closeOnboarding)
   const tierNames = useStore((s) => s.settings.tierNames)
+  /** 引导内容跟着模式走：精简模式下侧栏没有三档/重复照片/废弃库，文案不能照标准版念（用户 10-20 指出） */
+  const slim = useStore((s) => s.settings.uiMode === 'slim')
   /** 暂停态存在 store 里：App 的全局快捷键要据此放开（暂停时用户可以随便按） */
   const paused = useStore((s) => s.onboardingPaused)
   const pause = useStore((s) => s.pauseOnboarding)
@@ -274,7 +394,7 @@ export default function OnboardingGuide(): JSX.Element | null {
   const cardRef = useRef<HTMLDivElement | null>(null)
   const [cardH, setCardH] = useState(280)
 
-  const steps = buildSteps(tierNames?.length ? tierNames : DEFAULT_TIER_NAMES)
+  const steps = buildSteps(tierNames?.length ? tierNames : DEFAULT_TIER_NAMES, slim)
   const step = steps[Math.min(idx, steps.length - 1)]
   const last = idx >= steps.length - 1
 

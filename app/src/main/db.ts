@@ -27,6 +27,7 @@ import {
   CAT_REVIEW,
   CAT_TRASH,
   CAT_DUP_TRASH,
+  MANUAL_FLAW_DIM,
   isTrashLike,
   isBadDim,
   flawLevel,
@@ -308,12 +309,16 @@ function matchesView(r: ImageRecord, cat: CategoryKey): boolean {
   // 档位子视图（D4）：交付库 ∩ 档位相等（档位在 isDeliverable 内部，不另判 trash/review）
   const tierN = tierOfCat(cat)
   if (tierN) return isDeliverable(r.category, r.tags) && r.tier === tierN
-  // 停在待确认拍板位的（重复组代表帧）不再同时出现在瑕疵片：一题只让用户答一次
-  if (cat === CAT_FLAWS) return !isTrashLike(r.category) && r.category !== CAT_REVIEW && fl === 'high'
+  // 停在待确认拍板位的（重复组代表帧）不再同时出现在瑕疵片：一题只让用户答一次。
+  // 例外：带泛化「瑕疵」标记的图是用户在精简模式里亲手指定进瑕疵片的，哪怕它没有人数归属、
+  // 主分类只能停在待确认，也要落到瑕疵片（并在待确认里让位，见下一个分支）
+  const manualFlaw = !!r.tags[MANUAL_FLAW_DIM] && r.tags[MANUAL_FLAW_DIM]!.level !== 'low'
+  if (cat === CAT_FLAWS) return !isTrashLike(r.category) && (r.category !== CAT_REVIEW || manualFlaw) && fl === 'high'
   if (cat === CAT_REVIEW) {
     // v2.0.93 反转：不再把冗余帧排除在待确认外。干净冗余帧靠 isDeliverable 已进交付库（不命中此分支）；
     // 只有带中置信瑕疵的冗余帧才会落到这里（fl==='mid'），它确实需要用户复核，与侧栏计数同口径。
     if (isTrashLike(r.category)) return false
+    if (manualFlaw) return false
     return r.category === CAT_REVIEW || fl === 'mid'
   }
   if (isDimCat(cat)) {
@@ -716,7 +721,9 @@ export function categoryCounts(): Record<string, number> {
     const fl = flawLevel(tags)
     if (!isTrashLike(r.category)) {
       if (isDupRedundant(tags) || r.category === 'duplicate') dupGroups.add(r.dup_group || `single:${r.id}`)
-      if (fl === 'high' && r.category !== CAT_REVIEW) flaws += 1
+      // 泛化「瑕疵」标记（精简模式人工移入）：与 matchesView 同口径，停在待确认也算瑕疵片
+      const manualFlaw = !!tags[MANUAL_FLAW_DIM] && tags[MANUAL_FLAW_DIM]!.level !== 'low'
+      if (fl === 'high' && (r.category !== CAT_REVIEW || manualFlaw)) flaws += 1
       else if (r.category === CAT_REVIEW || fl === 'mid') review += 1
       else if (isDeliverable(r.category, tags)) {
         lib += 1 // 与交付库视图/导出同一函数口径，含旧坏维度孤儿排除

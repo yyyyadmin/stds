@@ -19,7 +19,7 @@ import { useStore } from '../store'
 import { dimTagColor } from './Sidebar'
 import { toSrc } from './imageSrc'
 import {
-  BAD_DIMENSIONS,
+  UI_BAD_DIMENSIONS,
   DIMENSION_LABELS,
   NEUTRAL_DIMENSIONS,
   PERSON_DIMS,
@@ -27,8 +27,8 @@ import {
   type ImageRecord
 } from '../../../shared/types'
 
-/** 可手动添加的维度：重复由重复分组视图管理，不出现在这里 */
-const ADDABLE: DimensionKey[] = [...BAD_DIMENSIONS.filter((d) => d !== 'duplicate'), ...NEUTRAL_DIMENSIONS]
+/** 可手动添加的维度：重复由重复分组视图管理，也不出现泛化「瑕疵」（只给精简模式移入瑕疵片用） */
+const ADDABLE: DimensionKey[] = [...UI_BAD_DIMENSIONS.filter((d) => d !== 'duplicate'), ...NEUTRAL_DIMENSIONS]
 
 /** 人物之外的可加标签（黑白是影调事实，跟瑕疵标签同区管理；人数四维走中间的切换按钮区） */
 const TAG_DIMS: DimensionKey[] = ADDABLE.filter((d) => !PERSON_DIMS.includes(d))

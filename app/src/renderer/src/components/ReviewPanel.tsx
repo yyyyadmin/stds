@@ -31,6 +31,7 @@ import { dimTagColor } from './Sidebar'
 import { toSrc } from './imageSrc'
 import {
   BAD_DIMENSIONS,
+  UI_BAD_DIMENSIONS,
   CAT_FLAWS,
   DIMENSION_LABELS,
   PERSON_DIMS,
@@ -39,8 +40,8 @@ import {
   type ImageRecord
 } from '../../../shared/types'
 
-/** 可逐项重判的瑕疵维度：重复由重复/连拍分组管理，不出现在这里（共 5 项） */
-const FLAW_CHOICES: DimensionKey[] = BAD_DIMENSIONS.filter((d) => d !== 'duplicate')
+/** 可逐项重判的瑕疵维度：重复由重复/连拍分组管理，泛化「瑕疵」也不是可选项，都不出现在这里 */
+const FLAW_CHOICES: DimensionKey[] = UI_BAD_DIMENSIONS.filter((d) => d !== 'duplicate')
 
 /** 图当前可见的人数标签（低置信不视为已判）；旧数据 category 恰为人数维时兜底 */
 function visiblePerson(img: ImageRecord): DimensionKey | null {

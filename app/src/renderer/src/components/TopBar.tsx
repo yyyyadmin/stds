@@ -1,5 +1,5 @@
 /**
- * 顶栏：导入（单图/多选/文件夹三合一入口）/ 开始筛选（进度条+百分比+已处理数量+停止）/ 视图切换 / 排序 / 导出 / 设置
+ * 顶栏：使用模式切换 / 导入（单图/多选/文件夹三合一入口）/ 开始筛选（进度条+百分比+已处理数量+停止）/ 视图切换 / 排序 / 导出 / 设置
  * 引擎状态徽章（Python 完整引擎 / Node 基础引擎 / GPU-CPU）
  *
  * 宽度适配（笔记本上曾经把按钮挤成“一行一个字”，原因见下）：中文可以在任意字间断行，
@@ -66,6 +66,8 @@ function GridColsPicker(): JSX.Element {
 
 export default function TopBar(): JSX.Element {
   const s = useStore()
+  /** 使用模式（用户 2026-10-20 定）：old 设置文件没这个字段一律算标准 */
+  const mode = s.settings.uiMode ?? 'normal'
   const p = s.scanProgress
   const running = p?.running
   const pct = p && p.total > 0 ? Math.round((p.done / p.total) * 100) : 0
@@ -172,6 +174,33 @@ export default function TopBar(): JSX.Element {
 
   return (
     <header className="shrink-0 bg-panel border-b border-line px-3 py-2 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-sm">
+      {/* 使用模式切换（用户 2026-10-20 定）：放最左上、导入前面，一眼看得见一按就切。
+          两个选项共用一个外框，选中项填底色——算一个控件，不是两块方框 */}
+      <div
+        className="inline-flex shrink-0 items-center rounded-md border border-line bg-panel2 p-0.5 text-xs"
+        title="标准：全部入口，交付库分三档；精简：只留 交付库 / 待确认 / 瑕疵片 和人物分类，待确认交给 AI 自动复审并归位"
+      >
+        <button
+          type="button"
+          className={
+            'px-2 py-1 rounded transition-colors ' +
+            (mode === 'normal' ? 'bg-brand text-white font-semibold' : 'text-fg3 hover:text-fg2')
+          }
+          onClick={() => void s.setUiMode('normal')}
+        >
+          标准模式
+        </button>
+        <button
+          type="button"
+          className={
+            'px-2 py-1 rounded transition-colors ' +
+            (mode === 'slim' ? 'bg-brand text-white font-semibold' : 'text-fg3 hover:text-fg2')
+          }
+          onClick={() => void s.setUiMode('slim')}
+        >
+          精简模式
+        </button>
+      </div>
       <div className="relative shrink-0" ref={importRef}>
         <button
           className="btn"
@@ -329,6 +358,8 @@ export default function TopBar(): JSX.Element {
       {/* AI 复审开关（会员专属）：放在筛选目录前。非会员灰锁按钮→会员中心；会员真开关（首次开启弹授权） */}
       {(() => {
         const enabled = !!s.settings.aiReviewEnabled
+        // 精简模式（用户 2026-10-20 定）：复审结果自动采纳并归位，不等人确认，文案要说清这一点
+        const slim = s.settings.uiMode === 'slim'
         // 今日剩余复审张数：只在“正在跑”时用进度里的实时值（它逐批刷新，比再发一次 /me 及时）；
         // 跑完就改回登录态里 user_info 的 ai_review.remaining——那是后端记账的权威值，收尾时已重拉过。
         // 上一版不分在跑/已停：进度对象跑完并不清空，于是一整轮后顶栏永远拿着进度里那个数，
@@ -351,8 +382,12 @@ export default function TopBar(): JSX.Element {
                   ? 'AI 复审为会员专属功能，点击了解会员'
                   : 'AI 复审为会员专属功能：未登录看不到套餐列表，点这里直接扫码问客服怎么开通'
                 : enabled
-                  ? `AI 复审已开启：分类完成后自动将「待确认」照片提交云端复核，仅生成结论，经确认后方写回判定${remaining != null ? `；今日额度剩 ${remaining} 张` : ''}`
-                  : `开启 AI 复审：分类完成后自动将「待确认」照片提交云端模型二次核验，仅生成结论，经确认后方写回判定${remaining != null ? `；今日额度剩 ${remaining} 张` : ''}`
+                  ? slim
+                    ? `AI 复审已开启（精简模式）：分类完成后自动将「待确认」照片提交云端复核，复核完自动写回判定并归位${remaining != null ? `；今日额度剩 ${remaining} 张` : ''}`
+                    : `AI 复审已开启：分类完成后自动将「待确认」照片提交云端复核，仅生成结论，经确认后方写回判定${remaining != null ? `；今日额度剩 ${remaining} 张` : ''}`
+                  : slim
+                    ? `开启 AI 复审（精简模式）：分类完成后自动将「待确认」照片提交云端复核，复核完自动写回判定并归位${remaining != null ? `；今日额度剩 ${remaining} 张` : ''}`
+                    : `开启 AI 复审：分类完成后自动将「待确认」照片提交云端模型二次核验，仅生成结论，经确认后方写回判定${remaining != null ? `；今日额度剩 ${remaining} 张` : ''}`
             }
             onClick={() => {
               if (isMember) s.toggleAiReview()
@@ -516,7 +551,7 @@ export default function TopBar(): JSX.Element {
       <button
         className="btn-primary shrink-0 inline-flex items-center gap-1.5 disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-brand"
         data-tour="export"
-        onClick={() => void useStore.setState({ showExport: true })}
+        onClick={() => void useStore.setState({ showExport: true, exportPreset: null })}
         disabled={s.counts.all === 0}
         title="导出交付：把选中的分类导出到指定文件夹"
       >
@@ -544,7 +579,7 @@ export default function TopBar(): JSX.Element {
               ? 'engine-live engine-glow engine-sheen text-white !px-3 !text-[13px] font-bold tracking-wide'
               : s.engineBusy
                 ? 'engine-busy-glow bg-yellow-900/60 text-yellow-200 !px-2.5 !text-[12px]'
-                : 'engine-ready-glow bg-emerald-900/60 text-emerald-200 !px-2.5 !text-[12px]')
+                : 'bg-emerald-900/60 text-emerald-200 !px-2.5 !text-[12px]')
         }
         title={
           s.engineType === 'node'

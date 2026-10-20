@@ -18,6 +18,7 @@ import { useStore } from '../store'
 import { useOutsideClose } from './useOutsideClose'
 import {
   BAD_DIMENSIONS,
+  CAT_FLAWS,
   CAT_LIBRARY,
   CAT_REVIEW,
   CAT_TRASH,
@@ -40,6 +41,9 @@ export default function SelectionBar(): JSX.Element | null {
   const dismissTrashAsk = useStore((s) => s.dismissTrashAsk)
   const openTagManager = useStore((s) => s.openTagManager)
   const openReviewPanel = useStore((s) => s.openReviewPanel)
+  // 精简模式（用户 2026-10-20）：取消档位/废弃库/重判/标签管理，只留两个直接动作——
+  // 「移入交付库」与「移入瑕疵片」
+  const slim = useStore((s) => s.settings.uiMode === 'slim')
   const selectNone = useStore((s) => s.selectNone)
   const invertSelection = useStore((s) => s.invertSelection)
   const selectAll = useStore((s) => s.selectAll)
@@ -90,6 +94,37 @@ export default function SelectionBar(): JSX.Element | null {
           {allSelected ? '取消全选' : '全选'}
         </button>
 
+        {slim ? (
+          <>
+            {inTrash ? (
+              <button className="btn" onClick={() => void useStore.getState().restoreFromTrash()} title="从废弃库还原回交付库">
+                ♻️ 还原
+              </button>
+            ) : (
+              <>
+                {activeCategory !== CAT_FLAWS && (
+                  <button
+                    className="btn bg-orange-500 hover:bg-orange-600 text-white border-transparent font-medium whitespace-nowrap"
+                    onClick={() => void moveTo(CAT_FLAWS)}
+                    title="把选中的图移入【瑕疵片】：不参与导出、不进交付库（之后可在瑕疵片里再移回交付库）"
+                  >
+                    ✗ 移入瑕疵片
+                  </button>
+                )}
+                {activeCategory !== CAT_LIBRARY && (
+                  <button
+                    className="btn bg-emerald-700 hover:bg-emerald-600 text-white border-transparent font-medium whitespace-nowrap"
+                    onClick={() => void moveTo(CAT_LIBRARY)}
+                    title="把选中的图移入【交付库】：清除闭眼/模糊/曝光等瑕疵标签，参与导出"
+                  >
+                    ✓ 移入交付库
+                  </button>
+                )}
+              </>
+            )}
+          </>
+        ) : (
+          <>
         {inTrash ? (
           <button className="btn" onClick={() => void useStore.getState().restoreFromTrash()} title="从废弃库还原回交付库">
             ♻️ 还原
@@ -186,6 +221,8 @@ export default function SelectionBar(): JSX.Element | null {
         <span className="text-[10px] text-gray-600 hidden md:inline whitespace-nowrap">
           也可拖拽缩略图到左侧任意分类（含待确认、自定义相册；多选时拖一张=整批走）
         </span>
+          </>
+        )}
       </div>
     </div>
   )

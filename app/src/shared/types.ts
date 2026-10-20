@@ -3,6 +3,13 @@
  * 主进程 / 预加载 / 渲染进程 / Python 引擎协议均以此为准
  */
 
+/**
+ * 泛化瑕疵标记（用户 2026-10-20 定）：只给“精简模式”的「移入瑕疵片」用——用户只说这张不行，
+ * 不指定闭眼/模糊哪一项。写进 tags 时恒为高置信，由 flawLevel 拦交付、落瑕疵片；
+ * 它不是一个检测维度（引擎永远不产出），也不出现在任何分类入口/勾选表里（见 UI_BAD_DIMENSIONS）。
+ */
+export const MANUAL_FLAW_DIM = 'manual_flaw'
+
 /** 12 个检测维度（第一章/第二章） */
 export type DimensionKey =
   | 'eyes_closed' // 闭眼
@@ -17,6 +24,7 @@ export type DimensionKey =
   | 'mixed_photo' // 多人混合照（在场多人但非摆拍：接亲 / 游戏 / 仪式等互动情节）
   | 'no_person' // 无人物场景
   | 'black_white' // 黑白照
+  | typeof MANUAL_FLAW_DIM // 泛化瑕疵（仅精简模式人工标记）
 
 /** 坏维度：命中即打“瑕疵标签”，落入瑕疵片视图、默认不导出（D2 后不再充当主分类，只管导出闸门）。
  *  注：斜眼(eyes_side) 已下线——引擎仍计算但按本数组过滤，不再产标签/分类/侧栏/导出项；
@@ -28,8 +36,16 @@ export const BAD_DIMENSIONS: DimensionKey[] = [
   'half_head',
   'face_ugly',
   'blur',
-  'exposure'
+  'exposure',
+  MANUAL_FLAW_DIM
 ]
+
+/**
+ * 界面上“可逐项勾选/复核”的瑕疵维度：泛化瑕疵标记不是一种可选的缺陷类型，
+ * 侧栏瑕疵分组、导出分类表、重判面板、标签编辑器都不该出现它。
+ * 后端口径（flawLevel / 清标签 / 导出闸门）仍用完整 BAD_DIMENSIONS。
+ */
+export const UI_BAD_DIMENSIONS: DimensionKey[] = BAD_DIMENSIONS.filter((d) => d !== MANUAL_FLAW_DIM)
 
 /**
  * 画质类维度（模糊 / 曝光）：云端 AI 复审压根不看这两项（提示词里明写“模糊/曝光/黑白一律不判”，
@@ -69,6 +85,8 @@ export const DIMENSION_LABELS: Record<DimensionKey, string> = {
   blur: '画面模糊',
   exposure: '曝光异常',
   half_head: '半截头',
+  // 精简模式把各项瑕疵统一显示成这一枚橙签；具体哪几项仍在 title 里
+  manual_flaw: '瑕疵',
   // 客户看到的分类名统一叫「重复照片」（用户 10-13 拍板）；内部 key 仍是 duplicate，零迁移
   duplicate: '重复照片',
   single_person: '单人照',
@@ -156,6 +174,7 @@ export const DIMENSION_BIAS: Record<DimensionKey, DimBias> = {
   blur: 'recall',
   exposure: 'high',
   half_head: 'recall',
+  manual_flaw: 'high',
   duplicate: 'recall',
   single_person: 'high',
   group_photo: 'high',
@@ -568,6 +587,12 @@ export interface AppSettings {
   dupPickMode?: 'drop' | 'keep'
   /** 性能模式（第二档 A1）：auto=探测到低配自动精简 / full=始终全特效 / lean=始终精简。不设=auto */
   perfMode?: 'auto' | 'full' | 'lean'
+  /**
+   * 使用模式（用户 2026-10-20 定）：
+   *  normal=完整功能（默认，现状不变）/ slim=精简交付（侧栏只留三栏+人物分类，
+   *  交付库不分档，待确认由 AI 复审自动采纳并归位，不再要人二次确认）。
+   */
+  uiMode?: 'normal' | 'slim'
   /** 重复/连拍选图模式的首次使用引导是否已看过 */
   dupGuideSeen?: boolean
   /** 重复/连拍分组弹窗宫格密度（记忆）：false=每排 4 张（默认）/ true=每排 2 张大图 */
@@ -661,6 +686,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   devicePreference: 'auto',
   autoTune: true,
   tunedThresholds: {},
+  uiMode: 'normal',
   viewMode: 'grid',
   theme: 'light',
   lastExportDir: null,

@@ -45,7 +45,7 @@ import { clearEngineInputCache } from './services/rawPreview'
 import { sweepCaches } from './services/cleanup'
 import { authManager } from './services/auth'
 import { engineManager } from './engine'
-import { CAT_LIBRARY, CAT_TRASH, CAT_FLAWS, CAT_REVIEW, isBadDim, isStructuralDim, isTrashLike, BAD_DIMENSIONS, SUPPORTED_EXTS, PERSON_DIMS, guessMidDim, tierOfCat, isDeliverable, flawLevel, type CategoryKey, type DimensionKey, type ImageRecord } from '../shared/types'
+import { CAT_LIBRARY, CAT_TRASH, CAT_FLAWS, CAT_REVIEW, MANUAL_FLAW_DIM, isBadDim, isStructuralDim, isTrashLike, BAD_DIMENSIONS, SUPPORTED_EXTS, PERSON_DIMS, guessMidDim, tierOfCat, isDeliverable, flawLevel, type CategoryKey, type DimensionKey, type ImageRecord } from '../shared/types'
 import { computeCategory } from './classify'
 
 /**
@@ -179,9 +179,29 @@ export function registerIpc(win: BrowserWindow): void {
     const moveOne = (id: number): void => {
       const rec = getImage(id)
       if (!rec) return
-      // 瑕疵片是"高置信瑕疵标签"派生的虚视图，不是一个可移入的归属（拖入侧栏已 noDrop）；
-      // 防御性忽略，避免把 category 写成 'flaws' 破坏"主分类=人数"不变式。
-      if (req.category === CAT_FLAWS) return
+      // 精简模式「移入瑕疵片」（用户 2026-10-20 定）：瑕疵片是“高置信瑕疵标签”派生的虚视图，
+      // 不能把 category 写成 'flaws'（会破坏“主分类=人数”不变式）。这里把用户这一次表态落成瑕疵标签：
+      //  · 已有可见瑕疵（闭眼/模糊/曝光/半截头/表情）→ 把最高置信那条提为高置信（人工确认）；
+      //  · 不论有没有具体瑕疵，都再补一枚泛化「瑕疵」标记（manual_flaw）——它是用户“这张归瑕疵片”的
+      //    明确表态，也保证没有人脸归属、主分类还停在待确认的图能真正落进瑕疵片（并在待确认里让位）。
+      // 随后按人数重算主分类——原本停在待确认的图会回落到人数栏；仍无人数归属的留在待确认，
+      // 由 db.matchesView 的 manual_flaw 分支保证它只出现在瑕疵片、不在待确认重复占位。
+      if (req.category === CAT_FLAWS) {
+        const visible = BAD_DIMENSIONS.filter((d) => d !== MANUAL_FLAW_DIM && rec.tags[d] && rec.tags[d]!.level !== 'low')
+        const top = visible.sort((a, b) => (rec.tags[b]!.confidence ?? 0) - (rec.tags[a]!.confidence ?? 0))[0]
+        if (top) {
+          const tag = rec.tags[top]!
+          setDimTag(id, top, { confidence: 1, level: 'high', reason: '用户移入瑕疵片', method: 'user', taggedAt: Date.now() })
+          // “这确实是坏片”＝ AI 判对了；手动标的标签不重复计样本
+          if (tag.method !== 'user') {
+            addCorrection({ imageId: id, origDim: top, origConfidence: tag.confidence, newCategory: CAT_FLAWS, action: 'correct', timestamp: Date.now() })
+          }
+        }
+        setDimTag(id, MANUAL_FLAW_DIM, { confidence: 1, level: 'high', reason: '用户移入瑕疵片', method: 'user', taggedAt: Date.now() })
+        const fresh = getImage(id)
+        if (fresh) setCategory(id, computeCategory(fresh.tags, s, { ...fresh, categoryBy: null } as ImageRecord), 'user')
+        return
+      }
       // 档位目标（D4 + 用户 10-13 规则：交付库不再是可直接移入的栏，只能移入它下面三个档位之一）。
       // 于是“移入档位”按图当前是否已在交付库分两种语义：
       //  · 已在交付库：只是改档（第三条轴 tier），不碰 category/tags/学习样本——与旧行为一致；
@@ -267,7 +287,11 @@ export function registerIpc(win: BrowserWindow): void {
       // 导出“只导出勾选分类”对维度分类走标签并集口径（exporter.matchesCat），删了就永久捞不出来——
       // 把一张单人照放行进交付库，不该顺手让它再也进不了“单独导出单人照”的清单。
       // 废弃库不清任何标签（保留废弃原因）；目标是坏维度时再补一个用户高置信标签。
-      if (req.clearBadTags !== false) {
+      // 精简模式「移入交付库」：已经能交付的图（含干净的重复帧）再点一次不该重跑“人工担保清标签”——
+      // 那会顺手把重复/连拍的分组标签抹掉。只对还差一口气的图清瑕疵标签放行。
+      // （正常模式走档位分支，从不直接发 CAT_LIBRARY，所以这条卫兵不影响旧行为）
+      const alreadyDelivered = req.category === CAT_LIBRARY && isDeliverable(rec.category, rec.tags)
+      if (req.clearBadTags !== false && !alreadyDelivered) {
         for (const dim of Object.keys(rec.tags)) {
           if (!isBadDim(dim) && !isStructuralDim(dim)) continue
           const tag = rec.tags[dim]

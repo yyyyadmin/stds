@@ -49,6 +49,8 @@ export default function AiReviewModal(): JSX.Element | null {
   const confirmAiReview = useStore((s) => s.confirmAiReview)
   const homeIfCleanParked = useStore((s) => s.homeIfCleanParked)
   const adoptAll = useStore((s) => s.adoptAllReviewSuggestions)
+  const slim = useStore((s) => s.settings.uiMode === 'slim')
+  const settleSlim = useStore((s) => s.settleSlimAiReview)
 
   const [compareOpen, setCompareOpen] = useState(false)
   const [currentId, setCurrentId] = useState<number | null>(null)
@@ -87,6 +89,22 @@ export default function AiReviewModal(): JSX.Element | null {
   const homeCount = useMemo(() => pending.filter(aiReviewShouldHome).length, [pending])
   // 一致 = 队列总数 - 有分歧 - 等你归位（夹 0，同时占两个桶的极少数图不能报负数）
   const agreeCount = Math.max(0, pending.length - diffCount - homeCount)
+
+  // 精简模式（用户 10-20）：没有“结论待确认”这一环，复核结果落库即自动采纳归位。
+  // 常态由 store 在复审结束那一刻收尾；这里兜住“结果早已落库、但本轮运行态已丢失”的情况
+  //（重启软件、跑完后才切到精简、或从别的栏切回本栏）——否则面板会一直盖住列表，连图都点不了。
+  // 瑕疵片也要兜（用户 10-20 补充）：只采纳本栏结论，不像待确认那样顺手把画质存疑图往里归。
+  const slimSettleTried = useRef(false)
+  useEffect(() => {
+    if (!slim || slimSettleTried.current) return
+    if (activeCategory !== 'review' && activeCategory !== 'flaws') return
+    if (running || settling || !pending.length) return
+    // 只认整批一次：清不掉的留在本栏等人工，不反复重试。
+    // forceHome=true 与精简口径一致：待确认里的画面模糊/曝光异常直接算瑕疵，归入瑕疵片。
+    slimSettleTried.current = true
+    const sc = activeCategory === 'flaws' ? 'flaws' : 'review'
+    void settleSlim(sc === 'review', sc)
+  }, [slim, activeCategory, running, settling, pending.length, settleSlim])
 
   // 进入对比时定位第一张；被处理/跳过的图离开队列 → 顺位到下一张，队列空则收起对比
   useEffect(() => {
@@ -356,7 +374,8 @@ export default function AiReviewModal(): JSX.Element | null {
 
   // —— 2) 待确认结论的居中面板（盖内容区、点背景不关，只能选按钮；“稍后处理”收起后由页内复核条重新唤起）
   // 不以 phase==='done' 为条件：重启软件后进度态丢失，但库里的结论仍待确认，入口必须还能把面板打开 ——
-  if (pending.length > 0 && !dismissed) {
+  // 精简模式除外（用户 10-20）：结论自动采纳归位，没有要人拍板的东西，这个面板一弹就挡住列表，不能出现。
+  if (!slim && pending.length > 0 && !dismissed) {
     return (
       <div className="absolute inset-0 z-[64] flex items-center justify-center bg-black/70 p-4">
         <div className="w-full max-w-xl rounded-xl border border-line bg-panel shadow-2xl fade-in">

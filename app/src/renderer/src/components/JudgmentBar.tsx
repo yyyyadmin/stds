@@ -15,6 +15,8 @@ import { createPortal } from 'react-dom'
 import { useStore } from '../store'
 import { useOutsideClose } from './useOutsideClose'
 import {
+  CAT_FLAWS,
+  CAT_LIBRARY,
   CAT_REVIEW,
   CAT_TRASH,
   DEFAULT_TIER_NAMES,
@@ -41,6 +43,9 @@ export default function JudgmentBar({
   const tierNames = useStore((s) => s.settings.tierNames) ?? DEFAULT_TIER_NAMES
   const openTagManager = useStore((s) => s.openTagManager)
   const openReviewPanel = useStore((s) => s.openReviewPanel)
+  // 精简模式（用户 2026-10-20）：大图右栏同步成两个直接动作，不再有选档/废弃库/重判/标签管理
+  const slim = useStore((s) => s.settings.uiMode === 'slim')
+  const activeCategory = useStore((s) => s.activeCategory)
   const [panel, setPanel] = useState<'none' | 'trash' | 'tier'>('none')
   const anchorRef = useRef<HTMLDivElement>(null)
   const trashBtnRef = useRef<HTMLButtonElement>(null)
@@ -84,6 +89,33 @@ export default function JudgmentBar({
   )
 
   const btnPad = size === 'lg' ? 'px-3 py-2.5 text-sm' : 'py-1 text-xs'
+
+  // 精简模式：只留「移入瑕疵片 / 移入交付库」两个直接动作；
+  // 当前就在该分类里时隐藏对应那一枚，避免点了个空动作
+  if (slim) {
+    return (
+      <div className="flex gap-2">
+        {activeCategory !== CAT_FLAWS && (
+          <button
+            className={`btn flex-1 whitespace-nowrap ${btnPad} bg-orange-500 hover:bg-orange-600 text-white border-transparent font-medium`}
+            title="把这张移入【瑕疵片】：不参与导出、不进交付库（之后可在瑕疵片里再移回交付库）"
+            onClick={() => void moveIds([img.id], CAT_FLAWS)}
+          >
+            ✗ 移入瑕疵片
+          </button>
+        )}
+        {activeCategory !== CAT_LIBRARY && (
+          <button
+            className={`btn flex-1 whitespace-nowrap ${btnPad} bg-emerald-700 hover:bg-emerald-600 text-white border-transparent font-medium`}
+            title="把这张移入【交付库】：清除闭眼/模糊/曝光等瑕疵标签，参与导出"
+            onClick={() => void moveIds([img.id], CAT_LIBRARY)}
+          >
+            ✓ 移入交付库
+          </button>
+        )}
+      </div>
+    )
+  }
 
   // D2 §8：待确认语境（中置信瑕疵派生或手动/程序停泊）换成三按钮组：废弃库 / 好图→交付库 /
   // 此判定错误（重判面板）。图去别的相册一律拖左侧栏，这里不再摆“移动到”。
