@@ -1,6 +1,6 @@
 {
   "name": "screener-master",
-  "version": "2.0.104",
+  "version": "2.0.105",
   "description": "万象筛图 - 面向摄影行业的本地AI筛片桌面软件",
   "main": "./out/main/index.js",
   "author": "万象筛图团队",
