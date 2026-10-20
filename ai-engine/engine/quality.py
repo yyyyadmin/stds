@@ -74,6 +74,21 @@ def blur_score(bgr, faces):
     conf = 0.95 * _sigmoid((blur_ratio - center) / 0.08)
     if face_var is not None and face_var > 30.0:
         conf = min(conf, 0.50)  # 主体清晰（背景虚化）：封顶只进待确认，不直接判模糊
+    # ---- 整幅运动糊兜底分支（修 1.jpg 类漏判）----
+    # 分块法对"相机抖动把整幅拖影"是反向失效的：拖影是高对比边缘，块方差 >25 不被计为糊块
+    # （实测 1.jpg 只数出 3/16 糊块=19%），且清晰片的暗背景块反而数出更多糊块。运动糊的本质
+    # 签名是"有方向的拖影"——梯度方向高度集中(相干度高)；而艺术柔焦/失焦是各向同性软(相干度低)、
+    # 背景虚化有清晰主体。故本分支要求五个条件同时成立才判糊，任一不满足即不触发（保守零误伤）：
+    #   ① 画面有内容(detail_blocks≥12) ② 无清晰主体(face_var 为空或≤60) ③ 全图偏软(full_var)
+    #   ④ FFT 高频占比低(hp) ⑤ 梯度相干度高(coh)——这条是关键闸门，把柔焦/暗场/线性构图全排除。
+    if detail_blocks >= 12 and (face_var is None or face_var <= 60.0):
+        hp = _highpass_ratio(gray.astype(np.float32))
+        coh = _coherence(gray)
+        gate_var = _sigmoid((140.0 - full_var) / 22.0)   # 全图方差越低越像糊（1.jpg=107→0.82）
+        gate_hp = _sigmoid((0.58 - hp) / 0.02)            # 高频越少越像糊（1.jpg hp=0.531→0.92）
+        gate_coh = _sigmoid((coh - 0.50) / 0.04)         # 拖影方向越一致越像运动糊（1.jpg coh=0.598→0.92；柔焦百合 coh=0.026→~0）
+        soft_conf = 0.95 * min(gate_var, gate_hp, gate_coh)
+        conf = max(conf, soft_conf)
     conf = float(np.clip(conf, 0, 0.99))
     return conf, "模糊面积占比 %.0f%%(%d/%d块) 全图方差 %.0f 脸区方差 %s" % (
         blur_ratio * 100.0, blurry_blocks, detail_blocks, full_var,
@@ -90,6 +105,18 @@ def _highpass_ratio(gray):
     center = ((yy - cy) ** 2 + (xx - cx) ** 2) <= r * r
     total = mag.sum() + 1e-6
     return float((mag[~center].sum()) / total)
+
+
+def _coherence(gray):
+    """梯度相干度（结构张量主方向一致性），0~1。运动糊把边缘拉成同向拖影 → 高；
+    散景/失焦/艺术柔焦是各向同性软 → 低；清晰片纹理方向分散 → 低。只反映"方向"不反映
+    "清不清"，故须与全图方差/高频占比联合使用。"""
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    Jxx = float((gx * gx).mean())
+    Jyy = float((gy * gy).mean())
+    Jxy = float((gx * gy).mean())
+    return float(np.sqrt((Jxx - Jyy) ** 2 + 4 * Jxy * Jxy) / (Jxx + Jyy + 1e-6))
 
 
 # ---------- 曝光异常 ----------
