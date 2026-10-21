@@ -439,7 +439,17 @@ export function setDimTag(id: number, dim: DimensionKey, tag: DimResult | null):
   if (!r) return
   const tags = { ...r.tags }
   if (tag) tags[dim] = tag
-  else delete tags[dim]
+  else if (tags[dim] && !(PERSON_DIMS as string[]).includes(dim)) {
+    // v2.0.112：用户手动删掉一个非人数维度的标签 = 人的否决，必须活过重筛。
+    // 直接 delete 会让重扫把同一个误判原样加回来（实测：被误标闭眼的图从瑕疵视图拖走后，
+    // 重扫复活，用户被迫每次重扫都重收拾一遍）。留一条 level:'low' 的“已否决”占位标记：
+    //   · level:'low' 在任何判定里都等同于“没有”——flawLevel/scoreTier/computeCategory 与
+    //     全部 UI 渲染都按 `t.level !== 'low'` 过滤，用户看不见它，导出门禁也不受影响；
+    //   · method:'user' 会被 scanner.handleResult 的“人工标注必须活过重筛”保住，引擎不再覆盖；
+    //   · applyRescanReset 非废弃行的 kept 只留 method==='user'，占位标记也能活过重扫前置归位。
+    // 人数维度不留占位标记：那是主分类的来源，用户误删或想让它重判时应交回 AI。
+    tags[dim] = { confidence: 0, level: 'low', reason: '用户手动排除', method: 'user', taggedAt: Date.now() }
+  } else delete tags[dim]
   // 写入人数维度时自动顶掉其它人数维度（互斥），调用方不必各自记这份清单。
   // 黑白照与人数正交，不在这组里，不受影响。
   enforcePersonMutex(tags)

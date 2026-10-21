@@ -121,7 +121,87 @@ def _coherence(gray):
 
 # ---------- 曝光异常 ----------
 
-def exposure_score(bgr):
+# MediaPipe FaceMesh 外轮廓（闭合环），用来把人脸从背景里抠出来
+_FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365,
+              379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93,
+              234, 127, 162, 21, 54, 103, 67, 109]
+
+
+def _face_region(shape, face):
+    """脸区掩膜：有 478 点用外轮廓，没有就退回脸框中央（避开头发和背景）。"""
+    h, w = shape
+    mask = np.zeros((h, w), np.uint8)
+    pts = (face.get("mp") or {}).get("landmarks")
+    if pts and len(pts) >= 468:
+        poly = np.array([pts[i] for i in _FACE_OVAL if i < len(pts)], np.float32)
+        if len(poly) >= 3:
+            cv2.fillPoly(mask, [cv2.convexHull(poly).astype(np.int32)], 1)
+    if int(mask.sum()) < 50:
+        x, y, fw, fh = [int(v) for v in face["box"]]
+        x0 = int(max(0, x + 0.18 * fw))
+        y0 = int(max(0, y + 0.22 * fh))
+        x1 = int(min(w, x + 0.82 * fw))
+        y1 = int(min(h, y + 0.80 * fh))
+        if x1 > x0 and y1 > y0:
+            mask[y0:y1, x0:x1] = 1
+    return mask.astype(bool)
+
+
+def _face_exposure(L, faces):
+    """主脸（面积最大）的亮度、死白/死黑占比。
+
+    死白/死黑取“够大的脸”（≥0.2% 图面积）里最严重的一张：迎光那张脸爆掉就说明整组
+    人像的曝光有问题，不能只看主脸。
+
+    v2.0.107：额外返回主脸的“脸轮廓掩膜占比”和“是否有 478 点”。脸框(box)大小会随输入
+    分辨率/压缩而变——同一张图原图直跑与 2000px 缓存（软件真实输入，竖拍图必经）能差 30%，
+    真目标 7G1A9045/9046 在真实口径下框占比只有 0.085/0.090，而车窗过曝误报 CHEN0035 是
+    0.112，用框占比判会判反。轮廓凸包面积是真实脸面积，与分辨率无关。"""
+    if not faces:
+        return None
+    h, w = L.shape
+    rows = []
+    boxes = sorted(faces, key=lambda f: -float(f["box"][2]) * float(f["box"][3]))[:6]
+    for f in boxes:
+        m = _face_region((h, w), f)
+        n = int(m.sum())
+        if n < 30:
+            continue
+        vals = L[m]
+        x, y, fw, fh = [float(v) for v in f["box"]]
+        has_mp = bool((f.get("mp") or {}).get("landmarks"))
+        rows.append((fw * fh / float(w * h), float(np.median(vals)),
+                     float((vals >= 95).mean()), float((vals <= 12).mean()),
+                     n / float(w * h), has_mp))
+    if not rows:
+        return None
+    rows.sort(key=lambda r: -r[0])
+    main = rows[0]
+    big = [r for r in rows if r[0] >= 0.002] or [main]
+    return (main[0], main[1], max(r[2] for r in big), max(r[3] for r in big),
+            main[4], main[5])
+
+
+def _white_blob(L):
+    """最大死白块（L≥97）的面积占比、块内纹理、外环亮度。"""
+    white = (L >= 97).astype(np.uint8)
+    white = cv2.morphologyEx(white, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(white, 8)
+    if num <= 1:
+        return 0.0, 0.0, 0.0
+    i = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    frac = float(stats[i, cv2.CC_STAT_AREA]) / float(L.size)
+    if frac < 0.01:
+        return frac, 0.0, 0.0
+    m = labels == i
+    gx = cv2.Sobel(L, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(L, cv2.CV_32F, 0, 1, ksize=3)
+    tex = float(cv2.magnitude(gx, gy)[m].mean())
+    ring = cv2.dilate(m.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool) & ~m
+    return frac, tex, float(L[ring].mean()) if ring.any() else 0.0
+
+
+def exposure_score(bgr, faces=None):
     """只判严重曝光异常（用户口径：灯光/太阳/光晕大面积影响整幅画面感才算）。
     v2.0.62 真实分布：旧规则"画面偏暗→欠曝"在婚礼暗环境里高置信 682 张中 452 张被用户
     判掉（TP/FP 亮度分布完全重叠不可分），本版彻底删掉"偏暗即曝光"：
@@ -129,12 +209,35 @@ def exposure_score(bgr):
       （高光≥~26%，亮度均值只做轻门控防死黑误入）——v2.0.74 新增：旧版只认①，
       婚礼现场大面积光晕+下半身深色（均值被拖到 ~73）整批漏判，实测零 FP 证据后放宽
     - 欠曝：只认死黑丢细节（均值≤~6 且暗部占比≥~90%），普通夜景/室内暗光不标
-    - 对比度塔缩：封顶 0.5，永不直接进分类"""
+    - 对比度塔缩：封顶 0.5，永不直接进分类
+
+    v2.0.75 婚礼跟拍补充（只动本维度；人脸/白块信号不被其他维度读取）——全库 3190 张
+    成品图校准，新增判据全部取在“正常白纱/夜景/暗调人像”分布之外：
+    - 过曝：①全图死白（L≥98 占≥20% 且均值≥70）；②逆光/大面积光晕（高光≥4%、均值 55~70，
+      且最大纯白块 1.5%~8%、块内纹理≤0.70、外环≥85）。纹理与块面积两门是分开“光晕”与
+      “白纱/白桌布/百合”的关键：光晕内部极平滑，织物/花瓣有明显褶边梯度。全库只命中 16 张，
+      其中 4 张是用户曝光标签帧的同场景连拍，无一张正常交付片；③特写里的小块纯白
+      （花冠/灯串：1.5%~3.5%、块内纹理≤1.2、外环≥85，且脸本身正常、主脸占画面≥10%）
+    - ③的“主脸≥10%”闸门是必须的：全库 3190 张实测，真事故 7G1A9045/9046 是 12.8%/13.1%，
+      下一个候选断崖跌到 8.8%，中景/群拍的白衬衫(CHEN9464)、闪光灯白纱(CHEN1088)、
+      秀禾服亮片反光(CHEN0012) 全在 5% 以下；不卡这道门，11 张命中里 9 张是误报
+    - 已知不做：人脸偏暗、整脸死白、无脸暗主体三条都试过并放弃——全库实测它们与
+      “用户保留下来的暗调人像 / 撒花盖脸 / 暗场艺术照”分布完全重叠（撒花瓣误报 10+ 张、
+      暗主体误报 7 张 library），收紧阈值会同时丢掉真问题，不是可调参数问题
+
+    v2.0.107 ③的闸门改为“脸轮廓占比”：旧版用脸框(box)占比≥0.10，而框大小随输入分辨率/
+    压缩波动很大——同一张图原图直跑与 2000px 缓存（竖拍图必经，EXIF 旋转才会产生缓存）
+    能差 30%。真实链路复测：真目标 7G1A9045/9046 的框占比只有 0.090/0.085（旧版 0.10 闸门
+    直接漏掉），而误报 CHEN0035（新娘抱上婚车，右下车窗大片过曝）是 0.112——旧闸门在
+    真实输入下恰好判反。改用 FaceMesh 478 点凸包占图面积（真实脸面积，与分辨率无关）：
+    真目标 0.081/0.083，有 478 点的下一名只有 0.032，断崖 2 倍，取几何中点 0.05 做闸门。
+    无 478 点时 _face_region 只能退回脸框中央一小块，面积不可比 → 保守不判（不标）。"""
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
     L = lab[:, :, 0].astype(np.float32) * (100.0 / 255.0)
     mean = float(L.mean())
     std = float(L.std())
     hi_ratio = float((L >= 96).mean())
+    hi98 = float((L >= 98).mean())
     lo_ratio = float((L <= 6).mean())
     over = _sigmoid((hi_ratio - 0.30) / 0.07) * _sigmoid((mean - 80) / 6)
     # 大面积光晕独立成判：爆掉像素≥~26% 就是"大面积"本身，不再要求全图极亮
@@ -145,9 +248,35 @@ def exposure_score(bgr):
     # (hi_ratio≈0) 且对比塔缩(std 低)"两门，只留真·死黑丢光废片。
     under = _sigmoid((3.0 - mean) / 1.0) * _sigmoid((0.01 - hi_ratio) / 0.005) * _sigmoid((4.0 - std) / 1.5)
     flat = _sigmoid((6.5 - std) / 2.0) * 0.5  # 对比度塔缩只作参考，封顶 0.5 低于各档 mid 阈值附近
+
+    notes = []
+    if hi98 >= 0.20 and mean >= 70:
+        over = max(over, 0.92)
+        notes.append("全图死白%.0f%%" % (hi98 * 100))
+    elif hi98 >= 0.04 and 55.0 <= mean <= 70.0:
+        # 逆光/光晕：必须同时满足“块够平滑 + 块不铺满画面”，否则白纱/白桌布/百合会混进来
+        frac, tex, ring = _white_blob(L)
+        if 0.015 <= frac <= 0.08 and tex <= 0.70 and ring >= 85:
+            over = max(over, 0.66)
+            notes.append("逆光光晕%.0f%%" % (hi98 * 100))
+
+    face = _face_exposure(L, faces or [])
+    if face:
+        _face_area, face_med, _face_blow, _face_black, face_mask, face_mp = face
+        # 特写里的小块纯白（头花/灯串）：脸本身正常也要标。必须是真特写（脸轮廓≥5% 画面），
+        # 否则白衬衫、闪光灯白纱、亮片反光都会被当成“头花”——实测它们全在 3.3% 以下。
+        if face_mp and face_mask >= 0.05 and hi98 >= 0.015 and face_med >= 45 and mean <= 40:
+            frac, tex, ring = _white_blob(L)
+            if 0.015 <= frac <= 0.035 and tex <= 1.2 and ring >= 85:
+                over = max(over, 0.72)
+                notes.append("特写死白块%.1f%%" % (frac * 100))
+
     conf = float(np.clip(max(over, under, flat), 0, 0.99))
     direction = "过曝" if over == max(over, under, flat) else ("欠曝" if under == max(over, under, flat) else "对比度异常")
-    return conf, "亮度均值 %.1f std %.1f 高光 %.2f 暗部 %.2f -> %s" % (mean, std, hi_ratio, lo_ratio, direction)
+    reason = "亮度均值 %.1f std %.1f 高光 %.2f 暗部 %.2f -> %s" % (mean, std, hi_ratio, lo_ratio, direction)
+    if notes:
+        reason += "（%s）" % "/".join(notes)
+    return conf, reason
 
 
 def mean_brightness(bgr):
@@ -238,6 +367,8 @@ def half_head_score(bgr_shape, faces, upper_bodies, scale, person_boxes=None):
     FACE_MAX_SUBJECT = 0.28  # 脸占图高超过此值=近景特写：贴边多为构图（框到边≠头被裁）。
                              # v2.0.64 真值：用户删除的半截头误检脸占比中位 30%，保留的判对中位 18%，
                              # 分离清晰——大脸特写贴边降为待确认，不直接判半截头（不改动贴边主模型）。
+    FACE_TRUST = 0.72        # 无 478 关键点确认的脸，YuNet 分数低于此视为不可信（多为运动糊块/花束/手被误当脸）
+    UNTRUSTED_CAP = 0.60     # 不可信脸能把半截头顶到的上限（压在 mid 线 0.7 以下 → 落 low，不算半截头）
     reasons = []
     conf = 0.0
 
@@ -271,6 +402,14 @@ def half_head_score(bgr_shape, faces, upper_bodies, scale, person_boxes=None):
             continue
         edge_dist = min(x, y, 1 - x - bw, 1 - y - bh)  # 到最近边缘距离（贴边时 < EDGE_MARGIN）
         crop_conf = max(0.0, min(0.98, 1.0 - edge_dist / (EDGE_MARGIN * 3)))
+        # 假脸闸门（v2.0.112，用户实测 7G1A9042 / 7G1A7410）：一张脸若【没有 478 关键点确认】
+        # 且【YuNet 弱检出（score<FACE_TRUST）】，它多半是运动糊块 / 花束 / 手被误认成的"脸"
+        # （7G1A9042 左下角那张 score=0.669、与真新娘 IoU=0 的假脸把半截头顶到 0.98），
+        # 或躺姿大特写里额头刚擦到边的检测噪声（7G1A7410 score=0.646）。这类不可信脸不足以单独
+        # 把照片判成半截头，压到 mid 线以下。真被裁的边缘头（1083=0.898/9657=0.891/1073=0.812…
+        # 及一切有 MediaPipe 关键点确认的裁脸）不受此闸门影响，照常判。
+        if not mp.get("bbox") and float(f.get("score", 0)) < FACE_TRUST:
+            crop_conf = min(crop_conf, UNTRUSTED_CAP)
         if bh > FACE_MAX_SUBJECT and crop_conf > 0.78:
             crop_conf = 0.78  # 大脸特写贴边：封顶到待确认区（mid），不直接标高置信半截头
         sides = []
@@ -284,9 +423,11 @@ def half_head_score(bgr_shape, faces, upper_bodies, scale, person_boxes=None):
             sides.append("下/下巴")
         bump(crop_conf, "头部贴边出框（%s），脸框占图高%.0f%%" % ("/".join(sides) or "边缘", bh * 100))
     if not faces and upper_bodies:
-        # 有身子没头：躯干框上缘必须在画面上部才说明是"人头出框"
+        # 有身子没头：躯干框上缘必须贴着画幅顶边才说明“人头出框”（ENGINE_SIG 13 收紧）。
+        # 旧版只要框落在上半幅（y<50%）就给 0.88，实测喜字贴画/花艺背景板/婚车车头上误检的
+        # 躯干矩（y=14%/19%/48%）全被当成“检出躯干但无完整头部”，与人数维度一起误判。
         for ub in upper_bodies:
-            if ub[1] < H * 0.5:
+            if ub[1] <= H * 0.02:
                 bump(0.88, "检出躯干但无完整头部")
                 break
     # 躯干多于人脸：部分人头被裁/未入镜

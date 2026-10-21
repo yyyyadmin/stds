@@ -19,6 +19,45 @@ _PERSON_LABEL = "person"      # COCO class 0
 # 合并护栏（v2.0.64）：两个框横向中心距 / 较小框宽 的上限。同一个人被拆开的框必然同列，
 # 不同的人（并排/拥抱/前后景站位）必然分列。
 _MERGE_MAX_DX_RATIO = 0.35
+# 整幅假人体框（ENGINE_SIG 13）：EfficientDet 会在特写花丛/织物上把“整张画面”当人
+# （实测 7G1A7833 百合：框 [0,0,836,1280]、占图 98%、score 0.637、全图零人脸 → 判单人照）。
+# 真人占满画幅时就算只拍到后脑/手，也不会给出“贴满四边”的低分整幅框。
+_BODY_WHOLE_AREA = 0.90
+_BODY_WHOLE_MIN_SCORE = 0.70
+# Haar 躯干框只在“贴着画幅边 + 够大”时才算“近景边缘人物”的证据（ENGINE_SIG 13）：
+# 旧版只要有 1 个躯干矩就判多人混合照 0.80，实测喜字贴画/花艺背景板/婚车车头全能被框住
+# （CHEN9260/1308/9412 三张零人体零人脸的无人物场景被自信误判成多人混合照）。
+_TORSO_EDGE_RATIO = 0.02   # 框边到画幅边 ≤ min(W,H) 的 2% 视为贴边
+_TORSO_MIN_H_RATIO = 0.08  # 躯干框高 ≥ 图高 8% 才算主体级，更小的框是纹理
+
+
+def drop_whole_frame_fp(bodies, face_count):
+    """剔除“整幅低分人体框”这种场景纹理误检（占图 ≥90% 且 score <0.70）。
+    只要检出过任意一张人脸就不剔除——人已被脸证实，整幅框也就不是孤证。
+    返回新的列表（不原地改），调用方据此重算人数。"""
+    if not bodies or face_count > 0:
+        return bodies
+    return [
+        b for b in bodies
+        if not (float(b.get("area_ratio") or 0) >= _BODY_WHOLE_AREA
+                and float(b.get("score") or 0) < _BODY_WHOLE_MIN_SCORE)
+    ]
+
+
+def near_edge_torso(upper_bodies, img_w, img_h):
+    """数出“贴着画幅边、够大”的 Haar 躯干框——只有这种才可能是近景边缘人物。
+    不贴边的小躯干矩（装饰物/花墙/车头）一律不算人。"""
+    n = 0
+    if img_w <= 0 or img_h <= 0:
+        return n
+    edge = _TORSO_EDGE_RATIO * min(img_w, img_h)
+    for ub in upper_bodies or []:
+        x, y, bw, bh = [float(v) for v in ub[:4]]
+        if bh < img_h * _TORSO_MIN_H_RATIO:
+            continue
+        if min(x, y, img_w - (x + bw), img_h - (y + bh)) <= edge:
+            n += 1
+    return n
 
 
 class PersonDetector:

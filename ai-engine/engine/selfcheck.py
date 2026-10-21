@@ -309,6 +309,29 @@ def run():
         out["skin_detail"] = "gray:%s blob:%s" % ((gray_why or "")[:40], (blob_why or "")[:40])
     except Exception as _sk:  # noqa: BLE001
         out["error"] = (out["error"] or "") + " |skin: %s: %s" % (type(_sk).__name__, _sk)
+    # --- v2.0.113 无人物场景被判人数分类的两道闸门（纯几何，不依赖模型/fixture）---
+    # 1) Haar 躯干框：装饰物/花墙/车头这种不贴边的小框不能算人（CHEN9260/1308/9412 就是被它
+    #    推成多人混合照 0.80）；只有贴画幅边且够大的躯干矩才当成“可能近景边缘有人”。
+    # 2) 整幅低分人体框：EfficientDet 会把特写花丛当“整张画面是一个人”（7G1A7833 百合：占图 98%、
+    #    score 0.637）；只要一张脸都没检到且分数 <0.70 就不算人，有脸时则保留。
+    try:
+        from .person import near_edge_torso, drop_whole_frame_fp
+        W, H = 1280, 853
+        deco = [[882, 117, 147, 120]]            # 画面中部的装饰误检 → 0
+        edge_big = [[0, 300, 200, 300]]          # 贴左边、高占 35% → 1
+        edge_small = [[1260, 700, 20, 60]]       # 贴右边但高只占 7% → 0
+        torso_n = (near_edge_torso(deco, W, H), near_edge_torso(edge_big, W, H), near_edge_torso(edge_small, W, H))
+        out["torso_gate_detail"] = "deco->%d edge->%d tiny->%d" % torso_n
+        whole = [{"box": [0, 0, 836, 1280], "score": 0.637, "h_ratio": 1.0, "area_ratio": 0.98, "filtered": True}]
+        keep = [{"box": [100, 100, 400, 600], "score": 0.90, "h_ratio": 0.70, "area_ratio": 0.30, "filtered": True}]
+        dropped = drop_whole_frame_fp(whole, 0)
+        kept_with_face = drop_whole_frame_fp(whole, 1)
+        kept_normal = drop_whole_frame_fp(keep, 0)
+        out["whole_frame_detail"] = "drop->%d face->%d normal->%d" % (len(dropped), len(kept_with_face), len(kept_normal))
+        out["person_gate_ok"] = bool(torso_n == (0, 1, 0) and len(dropped) == 0 and len(kept_with_face) == 1 and len(kept_normal) == 1)
+    except Exception as _pg:  # noqa: BLE001
+        out["person_gate_ok"] = False
+        out["error"] = (out["error"] or "") + " |person-gate: %s: %s" % (type(_pg).__name__, _pg)
     # --- v2.0.65 正面主体判定无模型单测（用户拍板 2026-10-11：合照只数正面主体）---
     # 造六张纯几何脸：正脸/侧脸/低头/后脑（双眼重合）/半截头（贴顶）/小脸（<3% 图高），
     # 只有正脸入选才算通过——侧脸/低头/后脑被误入会虚增合照，正脸被误杀会漏合照。

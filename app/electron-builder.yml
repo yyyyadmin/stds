@@ -22,10 +22,13 @@ extraResources:
   - from: node_modules/sql.js/dist/sql-wasm.wasm
     to: sql-wasm.wasm
   # Python AI 引擎源码（用户自行 pip 安装依赖后可用；或配合 build-engine 脚本打成 exe 后替换此目录）
+  # 只带引擎本体：main.py + engine 包。根目录其余 .py 全是一次性取证/校准脚本（已进 .gitignore），
+  # 之前用 '**/*.py' 把它们一起打进了客户安装包。
   - from: ../ai-engine
     to: ai-engine
     filter:
-      - '**/*.py'
+      - 'engine/**/*.py'
+      - 'main.py'
       - 'requirements.txt'
       - 'models/README*'
 

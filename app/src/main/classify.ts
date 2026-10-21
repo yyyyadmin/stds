@@ -58,11 +58,13 @@ export function gradeDims(
  * 瑕疵（闭眼/模糊/表情崩坏…）不再充当主分类，只作为标签驱动导出闸门与瑕疵片/待确认虚视图。
  */
 export function computeCategory(tags: ImageRecord['tags'], settings: AppSettings, current?: ImageRecord): CategoryKey {
-  // 用户手动放置的状态优先（废弃库/重复废弃桶/自定义/手动停泊待确认）——AI 不拉回、不改写
-  if (current?.categoryBy === 'user') {
-    if (isTrashLike(current.category) || current.category === CAT_REVIEW || current.category.startsWith('custom:')) {
-      return current.category
-    }
+  // 用户手动放置的位置优先——AI 不拉回、不改写。
+  // v2.0.112：保护范围从“废弃库/待确认/自定义”扩到“一切非人数类”。原先漏掉的是交付库和瑕疵片：
+  // 用户把误标闭眼的图从瑕疵视图拖回交付库（categoryBy='user'），重扫后这里找不到人数标签
+  // 就把它扔进待确认——图从“我确认过的好片”里凭空消失，用户只能每次重扫后重收拾一遍。
+  // 人数类仍交 AI 算：那是主分类，标签侧有 method:'user' 保活，两处口径不会打架。
+  if (current?.categoryBy === 'user' && !(PERSON_DIMS as string[]).includes(current.category)) {
+    return current.category
   }
   // 主分类恒为人数：从互斥的人数四维里取唯一非 low 的标签（PERSON_DIMS 顺序即并列优先序）
   for (const dim of PERSON_DIMS) {
